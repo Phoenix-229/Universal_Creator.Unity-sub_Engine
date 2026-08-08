@@ -168,6 +168,15 @@ namespace UniverseCreator.TerrainSystem
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
 
+        public bool IsGenerating { get { return activeWorkers > 0 || pending.Count > 0; } }
+        
+        public float GetProgress()
+        {
+            if (pool.Count == 0) return 1f;
+            int done = pool.Count - (activeWorkers + pending.Count);
+            return (float)done / pool.Count;
+        }
+
         // =====================================================================
         //  CARVES
         //
