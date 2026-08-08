@@ -1,0 +1,241 @@
+/* -----------------------------------------------------------------------------
+   Universe Creator - node graph styling
+
+   The grid variables belong to GridBackground, which draws in content space.
+   That is what keeps the grid locked to the nodes while zooming; the old IMGUI
+   canvas drew the grid in screen space, which is why it appeared to snap.
+   ----------------------------------------------------------------------------- */
+
+GridBackground {
+    --grid-background-color: #232323;
+    --line-color: rgba(190, 195, 190, 0.08);
+    --thick-line-color: rgba(190, 195, 190, 0.18);
+    --spacing: 24;
+}
+
+/* ---------------------------------------------------------------- node frame */
+
+.uc-node {
+    min-width: 210px;
+}
+
+.uc-node #node-border {
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: #101010;
+    overflow: hidden;
+}
+
+.uc-node #contents,
+.uc-node #top,
+.uc-node #collapsible-area {
+    background-color: #1d1d1d;
+}
+
+.uc-node:hover #node-border {
+    border-color: #5a5a5a;
+}
+
+.uc-node:selected #node-border {
+    border-color: #ffa528;
+    border-width: 2px;
+}
+
+/* ---------------------------------------------------------------- title bar */
+
+.uc-node #title {
+    padding-top: 5px;
+    padding-bottom: 5px;
+    padding-left: 7px;
+    padding-right: 7px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.45);
+}
+
+.uc-node #title-label {
+    -unity-font-style: bold;
+    font-size: 12px;
+    color: #f2f2f2;
+    margin-left: 4px;
+    margin-right: 6px;
+}
+
+.uc-node-icon {
+    font-size: 15px;
+    -unity-text-align: middle-center;
+    min-width: 20px;
+    margin-right: 2px;
+}
+
+/* ------------------------------------------------------------------- ports */
+
+.uc-node #input,
+.uc-node #output {
+    background-color: #1d1d1d;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+
+.uc-node .port {
+    height: 20px;
+}
+
+.uc-node .port > Label {
+    font-size: 11px;
+    color: #c8c8c8;
+}
+
+/* ------------------------------------------------------- body / parameters */
+
+.uc-node #extension {
+    background-color: #1d1d1d;
+    padding-top: 4px;
+    padding-bottom: 6px;
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+/* Parameters live here, inside the node, rather than in a side pane. */
+.uc-params {
+    background-color: #1d1d1d;
+}
+
+.uc-params FloatField,
+.uc-params IntegerField,
+.uc-params Toggle,
+.uc-params EnumField,
+.uc-params TextField,
+.uc-params ObjectField,
+.uc-params CurveField,
+.uc-params Vector2Field,
+.uc-params ColorField,
+.uc-params Slider,
+.uc-params SliderInt {
+    margin-top: 1px;
+    margin-bottom: 1px;
+}
+
+.uc-params Label {
+    font-size: 11px;
+    min-width: 74px;
+    color: #b9b9b9;
+}
+
+.uc-params CurveField {
+    height: 46px;
+    margin-top: 3px;
+    margin-bottom: 3px;
+}
+
+.uc-advanced {
+    margin-top: 4px;
+    border-top-width: 1px;
+    border-top-color: rgba(255, 255, 255, 0.07);
+    padding-top: 2px;
+}
+
+.uc-advanced > Toggle Label {
+    font-size: 11px;
+    -unity-font-style: bold;
+    color: #9a9a9a;
+}
+
+/* ------------------------------------------------------------------ states */
+
+.uc-bypassed #title {
+    opacity: 0.45;
+}
+
+.uc-bypassed #node-border {
+    border-color: #6d6d6d;
+}
+
+.uc-generating #node-border {
+    border-color: #35b0ff;
+    border-width: 2px;
+}
+
+.uc-error #node-border {
+    border-color: #ff4040;
+    border-width: 2px;
+}
+
+.uc-error #title {
+    background-color: #7a1616;
+}
+
+/* A terminal Output node is the one that actually writes the terrain, so it
+   reads heavier than the rest of the graph. */
+.uc-terminal #node-border {
+    border-color: #d8b23a;
+}
+
+/* --------------------------------------------------------------- comments */
+
+.uc-group {
+    background-color: rgba(60, 60, 60, 0.35);
+    border-radius: 6px;
+}
+
+.uc-group > #header Label {
+    -unity-font-style: bold;
+    font-size: 13px;
+}
+
+/* Comment backdrop - UCCommentGroupView. position:absolute is required, not
+   cosmetic: SetPosition writes style.left/top, which a relatively positioned
+   element ignores, and the frame would then stack in layout order instead of
+   sitting where it was dragged. The tint itself is applied from the node's own
+   colour in C#, so no background-color is set here. */
+
+.uc-comment-group {
+    position: absolute;
+    border-radius: 6px;
+    padding: 6px;
+    min-width: 160px;
+    min-height: 90px;
+}
+
+/* No :selected rule here on purpose. The border colour is written inline by
+   ApplyTint in C#, and inline styles outrank stylesheet rules, so a rule here
+   would never apply. UCCommentGroupView.OnSelected drives the highlight. */
+
+.uc-comment-title {
+    -unity-font-style: bold;
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+/* The text fields are transparent so the node's tint reads through them as one
+   flat frame rather than a panel holding two grey input boxes. */
+.uc-comment-title > TextInput,
+.uc-comment-body > TextInput {
+    background-color: rgba(0, 0, 0, 0);
+    border-color: rgba(0, 0, 0, 0);
+}
+
+.uc-comment-body {
+    flex-grow: 1;
+    white-space: normal;
+}
+
+.uc-comment-body > TextInput {
+    -unity-text-align: upper-left;
+}
+
+/* Bottom-right grip. Anchored to the corner so it tracks any size, and kept
+   above the text fields so a drag there resizes rather than placing a caret. */
+.uc-comment-resizer {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 14px;
+    height: 14px;
+    background-color: rgba(255, 255, 255, 0.25);
+    border-top-left-radius: 6px;
+    cursor: resize-up-left;
+}
+
+.uc-comment-resizer:hover {
+    background-color: rgba(255, 255, 255, 0.55);
+}

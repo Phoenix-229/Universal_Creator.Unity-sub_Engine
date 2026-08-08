@@ -1,0 +1,197 @@
+// -----------------------------------------------------------------------------
+//  Universe Creator - Procedural Content Generation Toolkit
+//  Module 1: Terrain Core
+//
+//  File:    GraphAssetUtility.cs
+//  Purpose: Creates, saves, and opens Graph assets. Single place that knows how a
+//           graph reaches disk, so the inspector, the GameObject menu, the Project
+//           Settings page and the Assets/Create menu all behave identically.
+// -----------------------------------------------------------------------------
+
+using System.IO;
+using UnityEditor;
+using UnityEditor.Callbacks;
+using UnityEngine;
+using UniverseCreator.Nodes;
+using UniverseCreator.Editor.Windows;
+
+namespace UniverseCreator.Editor.Utilities
+{
+    public static class GraphAssetUtility
+    {
+        /// <summary>Folder new graphs land in unless the caller says otherwise.</summary>
+        public const string DefaultFolder = "Assets/UniverseCreator/Graphs";
+
+        // =====================================================================
+        //  CREATE
+        // =====================================================================
+
+        /// <summary>
+        /// Builds a template, writes it to a unique path under DefaultFolder, and
+        /// returns the saved asset. Returns null only if the write failed.
+        /// </summary>
+        public static Graph CreateAsset(GraphTemplates.Template template, string fileName = null)
+        {
+            Graph graph = GraphTemplates.Create(template);
+            if (graph == null) return null;
+
+            if (string.IsNullOrEmpty(fileName))
+            {
+                int index = (int)template;
+                fileName = (index >= 0 && index < GraphTemplates.FileNames.Length)
+                    ? GraphTemplates.FileNames[index]
+                    : "New Graph";
+            }
+
+            return SaveAsset(graph, DefaultFolder, fileName);
+        }
+
+        /// <summary>
+        /// Writes an in-memory graph to disk. The name is uniquified, so calling
+        /// this twice gives "New Graph.asset" and "New Graph 1.asset" rather than
+        /// silently overwriting the first one.
+        /// </summary>
+        public static Graph SaveAsset(Graph graph, string folder, string fileName)
+        {
+            if (graph == null) return null;
+
+            EnsureFolder(folder);
+
+            string safeName = SanitizeFileName(fileName);
+            string path = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + safeName + ".asset");
+
+            AssetDatabase.CreateAsset(graph, path);
+            AssetDatabase.SaveAssets();
+            AssetDatabase.ImportAsset(path);
+
+            // Re-load rather than reusing the instance: CreateAsset rebinds the
+            // managed object to the file, and the loaded reference is the one whose
+            // GUID the object picker and prefab serialisation will agree on.
+            return AssetDatabase.LoadAssetAtPath<Graph>(path);
+        }
+
+        /// <summary>Flags a graph dirty and flushes it. Call after editing nodes.</summary>
+        public static void MarkDirty(Graph graph)
+        {
+            if (graph == null) return;
+            EditorUtility.SetDirty(graph);
+        }
+
+        /// <summary>Writes every pending graph edit to disk.</summary>
+        public static void SavePending()
+        {
+            AssetDatabase.SaveAssets();
+        }
+
+        // =====================================================================
+        //  OPEN
+        // =====================================================================
+
+        /// <summary>
+        /// Opens (or focuses) the Node Graph window and loads the given graph. This
+        /// is the single entry point every "show me this graph" path routes through.
+        /// </summary>
+        public static NodeGraphWindow Open(Graph graph)
+        {
+            NodeGraphWindow window = EditorWindow.GetWindow<NodeGraphWindow>("Universe Creator - Node Graph");
+            window.minSize = new Vector2(800, 600);
+            window.SetGraph(graph);
+            window.Show();
+            window.Focus();
+            return window;
+        }
+
+        /// <summary>Creates a template asset, selects it in the Project window, and opens it.</summary>
+        public static Graph CreateAndOpen(GraphTemplates.Template template, string fileName = null)
+        {
+            Graph graph = CreateAsset(template, fileName);
+            if (graph == null) return null;
+
+            EditorGUIUtility.PingObject(graph);
+            Open(graph);
+            return graph;
+        }
+
+        // Double-clicking a .asset in the Project window routes here. Returning true
+        // tells Unity we handled it, which suppresses the default inspector-ping.
+        //
+        // The (int instanceID, int line) signature is the one [OnOpenAsset] is
+        // guaranteed to invoke, so it stays. Unity 6.5 is mid-migration from int
+        // ids to EntityId: InstanceIDToObject and GetAssetPath(int) are already
+        // obsolete-as-error, while EntityIdToObject still accepts our int through an
+        // implicit conversion that only warns (CS0618). We silence that one line
+        // rather than adopt an unproven EntityId-parameter overload that, if the
+        // reflection does not recognise it, would silently kill double-click.
+        [OnOpenAsset(1)]
+        private static bool OnOpenGraphAsset(int instanceID, int line)
+        {
+#pragma warning disable 618
+            Graph graph = EditorUtility.EntityIdToObject(instanceID) as Graph;
+#pragma warning restore 618
+            if (graph == null) return false;
+
+            Open(graph);
+            return true;
+        }
+
+        // =====================================================================
+        //  ASSETS/CREATE MENU
+        // =====================================================================
+
+        [MenuItem("Assets/Create/Universe Creator/Graph (Empty)", false, 300)]
+        private static void CreateEmptyGraphMenu()
+        {
+            CreateAndOpen(GraphTemplates.Template.Empty);
+        }
+
+        [MenuItem("Assets/Create/Universe Creator/Graph (Simple Terrain)", false, 301)]
+        private static void CreateSimpleTerrainGraphMenu()
+        {
+            CreateAndOpen(GraphTemplates.Template.SimpleTerrain);
+        }
+
+        // =====================================================================
+        //  HELPERS
+        // =====================================================================
+
+        /// <summary>
+        /// Creates a project folder and any missing parents. AssetDatabase has no
+        /// recursive create, so the path is walked one segment at a time.
+        /// </summary>
+        public static void EnsureFolder(string folder)
+        {
+            if (string.IsNullOrEmpty(folder)) return;
+            if (AssetDatabase.IsValidFolder(folder)) return;
+
+            string[] parts = folder.Replace('\\', '/').Split('/');
+            if (parts.Length == 0 || parts[0] != "Assets") return;
+
+            string current = "Assets";
+            for (int i = 1; i < parts.Length; i++)
+            {
+                if (string.IsNullOrEmpty(parts[i])) continue;
+
+                string next = current + "/" + parts[i];
+                if (!AssetDatabase.IsValidFolder(next))
+                    AssetDatabase.CreateFolder(current, parts[i]);
+
+                current = next;
+            }
+        }
+
+        // Strips characters the OS will reject so a user-typed graph name cannot
+        // produce an unwritable path.
+        private static string SanitizeFileName(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "New Graph";
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+            string result = raw;
+            for (int i = 0; i < invalid.Length; i++)
+                result = result.Replace(invalid[i], '_');
+
+            result = result.Trim();
+            return string.IsNullOrEmpty(result) ? "New Graph" : result;
+        }
+    }
+}
