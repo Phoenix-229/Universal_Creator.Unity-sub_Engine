@@ -53,6 +53,63 @@ namespace UniverseCreator.Editor.Inspectors
         private UniverseCreatorObject ucTarget;
         private bool valueChanged;
 
+        private int chunkProgressId = -1;
+        private bool hasAutoCleared = false;
+
+        private void OnEnable()
+        {
+            EditorApplication.update += OnEditorUpdate;
+        }
+
+        private void OnDisable()
+        {
+            EditorApplication.update -= OnEditorUpdate;
+            if (chunkProgressId != -1)
+            {
+                if (Progress.Exists(chunkProgressId)) Progress.Finish(chunkProgressId, Progress.Status.Canceled);
+                chunkProgressId = -1;
+            }
+        }
+
+        private void OnEditorUpdate()
+        {
+            UniverseCreatorObject uc = target as UniverseCreatorObject;
+            if (uc == null) return;
+
+            // Auto-clear once to fix corrupted layers from previous bugs
+            if (!hasAutoCleared && uc.overrideLayer != null)
+            {
+                uc.ClearManualEdits();
+                Debug.Log("[Universe Creator] Auto-cleared manual edits.");
+                hasAutoCleared = true;
+            }
+
+            ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
+            if (cm != null)
+            {
+                bool isGenerating = cm.IsGenerating;
+                
+                if (isGenerating && chunkProgressId == -1)
+                {
+                    chunkProgressId = Progress.Start("Universe Creator", "Generating chunks...", Progress.Options.None);
+                }
+                else if (!isGenerating && chunkProgressId != -1)
+                {
+                    if (Progress.Exists(chunkProgressId)) Progress.Finish(chunkProgressId, Progress.Status.Succeeded);
+                    chunkProgressId = -1;
+                }
+                
+                if (isGenerating && chunkProgressId != -1)
+                {
+                    Progress.Report(chunkProgressId, cm.GetProgress(), "Generating chunks...");
+                }
+
+                if (cm.PumpCompleted()) Repaint();
+            }
+
+            if (uc.IsGenerating) Repaint();
+        }
+
         public override void OnInspectorGUI()
         {
             UniverseCreatorObject uc = (UniverseCreatorObject)target;
