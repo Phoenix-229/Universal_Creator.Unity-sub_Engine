@@ -79,14 +79,6 @@ namespace UniverseCreator.Editor.Inspectors
             ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
             if (cm != null)
             {
-                // Auto-clear once to fix corrupted layers from previous bugs
-                if (!hasAutoCleared && uc.overrideLayer != null)
-                {
-                    cm.ClearManualEdits();
-                    Debug.Log("[Universe Creator] Auto-cleared manual edits.");
-                    hasAutoCleared = true;
-                }
-
                 bool isGenerating = cm.IsGenerating;
                 
                 if (isGenerating && chunkProgressId == -1)
@@ -795,11 +787,11 @@ namespace UniverseCreator.Editor.Inspectors
             uc.wavingGrassStrength = 0.5f;
             uc.wavingGrassAmount = 0.5f;
             uc.wavingGrassSpeed = 0.5f;
-            uc.wavingGrassTint = new Color(0.7f, 0.6f, 0.5f, 1f);
             uc.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbes;
 
             uc.ValidateSettings();
             EditorUtility.SetDirty(uc);
+            Regenerate(uc, "Reset Settings");
         }
 
         // Every regeneration path routes through here so the background progress
@@ -811,6 +803,7 @@ namespace UniverseCreator.Editor.Inspectors
         // hierarchy has no ChunkManager, so a bare root still previews.
         private void Regenerate(UniverseCreatorObject uc, string label)
         {
+            Debug.Log("[Universe Creator] Starting Generation: " + label);
             if (!uc.RebuildChunks()) return;
 
             // CurrentTask is only set by the single-tile fallback. The chunked path

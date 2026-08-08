@@ -452,10 +452,16 @@ namespace UniverseCreator.Editor.Inspectors
                 EditorGUILayout.BeginHorizontal();
 
                 if (UCInspectorUI.TintedButton("Rebuild All Cells", UCInspectorUI.ButtonBlue))
+                {
+                    Debug.Log("[Universe Creator] Rebuilding all cells...");
                     manager.RebuildAll();
+                }
 
                 if (UCInspectorUI.TintedButton("Cancel", UCInspectorUI.ButtonRed))
+                {
+                    Debug.Log("[Universe Creator] Generation cancelled.");
                     manager.CancelAll();
+                }
 
                 EditorGUILayout.EndHorizontal();
             }
@@ -472,11 +478,14 @@ namespace UniverseCreator.Editor.Inspectors
             if (UCInspectorUI.TintedButton("Capture Manual Edits", UCInspectorUI.ButtonAmber))
             {
                 int captured = manager.CaptureManualEdits();
-                Debug.Log("Universe Creator: captured " + captured + " sculpted samples.");
+                Debug.Log("[Universe Creator] Captured " + captured + " sculpted samples.");
             }
 
             if (UCInspectorUI.TintedButton("Clear Manual Edits", UCInspectorUI.ButtonRed))
+            {
+                Debug.Log("[Universe Creator] Manual edits cleared.");
                 manager.ClearManualEdits();
+            }
 
             EditorGUILayout.EndHorizontal();
 
@@ -488,11 +497,14 @@ namespace UniverseCreator.Editor.Inspectors
             if (UCInspectorUI.TintedButton("Push Terrain Settings To Cells", UCInspectorUI.ButtonBlue))
             {
                 int pushed = manager.SyncTerrainSettings(true);
-                Debug.Log("Universe Creator: pushed world Terrain Settings to " + pushed + " cells.");
+                Debug.Log("[Universe Creator] Pushed world Terrain Settings to " + pushed + " cells.");
             }
 
             if (UCInspectorUI.TintedButton("Clear All Tunnels", UCInspectorUI.ButtonRed))
+            {
+                Debug.Log("[Universe Creator] All tunnels cleared.");
                 manager.ClearAllCarves();
+            }
 
             EditorGUILayout.EndHorizontal();
 
