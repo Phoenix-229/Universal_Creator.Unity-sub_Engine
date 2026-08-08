@@ -488,13 +488,14 @@ namespace UniverseCreator.TerrainSystem
             foreach (Coord c in sortedCoords)
             {
                 Chunk chunkA = byCell[c];
-                if (chunkA == null || chunkA.terrain == null || chunkA.terrain.terrainData == null) continue;
+                if (chunkA == null || !chunkA.applied || chunkA.terrain == null || chunkA.terrain.terrainData == null) continue;
 
                 int res = chunkA.terrain.terrainData.heightmapResolution;
 
                 // --- RIGHT neighbour (c.x+1) ---
                 Chunk chunkR;
                 if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out chunkR)
+                    && chunkR.applied
                     && chunkR.terrain != null && chunkR.terrain.terrainData != null
                     && chunkR.terrain.terrainData.heightmapResolution == res)
                 {
@@ -513,6 +514,7 @@ namespace UniverseCreator.TerrainSystem
                 // --- TOP neighbour (c.z+1) ---
                 Chunk chunkT;
                 if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out chunkT)
+                    && chunkT.applied
                     && chunkT.terrain != null && chunkT.terrain.terrainData != null
                     && chunkT.terrain.terrainData.heightmapResolution == res)
                 {
@@ -542,10 +544,10 @@ namespace UniverseCreator.TerrainSystem
                 Chunk cA, cB, cC, cD;
                 // cA = (c.x,   c.z),   cB = (c.x+1, c.z)
                 // cC = (c.x,   c.z+1), cD = (c.x+1, c.z+1)
-                if (!byCell.TryGetValue(c,                          out cA) || cA == null || cA.terrain == null || cA.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x+1, c.z),     out cB) || cB == null || cB.terrain == null || cB.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x,   c.z+1),   out cC) || cC == null || cC.terrain == null || cC.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x+1, c.z+1),   out cD) || cD == null || cD.terrain == null || cD.terrain.terrainData == null) continue;
+                if (!byCell.TryGetValue(c,                          out cA) || cA == null || !cA.applied || cA.terrain == null || cA.terrain.terrainData == null) continue;
+                if (!byCell.TryGetValue(new Coord(c.x+1, c.z),     out cB) || cB == null || !cB.applied || cB.terrain == null || cB.terrain.terrainData == null) continue;
+                if (!byCell.TryGetValue(new Coord(c.x,   c.z+1),   out cC) || cC == null || !cC.applied || cC.terrain == null || cC.terrain.terrainData == null) continue;
+                if (!byCell.TryGetValue(new Coord(c.x+1, c.z+1),   out cD) || cD == null || !cD.applied || cD.terrain == null || cD.terrain.terrainData == null) continue;
 
                 int res = cA.terrain.terrainData.heightmapResolution;
 
