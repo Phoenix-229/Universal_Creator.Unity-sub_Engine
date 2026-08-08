@@ -491,8 +491,6 @@ namespace UniverseCreator.TerrainSystem
                 if (chunkA == null || chunkA.terrain == null || chunkA.terrain.terrainData == null) continue;
 
                 int res = chunkA.terrain.terrainData.heightmapResolution;
-                float[,] hA = chunkA.terrain.terrainData.GetHeights(0, 0, res, res);
-                bool modifiedA = false;
 
                 // --- RIGHT neighbour (c.x+1) ---
                 Chunk chunkR;
@@ -500,17 +498,16 @@ namespace UniverseCreator.TerrainSystem
                     && chunkR.terrain != null && chunkR.terrain.terrainData != null
                     && chunkR.terrain.terrainData.heightmapResolution == res)
                 {
-                    float[,] hR = chunkR.terrain.terrainData.GetHeights(0, 0, res, res);
+                    float[,] hA_edge = chunkA.terrain.terrainData.GetHeights(res - 1, 0, 1, res);
+                    float[,] hR_edge = chunkR.terrain.terrainData.GetHeights(0, 0, 1, res);
                     for (int y = 0; y < res; y++)
                     {
-                        // Average the shared border vertex between both tiles
-                        float avg = (hA[y, res - 1] + hR[y, 0]) * 0.5f;
-                        avg = Mathf.Clamp01(avg);
-                        hA[y, res - 1] = avg;
-                        hR[y, 0]       = avg;
+                        float avg = Mathf.Clamp01((hA_edge[y, 0] + hR_edge[y, 0]) * 0.5f);
+                        hA_edge[y, 0] = avg;
+                        hR_edge[y, 0] = avg;
                     }
-                    chunkR.terrain.terrainData.SetHeightsDelayLOD(0, 0, hR);
-                    modifiedA = true;
+                    chunkA.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0, hA_edge);
+                    chunkR.terrain.terrainData.SetHeightsDelayLOD(0, 0, hR_edge);
                 }
 
                 // --- TOP neighbour (c.z+1) ---
@@ -519,20 +516,17 @@ namespace UniverseCreator.TerrainSystem
                     && chunkT.terrain != null && chunkT.terrain.terrainData != null
                     && chunkT.terrain.terrainData.heightmapResolution == res)
                 {
-                    float[,] hT = chunkT.terrain.terrainData.GetHeights(0, 0, res, res);
+                    float[,] hA_edge = chunkA.terrain.terrainData.GetHeights(0, res - 1, res, 1);
+                    float[,] hT_edge = chunkT.terrain.terrainData.GetHeights(0, 0, res, 1);
                     for (int x = 0; x < res; x++)
                     {
-                        float avg = (hA[res - 1, x] + hT[0, x]) * 0.5f;
-                        avg = Mathf.Clamp01(avg);
-                        hA[res - 1, x] = avg;
-                        hT[0, x]       = avg;
+                        float avg = Mathf.Clamp01((hA_edge[0, x] + hT_edge[0, x]) * 0.5f);
+                        hA_edge[0, x] = avg;
+                        hT_edge[0, x] = avg;
                     }
-                    chunkT.terrain.terrainData.SetHeightsDelayLOD(0, 0, hT);
-                    modifiedA = true;
+                    chunkA.terrain.terrainData.SetHeightsDelayLOD(0, res - 1, hA_edge);
+                    chunkT.terrain.terrainData.SetHeightsDelayLOD(0, 0, hT_edge);
                 }
-
-                if (modifiedA)
-                    chunkA.terrain.terrainData.SetHeightsDelayLOD(0, 0, hA);
             }
 
             // ----------------------------------------------------------------
@@ -555,16 +549,20 @@ namespace UniverseCreator.TerrainSystem
 
                 int res = cA.terrain.terrainData.heightmapResolution;
 
+                // cA is bottom-left chunk -> corner is Top-Right
                 float[,] hA = cA.terrain.terrainData.GetHeights(res - 1, res - 1, 1, 1);
-                float[,] hB = cB.terrain.terrainData.GetHeights(res - 1, 0,       1, 1);
-                float[,] hC = cC.terrain.terrainData.GetHeights(0,       res - 1, 1, 1);
+                // cB is bottom-right chunk -> corner is Top-Left
+                float[,] hB = cB.terrain.terrainData.GetHeights(0,       res - 1, 1, 1);
+                // cC is top-left chunk -> corner is Bottom-Right
+                float[,] hC = cC.terrain.terrainData.GetHeights(res - 1, 0,       1, 1);
+                // cD is top-right chunk -> corner is Bottom-Left
                 float[,] hD = cD.terrain.terrainData.GetHeights(0,       0,       1, 1);
 
                 float corner = Mathf.Clamp01((hA[0,0] + hB[0,0] + hC[0,0] + hD[0,0]) * 0.25f);
 
                 hA[0,0] = corner; cA.terrain.terrainData.SetHeightsDelayLOD(res - 1, res - 1, hA);
-                hB[0,0] = corner; cB.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0,       hB);
-                hC[0,0] = corner; cC.terrain.terrainData.SetHeightsDelayLOD(0,       res - 1, hC);
+                hB[0,0] = corner; cB.terrain.terrainData.SetHeightsDelayLOD(0,       res - 1, hB);
+                hC[0,0] = corner; cC.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0,       hC);
                 hD[0,0] = corner; cD.terrain.terrainData.SetHeightsDelayLOD(0,       0,       hD);
             }
 
