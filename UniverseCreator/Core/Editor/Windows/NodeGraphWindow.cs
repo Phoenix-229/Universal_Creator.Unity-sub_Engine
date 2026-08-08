@@ -40,7 +40,7 @@ namespace UniverseCreator.Editor.Windows
         public static void OpenWindow()
         {
             NodeGraphWindow window = GetWindow<NodeGraphWindow>("Universe Creator - Node Graph");
-            window.minSize = new Vector2(800, 600);
+            window.minSize = new Vector2(150, 150);
             window.Show();
         }
 

@@ -94,7 +94,7 @@ namespace UniverseCreator.Editor.Utilities
         public static NodeGraphWindow Open(Graph graph)
         {
             NodeGraphWindow window = EditorWindow.GetWindow<NodeGraphWindow>("Universe Creator - Node Graph");
-            window.minSize = new Vector2(800, 600);
+            window.minSize = new Vector2(150, 150);
             window.SetGraph(graph);
             window.Show();
             window.Focus();

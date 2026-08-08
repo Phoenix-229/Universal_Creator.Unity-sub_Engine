@@ -506,6 +506,8 @@ namespace UniverseCreator.TerrainSystem
                         float avg = Mathf.Clamp01((hA_edge[y, 0] + hR_edge[y, 0]) * 0.5f);
                         hA_edge[y, 0] = avg;
                         hR_edge[y, 0] = avg;
+                        if (chunkA.appliedHeights != null) chunkA.appliedHeights[y, res - 1] = avg;
+                        if (chunkR.appliedHeights != null) chunkR.appliedHeights[y, 0] = avg;
                     }
                     chunkA.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0, hA_edge);
                     chunkR.terrain.terrainData.SetHeightsDelayLOD(0, 0, hR_edge);
@@ -525,6 +527,8 @@ namespace UniverseCreator.TerrainSystem
                         float avg = Mathf.Clamp01((hA_edge[0, x] + hT_edge[0, x]) * 0.5f);
                         hA_edge[0, x] = avg;
                         hT_edge[0, x] = avg;
+                        if (chunkA.appliedHeights != null) chunkA.appliedHeights[res - 1, x] = avg;
+                        if (chunkT.appliedHeights != null) chunkT.appliedHeights[0, x] = avg;
                     }
                     chunkA.terrain.terrainData.SetHeightsDelayLOD(0, res - 1, hA_edge);
                     chunkT.terrain.terrainData.SetHeightsDelayLOD(0, 0, hT_edge);
@@ -566,6 +570,11 @@ namespace UniverseCreator.TerrainSystem
                 hB[0,0] = corner; cB.terrain.terrainData.SetHeightsDelayLOD(0,       res - 1, hB);
                 hC[0,0] = corner; cC.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0,       hC);
                 hD[0,0] = corner; cD.terrain.terrainData.SetHeightsDelayLOD(0,       0,       hD);
+
+                if (cA.appliedHeights != null) cA.appliedHeights[res - 1, res - 1] = corner;
+                if (cB.appliedHeights != null) cB.appliedHeights[res - 1, 0] = corner;
+                if (cC.appliedHeights != null) cC.appliedHeights[0, res - 1] = corner;
+                if (cD.appliedHeights != null) cD.appliedHeights[0, 0] = corner;
             }
 
             // ----------------------------------------------------------------
