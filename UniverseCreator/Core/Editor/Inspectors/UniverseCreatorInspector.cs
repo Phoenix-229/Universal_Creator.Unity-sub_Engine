@@ -52,8 +52,6 @@ namespace UniverseCreator.Editor.Inspectors
         // Set once per OnInspectorGUI so the control helpers can record undo.
         private UniverseCreatorObject ucTarget;
         private bool valueChanged;
-
-        private int chunkProgressId = -1;
         private bool hasAutoCleared = false;
 
         private void OnEnable()
@@ -64,11 +62,6 @@ namespace UniverseCreator.Editor.Inspectors
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
-            if (chunkProgressId != -1)
-            {
-                if (Progress.Exists(chunkProgressId)) Progress.Finish(chunkProgressId, Progress.Status.Canceled);
-                chunkProgressId = -1;
-            }
         }
 
         private void OnEditorUpdate()
@@ -79,23 +72,6 @@ namespace UniverseCreator.Editor.Inspectors
             ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
             if (cm != null)
             {
-                bool isGenerating = cm.IsGenerating;
-                
-                if (isGenerating && chunkProgressId == -1)
-                {
-                    chunkProgressId = Progress.Start("Universe Creator", "Generating chunks...", Progress.Options.None);
-                }
-                else if (!isGenerating && chunkProgressId != -1)
-                {
-                    if (Progress.Exists(chunkProgressId)) Progress.Finish(chunkProgressId, Progress.Status.Succeeded);
-                    chunkProgressId = -1;
-                }
-                
-                if (isGenerating && chunkProgressId != -1)
-                {
-                    Progress.Report(chunkProgressId, cm.GetProgress(), "Generating chunks...");
-                }
-
                 if (cm.PumpCompleted()) Repaint();
             }
 

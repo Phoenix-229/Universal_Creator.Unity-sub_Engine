@@ -168,12 +168,14 @@ namespace UniverseCreator.TerrainSystem
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
 
-        public bool IsGenerating { get { return activeWorkers > 0 || pending.Count > 0; } }
+        public bool IsGenerating { get { return activeWorkers > 0 || pending.Count > 0 || IsRebuildingAll; } }
+        public bool IsRebuildingAll { get; private set; }
         
         public float GetProgress()
         {
             if (pool.Count == 0) return 1f;
             int done = pool.Count - (activeWorkers + pending.Count);
+            if (done < 0) done = 0;
             return (float)done / pool.Count;
         }
 
@@ -309,6 +311,7 @@ namespace UniverseCreator.TerrainSystem
             UniverseCreatorObject o = Owner;
             if (o == null || o.graph == null) return;
 
+            IsRebuildingAll = true;
             EnsurePool(o);
 
             // Give every cell a real TerrainData, layers and material BEFORE any worker
@@ -1270,8 +1273,11 @@ namespace UniverseCreator.TerrainSystem
             // The map traces the surface, so it is stale until the last chunk lands.
             // Refreshing once the queue drains costs one line mesh per settle instead
             // of one per chunk.
-            if (freed && activeWorkers == 0 && pending.Count == 0)
-                RefreshSliceMap();
+            if (activeWorkers == 0 && pending.Count == 0)
+            {
+                if (freed) RefreshSliceMap();
+                IsRebuildingAll = false;
+            }
 
             // Reported so the edit-mode driver can repaint the Scene view. Writing
             // TerrainData does not itself mark the view dirty, so without a repaint a
