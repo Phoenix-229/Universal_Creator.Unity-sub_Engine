@@ -76,17 +76,17 @@ namespace UniverseCreator.Editor.Inspectors
             UniverseCreatorObject uc = target as UniverseCreatorObject;
             if (uc == null) return;
 
-            // Auto-clear once to fix corrupted layers from previous bugs
-            if (!hasAutoCleared && uc.overrideLayer != null)
-            {
-                uc.ClearManualEdits();
-                Debug.Log("[Universe Creator] Auto-cleared manual edits.");
-                hasAutoCleared = true;
-            }
-
             ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
             if (cm != null)
             {
+                // Auto-clear once to fix corrupted layers from previous bugs
+                if (!hasAutoCleared && uc.overrideLayer != null)
+                {
+                    cm.ClearManualEdits();
+                    Debug.Log("[Universe Creator] Auto-cleared manual edits.");
+                    hasAutoCleared = true;
+                }
+
                 bool isGenerating = cm.IsGenerating;
                 
                 if (isGenerating && chunkProgressId == -1)
