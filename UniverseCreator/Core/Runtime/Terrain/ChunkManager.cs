@@ -588,10 +588,10 @@ namespace UniverseCreator.TerrainSystem
                 Chunk lc, rc, tc, bc;
                 Terrain left   = null, right  = null, top    = null, bottom = null;
 
-                if (byCell.TryGetValue(new Coord(c.x - 1, c.z), out lc) && lc.terrain != null && lc.terrain.terrainData != null && lc.terrain.terrainData.heightmapResolution == res) left   = lc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out rc) && rc.terrain != null && rc.terrain.terrainData != null && rc.terrain.terrainData.heightmapResolution == res) right  = rc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out tc) && tc.terrain != null && tc.terrain.terrainData != null && tc.terrain.terrainData.heightmapResolution == res) top    = tc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z - 1), out bc) && bc.terrain != null && bc.terrain.terrainData != null && bc.terrain.terrainData.heightmapResolution == res) bottom = bc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x - 1, c.z), out lc) && lc != null && lc.applied && lc.terrain != null && lc.terrain.terrainData != null && lc.terrain.terrainData.heightmapResolution == res) left   = lc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out rc) && rc != null && rc.applied && rc.terrain != null && rc.terrain.terrainData != null && rc.terrain.terrainData.heightmapResolution == res) right  = rc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out tc) && tc != null && tc.applied && tc.terrain != null && tc.terrain.terrainData != null && tc.terrain.terrainData.heightmapResolution == res) top    = tc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x, c.z - 1), out bc) && bc != null && bc.applied && bc.terrain != null && bc.terrain.terrainData != null && bc.terrain.terrainData.heightmapResolution == res) bottom = bc.terrain;
 
                 chunk.terrain.SetNeighbors(left, top, right, bottom);
                 chunk.terrain.terrainData.SyncHeightmap();
