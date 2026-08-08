@@ -408,11 +408,21 @@ namespace UniverseCreator.TerrainSystem
                 // neighbourhood, so a stale heightfield is dropped and re-baked rather
                 // than kept. Its sculpt survives: CaptureManualEdits has already lifted
                 // the deltas into the override layer, and ApplyChunk folds them back in.
-                if (c.data != null && c.data.heightmapResolution != res)
+                if (c.data != null)
                 {
-                    c.data = null;
-                    c.appliedHeights = null;
-                    c.applied = false;
+                    if (c.data.heightmapResolution != res)
+                    {
+                        c.data = null;
+                        c.appliedHeights = null;
+                        c.applied = false;
+                    }
+                    else
+                    {
+                        // If the physical chunk size changed (e.g. world size changed), update it immediately.
+                        // Otherwise, the chunk maintains its old size while sitting at its new offset,
+                        // creating a massive visible gap ("trench") until background generation finishes.
+                        if (c.data.size != size) c.data.size = size;
+                    }
                 }
 
                 if (c.data == null)
