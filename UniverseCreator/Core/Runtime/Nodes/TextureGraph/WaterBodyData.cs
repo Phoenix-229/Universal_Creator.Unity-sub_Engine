@@ -82,6 +82,12 @@ namespace UniverseCreator.Nodes
         public string name = "Water";
         public WaterBodyKind kind = WaterBodyKind.Lake;
 
+        /// <summary>Shape mode for generation (Grid Mesh or Polygon outline).</summary>
+        public UCWaterBody.ShapeMode shape = UCWaterBody.ShapeMode.Rectangle;
+
+        /// <summary>The extracted boundary points if shape is Polygon.</summary>
+        public Polyline outline;
+
         /// <summary>World position the vertices are relative to.</summary>
         public Vector3 origin;
 
@@ -719,6 +725,50 @@ namespace UniverseCreator.Nodes
                     body.triangles[idx++] = v1;
                     body.triangles[idx++] = v2;
                     body.triangles[idx++] = v3;
+                }
+            }
+
+            // Pass 5: Boundary Smoothing
+            // Smooths the outer boundary vertices (where label != id) to round off the 
+            // jagged 90-degree stair-stepping into a curved, organic shape.
+            if (body.vertices.Length > 0)
+            {
+                Vector3[] smoothed = new Vector3[body.vertices.Length];
+                System.Array.Copy(body.vertices, smoothed, body.vertices.Length);
+
+                for (int iter = 0; iter < 4; iter++)
+                {
+                    for (int gz = 1; gz < s.gz - 1; gz++)
+                    {
+                        for (int gx = 1; gx < s.gx - 1; gx++)
+                        {
+                            int i = gz * s.gx + gx;
+                            int v = s.vertexIndex[i];
+                            
+                            // Only smooth the overshoot boundary vertices that form the jagged edge
+                            if (v < 0 || s.label[i] == id) continue;
+
+                            int v_up = s.vertexIndex[i + s.gx];
+                            int v_dn = s.vertexIndex[i - s.gx];
+                            int v_lt = s.vertexIndex[i - 1];
+                            int v_rt = s.vertexIndex[i + 1];
+
+                            Vector3 sum = Vector3.zero;
+                            int count = 0;
+                            
+                            // Pull towards adjacent boundary vertices to curve the edge
+                            if (v_up >= 0 && s.label[i + s.gx] != id) { sum += smoothed[v_up]; count++; }
+                            if (v_dn >= 0 && s.label[i - s.gx] != id) { sum += smoothed[v_dn]; count++; }
+                            if (v_lt >= 0 && s.label[i - 1] != id) { sum += smoothed[v_lt]; count++; }
+                            if (v_rt >= 0 && s.label[i + 1] != id) { sum += smoothed[v_rt]; count++; }
+
+                            if (count > 0)
+                            {
+                                body.vertices[v] = Vector3.Lerp(body.vertices[v], sum / count, 0.65f);
+                            }
+                        }
+                    }
+                    System.Array.Copy(body.vertices, smoothed, body.vertices.Length);
                 }
             }
 

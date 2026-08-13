@@ -214,6 +214,11 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Depth over which the sea fades in at the beach.")]
         public float edgeFeatherMetres = 1.2f;
 
+        [Tooltip("Raises or lowers the finished surface, in metres. Use small " +
+                 "negative values to sink water slightly into its bed and hide a " +
+                 "shoreline that reads too sharp.")]
+        public float surfaceOffsetMetres = -0.2f;
+
         [Tooltip("Extends a flat sea this far past the generated terrain, in metres, " +
                  "so the horizon is water rather than the edge of the world. 0 to " +
                  "switch it off.")]
@@ -242,6 +247,7 @@ namespace UniverseCreator.Nodes.Texturing
             settings.name = "Ocean";
             settings.meshResolution = meshResolution;
             settings.edgeFeatherMetres = Mathf.Max(0.01f, edgeFeatherMetres);
+            settings.surfaceOffsetMetres = surfaceOffsetMetres;
 
             // A sea surface is level, so its slope is zero, so Manning returns zero
             // and the ocean does not flow. That is correct - ocean movement is swell

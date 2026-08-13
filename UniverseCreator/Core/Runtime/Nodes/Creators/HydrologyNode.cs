@@ -35,34 +35,45 @@ namespace UniverseCreator.Nodes.Creators
             Matrix inputMask = GetInputMatrix(tile, outputIndex, stop);
             if (inputMask == null) 
             {
-                // If not connected, return blank
                 return tile.CreateMatrix();
             }
 
             int targetCount = outputIndex == 0 ? targetRiverCount : targetLakeCount;
             
-            // Limit lake density across the world so they don't spam every single chunk.
-            // Using a deterministic hash of the chunk coordinate to randomly keep ~25% of chunks.
+            // Limit lake density across the world to ~25% of chunks as per user request
             if (outputIndex == 1 && tile != null) 
             {
                 int seed = (tile.chunkCoord.x * 73856093) ^ (tile.chunkCoord.z * 19349663);
                 System.Random rng = new System.Random(seed);
-                if (rng.Next(100) > 25) 
+                if (rng.Next(100) >= 25) 
                 {
                     return tile.CreateMatrix();
                 }
+                // Only allow 1 lake per chosen chunk so we don't over-spawn
+                targetCount = 1;
+            }
+            else if (outputIndex == 0 && tile != null && tile.worldSize.x > 1f)
+            {
+                // Dynamic river scale: ~3 large rivers per 25 chunks globally.
+                // Since this runs per-chunk, we just want 1 large river on ~12% of chunks
+                int seed = (tile.chunkCoord.x * 39856093) ^ (tile.chunkCoord.z * 49349663);
+                System.Random rng = new System.Random(seed);
+                if (rng.Next(100) >= 12) 
+                {
+                    return tile.CreateMatrix();
+                }
+                targetCount = 1;
             }
 
-            // If target is high enough to not cull anything, or 0, just return the mask
             if (targetCount <= 0) return new Matrix(inputMask);
 
             Matrix dst = new Matrix(inputMask);
-            FilterTopComponents(dst, targetCount, stop);
+            FilterTopComponents(dst, targetCount, outputIndex == 1, stop);
 
             return dst;
         }
 
-        private void FilterTopComponents(Matrix m, int targetCount, StopToken stop)
+        private void FilterTopComponents(Matrix m, int targetCount, bool discardBorders, StopToken stop)
         {
             int resX = m.rect.size.x;
             int resZ = m.rect.size.z;
@@ -71,6 +82,7 @@ namespace UniverseCreator.Nodes.Creators
             int[] labels = new int[count];
             int currentLabel = 1;
             Dictionary<int, int> componentSizes = new Dictionary<int, int>();
+            Dictionary<int, bool> componentTouchesBorder = new Dictionary<int, bool>();
 
             // Simple connected components (flood fill)
             for (int i = 0; i < count; i++)
@@ -80,6 +92,7 @@ namespace UniverseCreator.Nodes.Creators
                 if (m.arr[i] > 0.05f && labels[i] == 0)
                 {
                     int size = 0;
+                    bool touchesBorder = false;
                     Queue<int> q = new Queue<int>();
                     q.Enqueue(i);
                     labels[i] = currentLabel;
@@ -92,6 +105,12 @@ namespace UniverseCreator.Nodes.Creators
                         int cx = curr % resX;
                         int cz = curr / resX;
 
+                        // Check if touching chunk seam
+                        if (cx <= 1 || cx >= resX - 2 || cz <= 1 || cz >= resZ - 2)
+                        {
+                            touchesBorder = true;
+                        }
+
                         // Check 4 neighbors
                         if (cx > 0) CheckNeighbor(curr - 1, currentLabel, m, labels, q);
                         if (cx < resX - 1) CheckNeighbor(curr + 1, currentLabel, m, labels, q);
@@ -99,6 +118,7 @@ namespace UniverseCreator.Nodes.Creators
                         if (cz < resZ - 1) CheckNeighbor(curr + resX, currentLabel, m, labels, q);
                     }
 
+                    componentTouchesBorder[currentLabel] = touchesBorder;
                     componentSizes[currentLabel] = size;
                     currentLabel++;
                 }
@@ -108,20 +128,25 @@ namespace UniverseCreator.Nodes.Creators
             if (componentSizes.Count <= targetCount) return;
 
             // Sort components by size descending
-            List<KeyValuePair<int, int>> sorted = new List<KeyValuePair<int, int>>(componentSizes);
-            sorted.Sort((a, b) => b.Value.CompareTo(a.Value));
+            List<int> sortedLabels = new List<int>(componentSizes.Keys);
+            sortedLabels.Sort((a, b) => componentSizes[b].CompareTo(componentSizes[a]));
 
-            // Create a set of allowed labels
-            HashSet<int> allowedLabels = new HashSet<int>();
-            for (int i = 0; i < targetCount && i < sorted.Count; i++)
+            // Keep top targetCount that don't violate border constraints
+            HashSet<int> keepLabels = new HashSet<int>();
+            int kept = 0;
+            foreach (int label in sortedLabels)
             {
-                allowedLabels.Add(sorted[i].Key);
+                if (discardBorders && componentTouchesBorder[label]) continue;
+
+                keepLabels.Add(label);
+                kept++;
+                if (kept >= targetCount) break;
             }
 
-            // Zero out any pixel not in the allowed labels
+            // Zero out unkept components
             for (int i = 0; i < count; i++)
             {
-                if (m.arr[i] > 0.05f && !allowedLabels.Contains(labels[i]))
+                if (labels[i] == 0 || !keepLabels.Contains(labels[i]))
                 {
                     m.arr[i] = 0f;
                 }
