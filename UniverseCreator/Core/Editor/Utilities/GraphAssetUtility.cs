@@ -8,12 +8,15 @@
 //           Settings page and the Assets/Create menu all behave identically.
 // -----------------------------------------------------------------------------
 
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEditor.Callbacks;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UniverseCreator.Nodes;
 using UniverseCreator.Editor.Windows;
+using UniverseCreator.TerrainSystem;
 
 namespace UniverseCreator.Editor.Utilities
 {
@@ -229,6 +232,113 @@ namespace UniverseCreator.Editor.Utilities
 
             EditorGUIUtility.PingObject(graph);
             OpenTexture(graph);
+        }
+
+        // =====================================================================
+        //  MISSING-TYPE REPAIR
+        // =====================================================================
+
+        /// <summary>
+        /// Clears every reference to a node class that no longer exists, from every
+        /// graph this project can reach. Returns how many graphs it had to change.
+        ///
+        /// WHAT THE WARNING ACTUALLY IS
+        /// ----------------------------
+        ///   Missing types referenced from component Graph on game object world:
+        ///     UniverseCreator.Nodes.Texturing.OceanOutputNode, UniverseCreator
+        ///
+        /// Graph.PruneMissingNodes already keeps the node list itself clean, so nothing
+        /// in the toolkit trips over the hole. The warning comes from somewhere it
+        /// cannot reach: a record Unity keeps beside the list so the node's data
+        /// survives if the script ever returns. Only
+        /// ClearAllManagedReferencesWithMissingTypes removes that record, and only a
+        /// save makes the removal stick.
+        ///
+        /// WHY BOTH HOMES ARE SWEPT
+        /// ------------------------
+        /// A graph can be a project asset or can live inside a scene - the latter is
+        /// what a world whose graph was never written to disk has, and it is exactly
+        /// the case the warning above names, since it reports against the GameObject
+        /// holding the reference. An asset-only pass would miss it and the warning
+        /// would come back on the next load.
+        /// </summary>
+        public static int RepairAll(bool logResult = true)
+        {
+            HashSet<Graph> seen = new HashSet<Graph>();
+            List<Graph> targets = new List<Graph>();
+
+            string[] guids = AssetDatabase.FindAssets("t:" + typeof(Graph).Name);
+            for (int i = 0; i < guids.Length; i++)
+            {
+                Graph found = AssetDatabase.LoadAssetAtPath<Graph>(
+                    AssetDatabase.GUIDToAssetPath(guids[i]));
+                if (found != null && seen.Add(found)) targets.Add(found);
+            }
+
+            UniverseCreatorObject[] worlds = UnityEngine.Object.FindObjectsByType<UniverseCreatorObject>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None);
+            for (int i = 0; i < worlds.Length; i++)
+            {
+                Graph inScene = worlds[i].graph;
+                if (inScene != null && seen.Add(inScene)) targets.Add(inScene);
+            }
+
+            int repaired = 0;
+            int slots = 0;
+            int sceneSide = 0;
+
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Graph graph = targets[i];
+
+                bool hadRecord = SerializationUtility.HasManagedReferencesWithMissingTypes(graph);
+                int holes = graph.PruneMissingNodes();
+                if (!hadRecord && holes == 0) continue;
+
+                if (hadRecord) SerializationUtility.ClearAllManagedReferencesWithMissingTypes(graph);
+                EditorUtility.SetDirty(graph);
+
+                repaired++;
+                slots += holes;
+                if (!EditorUtility.IsPersistent(graph)) sceneSide++;
+            }
+
+            if (repaired > 0)
+            {
+                AssetDatabase.SaveAssets();
+
+                // A scene-side graph is only written when its scene is, and saving a
+                // user's scene out from under them is not this menu item's business.
+                // Marking it dirty is what makes Ctrl+S enough.
+                if (sceneSide > 0) EditorSceneManager.MarkAllScenesDirty();
+            }
+
+            if (logResult)
+            {
+                if (repaired == 0)
+                {
+                    Debug.Log("[UC] Repair Graphs: nothing to do. " + targets.Count +
+                              " graph(s) checked, none referenced a missing node type.");
+                }
+                else
+                {
+                    Debug.Log("[UC] Repair Graphs: cleared missing node types from " +
+                              repaired + " of " + targets.Count + " graph(s), removing " +
+                              slots + " empty node slot(s)." +
+                              (sceneSide > 0
+                                  ? " " + sceneSide + " of them live in a scene - save the " +
+                                    "scene (Ctrl+S) and the warning will not come back."
+                                  : string.Empty));
+                }
+            }
+
+            return repaired;
+        }
+
+        [MenuItem("Tools/Universe Creator/Diagnostics/Repair Graphs", priority = 211)]
+        private static void RepairAllMenu()
+        {
+            RepairAll();
         }
 
         // =====================================================================

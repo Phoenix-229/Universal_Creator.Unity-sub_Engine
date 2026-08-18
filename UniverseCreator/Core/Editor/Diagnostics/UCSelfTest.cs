@@ -107,6 +107,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestVolumeReachesTheRealBed();
             TestNodeReadoutsMatchTheCourse();
             TestLakeShapeAndSizeComeFromTheBasin();
+            TestGraphHealsMissingNodeSlots();
 
             return failures.Count == 0;
         }
@@ -1472,6 +1473,94 @@ namespace UniverseCreator.Editor.Diagnostics
         /// satisfiable by ignoring the ground and walking out to the search limit, and a
         /// test that only looked at a roomy bowl would pass on exactly that bug.
         /// </remarks>
+        /// <summary>
+        /// A graph whose node script no longer exists has to heal itself rather than
+        /// throw.
+        ///
+        /// [SerializeReference] leaves a null in `nodes` when a class disappears, which
+        /// is how the water Output nodes the rework removed still turn up in graphs
+        /// authored before it - the "Missing types referenced from component Graph"
+        /// warning is Unity reporting exactly that. Three things have to hold: nothing
+        /// walking the list may dereference the hole, Validate must say so rather than
+        /// stay quiet, and pruning must take the hole plus every edge that pointed at
+        /// it, or the evaluator would go looking for a node that is not there.
+        /// </summary>
+        private static void TestGraphHealsMissingNodeSlots()
+        {
+            Graph graph = ScriptableObject.CreateInstance<Graph>();
+            try
+            {
+                ChannelGroundFeed keptA = new ChannelGroundFeed();
+                ChannelMaskFeed keptB = new ChannelMaskFeed();
+
+                // Two survivors with a live edge, and a hole between them wired on both
+                // sides - the shape Unity leaves when a node class is deleted out of the
+                // middle of a graph someone had already connected up.
+                graph.nodes.Add(keptA);
+                graph.nodes.Add(null);
+                graph.nodes.Add(keptB);
+
+                graph.connections.Add(new Connection(keptA.id, 0, keptB.id, 0));
+                graph.connections.Add(new Connection(keptA.id, 0, "vanished-node", 0));
+                graph.connections.Add(new Connection("vanished-node", 0, keptB.id, 1));
+
+                // Reading the graph with the hole still in it must not throw.
+                List<string> before = null;
+                try
+                {
+                    Check(graph.GetNodeById(keptA.id) == keptA,
+                          "GetNodeById finds a node that sits past a hole.");
+                    Check(graph.GetNodeById("vanished-node") == null,
+                          "GetNodeById reports a vanished node as missing.");
+                    before = graph.Validate();
+                }
+                catch (System.Exception e)
+                {
+                    Check(false, "Walking a graph with an empty node slot threw " +
+                                 e.GetType().Name + " instead of reporting it.");
+                }
+
+                Check(before != null, "A graph with an empty node slot can still be validated.");
+                bool reported = false;
+                if (before != null)
+                {
+                    for (int i = 0; i < before.Count; i++)
+                        if (before[i].Contains("node slot is empty")) reported = true;
+                }
+                Check(reported, "Validate names the empty node slot rather than hiding it.");
+
+                int removed = graph.PruneMissingNodes();
+                Check(removed == 1, "Pruning removes exactly the one hole. Removed " + removed + ".");
+                Check(graph.nodes.Count == 2,
+                      "Both real nodes survive the prune. Left with " + graph.nodes.Count + ".");
+                Check(graph.nodes.Contains(keptA) && graph.nodes.Contains(keptB),
+                      "The prune keeps the node instances themselves.");
+                Check(!graph.nodes.Contains(null), "No hole is left in the node list.");
+
+                Check(graph.connections.Count == 1,
+                      "Only the edge joining two surviving nodes is kept. Kept " +
+                      graph.connections.Count + ".");
+                if (graph.connections.Count == 1)
+                {
+                    Connection kept = graph.connections[0];
+                    Check(kept.sourceNodeId == keptA.id && kept.targetNodeId == keptB.id,
+                          "The edge left standing is the real one, not a dangling one.");
+                }
+
+                List<string> after = graph.Validate();
+                bool stillReported = false;
+                for (int i = 0; i < after.Count; i++)
+                    if (after[i].Contains("node slot is empty")) stillReported = true;
+                Check(!stillReported, "Once pruned, the graph no longer reports an empty slot.");
+
+                Check(graph.PruneMissingNodes() == 0, "Pruning an already healthy graph is a no-op.");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(graph);
+            }
+        }
+
         private static void TestLakeShapeAndSizeComeFromTheBasin()
         {
             const float floorY = 100f;

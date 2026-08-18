@@ -324,6 +324,7 @@ from this menu, except that it is parented to the manager and picks up its defau
 |---|---|
 | `Run Self Test` | Full internal check battery; prints a pass/fail summary |
 | `Diagnostics ▸ Check Shaders` | Verifies shaders compiled and every property the C# sets exists |
+| `Diagnostics ▸ Repair Graphs` | Clears references to node scripts that no longer exist |
 | `Setup ▸ Configure URP Pipeline` | Creates/assigns a URP asset and validates the shaders against it |
 
 **Assets ▸ Create ▸ Universe Creator**
@@ -3801,13 +3802,15 @@ points. Check the version here before reporting a problem.
 | **Tools ▸ Universe Creator ▸ Setup ▸ Configure URP Pipeline** | Checks and configures the URP asset for terrain and water. **Run this first in a new project** |
 | **Tools ▸ Universe Creator ▸ Run Self Test** | Runs the full internal test suite and reports to the console |
 | **Tools ▸ Universe Creator ▸ Diagnostics ▸ Check Shaders** | Verifies every shader compiles and every expected property exists |
+| **Tools ▸ Universe Creator ▸ Diagnostics ▸ Repair Graphs** | Clears graph references to node scripts that no longer exist |
 
 `Configure URP Pipeline` sets the depth texture and opaque texture the water shader needs.
 Water that renders as a flat opaque sheet with no foam and no refraction is almost always
 this, not a bug. See [chapter 38](#38-debugging-and-troubleshooting).
 
-Both `Run Self Test` and `Check Shaders` write to the console and **never open a dialog**, so
-they are safe in batch mode and in CI. See [Appendix C](#appendix-c--diagnostics-and-self-test).
+`Run Self Test`, `Check Shaders` and `Repair Graphs` all write to the console and **never open
+a dialog**, so they are safe in batch mode and in CI. See
+[Appendix C](#appendix-c--diagnostics-and-self-test).
 
 ---
 
@@ -5145,6 +5148,38 @@ it after any shader edit, and after upgrading Unity or URP.
 
 A property the graph writes but the shader lacks fails silently at runtime — the value goes
 nowhere and the feature simply does not appear. This is what that check catches.
+
+### Repair Graphs
+
+**Tools ▸ Universe Creator ▸ Diagnostics ▸ Repair Graphs.** Clears every reference a graph
+still holds to a node script that no longer exists. Run it after deleting or renaming a node
+class, and whenever the console greets a scene load with a line like:
+
+```
+Missing types referenced from component Graph on game object world:
+  UniverseCreator.Nodes.Texturing.OceanOutputNode, UniverseCreator (1 object)
+```
+
+**What that warning is.** A graph stores its nodes in a `[SerializeReference]` list. When a node
+class disappears, Unity does not remove its entry — it keeps the slot and hands the managed
+side a `null`, so the node's data can come back if the script does. `Graph.PruneMissingNodes`
+drops those empty slots on load and on save, along with any connection left pointing at
+nothing, so nothing in the toolkit ever walks into one. The warning comes from somewhere
+pruning cannot reach: a record Unity keeps beside the list, naming the type it is still
+holding data for. Only this command removes that record.
+
+**Both homes are swept.** A graph can be a project asset or can live inside a scene. The
+warning above is the scene case — that is why it names a game object rather than an asset. An
+asset-only pass would miss it and the warning would return on the next load.
+
+Graphs found in a scene are marked dirty rather than written: **save the scene** and the
+warning is gone for good. Project assets are saved for you. The console reports how many
+graphs were changed and how many empty slots came out; if nothing was wrong it says so
+instead of staying silent.
+
+The removed water Output nodes are the case this was built for — a graph authored while
+`OceanOutputNode` and its sibling existed still carries their slots. See
+[chapter 33](#33-water-authoring-physics-and-dynamics) for why they went.
 
 ### Configure URP Pipeline
 

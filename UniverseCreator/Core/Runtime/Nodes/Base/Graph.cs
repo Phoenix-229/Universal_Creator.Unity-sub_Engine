@@ -34,7 +34,7 @@ namespace UniverseCreator.Nodes
     /// A procedural content graph: nodes + connections. Saved as a project asset,
     /// and read by GraphEvaluator to run the pull-based evaluation.
     /// </summary>
-    public class Graph : ScriptableObject
+    public class Graph : ScriptableObject, ISerializationCallbackReceiver
     {
         /// <summary>
         /// Flat list of all nodes in the graph. Unity's serialization system stores
@@ -55,6 +55,84 @@ namespace UniverseCreator.Nodes
         // the inherited member and desync from the file on disk.
 
         // ------------------------------------------------------------------
+        //  Missing-type repair
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Drops list entries whose node class no longer exists, and any connection
+        /// left pointing at nothing. Returns how many entries were dropped.
+        ///
+        /// WHY A GRAPH CAN HAVE HOLES IN IT
+        /// --------------------------------
+        /// nodes is [SerializeReference]. Delete a node class and Unity does not
+        /// remove its entry - it keeps the slot, hands the managed side a null, and
+        /// logs "Missing types referenced from component Graph on game object ...".
+        /// That is deliberate on Unity's part: if the script comes back, the node's
+        /// data is still there. Until it does, though, the list has a hole in it, and
+        /// every loop below that reads n.id would throw on the hole instead of
+        /// reporting a graph problem. The water Output nodes the rework removed are
+        /// the case that found this - a graph authored while they existed still
+        /// carries their slots.
+        ///
+        /// WHY CONNECTIONS GO BY SURVIVOR SET AND NOT BY ID
+        /// -----------------------------------------------
+        /// A hole's id went with its class, so there is nothing left to match edges
+        /// against. What we can say is that an edge naming no node we still have is
+        /// dead, whichever end it is. That sweep also collects edges left dangling by
+        /// anything else, which Validate could report but not fix.
+        /// </summary>
+        public int PruneMissingNodes()
+        {
+            if (nodes == null)
+            {
+                nodes = new List<Generator>();
+                return 0;
+            }
+
+            // Fast path first. OnBeforeSerialize runs on every serialise, including
+            // the one the inspector does per repaint, so a healthy graph has to cost
+            // one scan and no allocation.
+            int holes = 0;
+            for (int i = 0; i < nodes.Count; i++)
+                if (nodes[i] == null) holes++;
+            if (holes == 0) return 0;
+
+            nodes.RemoveAll(n => n == null);
+
+            if (connections != null)
+            {
+                HashSet<string> alive = new HashSet<string>();
+                for (int i = 0; i < nodes.Count; i++)
+                    if (!string.IsNullOrEmpty(nodes[i].id)) alive.Add(nodes[i].id);
+
+                connections.RemoveAll(c => !alive.Contains(c.sourceNodeId) ||
+                                           !alive.Contains(c.targetNodeId));
+            }
+
+            return holes;
+        }
+
+        // Both directions. OnAfterDeserialize so nothing downstream ever meets a
+        // hole; OnBeforeSerialize so a save writes the graph without one. Pure
+        // managed list work, which is all these callbacks may do - no touching the
+        // UnityEngine.Object side, because OnAfterDeserialize can run off the main
+        // thread.
+        //
+        // Pruning here is not by itself enough to stop the warning: Unity keeps the
+        // missing type in a record beside the list, so the file still declares it.
+        // Tools > Universe Creator > Diagnostics > Repair Graphs clears that record;
+        // see GraphAssetUtility.RepairAll.
+        void ISerializationCallbackReceiver.OnBeforeSerialize()
+        {
+            PruneMissingNodes();
+        }
+
+        void ISerializationCallbackReceiver.OnAfterDeserialize()
+        {
+            PruneMissingNodes();
+        }
+
+        // ------------------------------------------------------------------
         //  Node lookup
         // ------------------------------------------------------------------
 
@@ -63,7 +141,7 @@ namespace UniverseCreator.Nodes
         {
             if (string.IsNullOrEmpty(nodeId)) return null;
             foreach (Generator n in nodes)
-                if (n.id == nodeId) return n;
+                if (n != null && n.id == nodeId) return n;
             return null;
         }
 
@@ -150,7 +228,9 @@ namespace UniverseCreator.Nodes
         /// <summary>Removes a node and all connections touching it.</summary>
         public void RemoveNode(string nodeId)
         {
-            nodes.RemoveAll(n => n.id == nodeId);
+            // The `n == null` arm sweeps missing-type holes out at the same time -
+            // free, and it stops the lambda throwing on one.
+            nodes.RemoveAll(n => n == null || n.id == nodeId);
             connections.RemoveAll(c => c.sourceNodeId == nodeId || c.targetNodeId == nodeId);
         }
 
@@ -226,6 +306,13 @@ namespace UniverseCreator.Nodes
             HashSet<string> ids = new HashSet<string>();
             foreach (Generator n in nodes)
             {
+                if (n == null)
+                {
+                    errors.Add("A node slot is empty because its script was deleted or " +
+                               "renamed. Tools > Universe Creator > Diagnostics > " +
+                               "Repair Graphs clears it.");
+                    continue;
+                }
                 if (string.IsNullOrEmpty(n.id))
                 {
                     errors.Add("Node has null or empty id.");
