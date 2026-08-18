@@ -83,9 +83,14 @@ namespace UniverseCreator.Nodes.Modifiers
                     float wx = originX + x * mppX;
                     float dx = falloffX ? Mathf.Min(wx - worldMinX, worldMaxX - wx) : float.MaxValue;
 
-                    // Nearest world edge in any direction. Corners fall off on both
-                    // axes at once, which is what makes them round rather than square.
-                    float edgeDistance = Mathf.Min(dx, dz);
+                    // Compute true 2D Euclidean distance to the edge instead of a square distance
+                    // This mathematically produces a perfect circular arc at the corners, yielding
+                    // a completely natural rounded island shape regardless of world size.
+                    float fx = Mathf.Max(0f, band - dx);
+                    float fz = Mathf.Max(0f, band - dz);
+                    float falloffPenetration = Mathf.Sqrt(fx * fx + fz * fz);
+                    
+                    float edgeDistance = Mathf.Max(0f, band - falloffPenetration);
 
                     // Outside the band: untouched interior. Saves the curve maths on
                     // the overwhelming majority of a large world's pixels.

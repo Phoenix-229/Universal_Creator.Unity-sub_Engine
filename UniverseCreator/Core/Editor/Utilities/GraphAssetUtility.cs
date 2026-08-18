@@ -101,6 +101,60 @@ namespace UniverseCreator.Editor.Utilities
             return window;
         }
 
+        /// <summary>
+        /// Opens (or focuses) the Texture Graph window and loads the given graph.
+        /// </summary>
+        public static TextureGraphWindow OpenTexture(Graph graph)
+        {
+            TextureGraphWindow window =
+                EditorWindow.GetWindow<TextureGraphWindow>("Universe Creator - Texture Graph");
+            window.minSize = new Vector2(400, 300);
+            window.SetGraph(graph);
+            window.Show();
+            window.Focus();
+            return window;
+        }
+
+        /// <summary>
+        /// Sends a graph to whichever of the two windows can actually edit it.
+        ///
+        /// One asset type, two canvases, so something has to choose. Opening a
+        /// surface graph in the height window is not broken - the nodes draw and
+        /// edit fine - but the toolbar has no Apply and the add-node menu offers
+        /// sixty nodes none of which can connect to anything on screen. That reads
+        /// as a bug even though nothing failed.
+        /// </summary>
+        public static void OpenAuto(Graph graph)
+        {
+            if (graph == null) return;
+
+            if (LooksLikeTextureGraph(graph)) OpenTexture(graph);
+            else Open(graph);
+        }
+
+        /// <summary>
+        /// True when a graph's content belongs to the texture canvas.
+        ///
+        /// The test is "every node it has is a texture-graph node", not "it has a
+        /// Shader Output". A half-built surface graph with three layer nodes and no
+        /// terminal yet is still a surface graph, and that is exactly the state a
+        /// user is in when they close the window and come back to it. An empty
+        /// graph answers false, because Empty Graph is the height preset's name.
+        /// </summary>
+        public static bool LooksLikeTextureGraph(Graph graph)
+        {
+            if (graph == null || graph.nodes == null || graph.nodes.Count == 0) return false;
+
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                Generator node = graph.nodes[i];
+                if (node == null) continue;
+                if (!NodeCategoryColors.IsTextureGraph(node.Category)) return false;
+            }
+
+            return true;
+        }
+
         /// <summary>Creates a template asset, selects it in the Project window, and opens it.</summary>
         public static Graph CreateAndOpen(GraphTemplates.Template template, string fileName = null)
         {
@@ -130,7 +184,7 @@ namespace UniverseCreator.Editor.Utilities
 #pragma warning restore 618
             if (graph == null) return false;
 
-            Open(graph);
+            OpenAuto(graph);
             return true;
         }
 
@@ -148,6 +202,33 @@ namespace UniverseCreator.Editor.Utilities
         private static void CreateSimpleTerrainGraphMenu()
         {
             CreateAndOpen(GraphTemplates.Template.SimpleTerrain);
+        }
+
+        [MenuItem("Assets/Create/Universe Creator/Texture Graph (Empty)", false, 310)]
+        private static void CreateEmptyTextureGraphMenu()
+        {
+            CreateTextureAndOpen(TextureGraphTemplates.Template.Empty);
+        }
+
+        [MenuItem("Assets/Create/Universe Creator/Texture Graph (Basic Surface)", false, 311)]
+        private static void CreateBasicSurfaceMenu()
+        {
+            CreateTextureAndOpen(TextureGraphTemplates.Template.BasicSurface);
+        }
+
+        [MenuItem("Assets/Create/Universe Creator/Texture Graph (Full PBR Surface)", false, 312)]
+        private static void CreateFullPbrSurfaceMenu()
+        {
+            CreateTextureAndOpen(TextureGraphTemplates.Template.FullPbrSurface);
+        }
+
+        private static void CreateTextureAndOpen(TextureGraphTemplates.Template template)
+        {
+            Graph graph = TextureGraphTemplates.CreateAsset(template);
+            if (graph == null) return;
+
+            EditorGUIUtility.PingObject(graph);
+            OpenTexture(graph);
         }
 
         // =====================================================================

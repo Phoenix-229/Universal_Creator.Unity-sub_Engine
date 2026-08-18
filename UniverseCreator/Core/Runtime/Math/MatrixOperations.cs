@@ -19,7 +19,18 @@ using UnityEngine;
 
 namespace UniverseCreator
 {
-    /// <summary>The eleven per-pixel combination algorithms exposed by BlendNode.</summary>
+    /// <summary>
+    /// Per-pixel combination algorithms exposed by BlendNode.
+    /// </summary>
+    /// <remarks>
+    /// Values are explicit and APPEND-ONLY. The enum is serialized as an int in
+    /// every saved graph, so renumbering an existing entry would silently change
+    /// what a user's saved node does.
+    ///
+    /// 0-10 are the original set. 11+ are the extended operator set added in
+    /// Module 2; several are the managed-C# equivalents of blend types the
+    /// reference PCG toolkit exposes per attribute channel.
+    /// </remarks>
     public enum BlendMode
     {
         Add = 0,
@@ -32,7 +43,40 @@ namespace UniverseCreator
         Overlay = 7,
         HardLight = 8,
         SoftLight = 9,
-        Mix = 10
+        Mix = 10,
+
+        // --- Module 2 extended operators ---------------------------------
+
+        /// <summary>a + b * weight. Add with a scalable contribution from b.</summary>
+        WeightedSum = 11,
+
+        /// <summary>Linear interpolation from a to b by weight.</summary>
+        Lerp = 12,
+
+        /// <summary>Smaller of the two magnitudes, returned unsigned.</summary>
+        UnsignedMin = 13,
+
+        /// <summary>Larger of the two magnitudes, returned unsigned.</summary>
+        UnsignedMax = 14,
+
+        /// <summary>Operand with the smaller magnitude, keeping its own sign.</summary>
+        AbsoluteMin = 15,
+
+        /// <summary>Operand with the larger magnitude, keeping its own sign.</summary>
+        AbsoluteMax = 16,
+
+        /// <summary>a - b * weight. Subtract with a scalable bite.</summary>
+        WeightedSubtract = 17,
+
+        /// <summary>Discards a and returns b. Useful as a masked stamp.</summary>
+        CopyOther = 18,
+
+        /// <summary>
+        /// Deterministic 0-1 hash of the operand pair. Not a visual blend -
+        /// it turns two fields into stable per-pixel randomness for scatter
+        /// variation and rock-strata banding.
+        /// </summary>
+        Hash = 19
     }
 
     /// <summary>
@@ -569,13 +613,18 @@ namespace UniverseCreator
         // =====================================================================
 
         /// <summary>
-        /// Combines two fields with one of the eleven blend algorithms.
+        /// Combines two fields with one of the blend algorithms.
         /// </summary>
         /// <param name="a">Base field.</param>
         /// <param name="b">Blend field.</param>
         /// <param name="mode">Algorithm.</param>
         /// <param name="opacity">How far to move from a toward the blended result.</param>
-        public static Matrix Blend(Matrix a, Matrix b, BlendMode mode, float opacity = 1f)
+        /// <param name="weight">
+        /// Second parameter for the weighted operators (WeightedSum, Lerp,
+        /// WeightedSubtract). Ignored by every other mode.
+        /// </param>
+        public static Matrix Blend(Matrix a, Matrix b, BlendMode mode, float opacity = 1f,
+                                   float weight = 0.5f)
         {
             if (a == null) throw new ArgumentNullException("a");
             if (b == null) throw new ArgumentNullException("b");
@@ -588,7 +637,7 @@ namespace UniverseCreator
             {
                 float va = a.arr[i];
                 float vb = b.arr[i];
-                float rawBlend = va + (BlendValue(va, vb, mode) - va) * opacity;
+                float rawBlend = va + (BlendValue(va, vb, mode, weight) - va) * opacity;
                 dst.arr[i] = Mathf.Clamp01(rawBlend);
             }
 
@@ -596,7 +645,11 @@ namespace UniverseCreator
         }
 
         /// <summary>Single-pixel form of the blend algorithms.</summary>
-        public static float BlendValue(float a, float b, BlendMode mode)
+        /// <param name="weight">
+        /// Second parameter for the weighted operators. Defaults to 0.5 so the
+        /// three-argument form still reads as an even mix.
+        /// </param>
+        public static float BlendValue(float a, float b, BlendMode mode, float weight = 0.5f)
         {
             switch (mode)
             {
@@ -648,9 +701,84 @@ namespace UniverseCreator
                 case BlendMode.Mix:
                     return (a + b) * 0.5f;
 
+                // --- Module 2 extended operators -------------------------
+
+                case BlendMode.WeightedSum:
+                    return a + b * weight;
+
+                case BlendMode.Lerp:
+                    return a + (b - a) * weight;
+
+                case BlendMode.UnsignedMin:
+                    {
+                        float ua = a < 0f ? -a : a;
+                        float ub = b < 0f ? -b : b;
+                        return ua < ub ? ua : ub;
+                    }
+
+                case BlendMode.UnsignedMax:
+                    {
+                        float ua = a < 0f ? -a : a;
+                        float ub = b < 0f ? -b : b;
+                        return ua > ub ? ua : ub;
+                    }
+
+                case BlendMode.AbsoluteMin:
+                    {
+                        // Compares magnitude but returns the operand itself, so a
+                        // signed field keeps its direction.
+                        float ua = a < 0f ? -a : a;
+                        float ub = b < 0f ? -b : b;
+                        return ua < ub ? a : b;
+                    }
+
+                case BlendMode.AbsoluteMax:
+                    {
+                        float ua = a < 0f ? -a : a;
+                        float ub = b < 0f ? -b : b;
+                        return ua > ub ? a : b;
+                    }
+
+                case BlendMode.WeightedSubtract:
+                    return a - b * weight;
+
+                case BlendMode.CopyOther:
+                    return b;
+
+                case BlendMode.Hash:
+                    return HashPair(a, b);
+
                 default:
                     return a;
             }
+        }
+
+        /// <summary>
+        /// Deterministic 0-1 hash of two floats, for the Hash blend mode.
+        /// </summary>
+        /// <remarks>
+        /// Quantising to 1/4096 before hashing is deliberate: raw float bits
+        /// would make the result flicker on the last mantissa bit, so two
+        /// regenerations of the same terrain would disagree wherever a value
+        /// landed a rounding step apart.
+        /// </remarks>
+        public static float HashPair(float a, float b)
+        {
+            const int Quant = 4096;
+
+            int ia = (int)(a * Quant);
+            int ib = (int)(b * Quant);
+
+            // Integer avalanche (Wang-style). Chosen over a permutation-table
+            // lookup so this stays allocation-free and needs no seeded instance.
+            uint h = (uint)(ia * 73856093) ^ (uint)(ib * 19349663);
+            h ^= h >> 16;
+            h *= 2246822519u;
+            h ^= h >> 13;
+            h *= 3266489917u;
+            h ^= h >> 16;
+
+            return (h & 0xFFFFFF) / 16777215f;
         }
 
         /// <summary>
@@ -824,5 +952,121 @@ namespace UniverseCreator
         }
 
         private static float Min(float a, float b) { return a < b ? a : b; }
+
+        // =====================================================================
+        //  MORPHOLOGY
+        // =====================================================================
+
+        /// <summary>
+        /// Highest value within <paramref name="radiusPx"/> pixels on each axis,
+        /// i.e. a grey-scale dilation over a square window. Across a valley this
+        /// returns the crest of its banks, which is what a fill level is measured
+        /// against.
+        /// </summary>
+        /// <param name="src">Source field, row-major, sizeX * sizeZ. Not modified.</param>
+        /// <param name="radiusPx">Half the window side. Below 1 the source is returned unchanged.</param>
+        public static float[] WindowMax(float[] src, int sizeX, int sizeZ, int radiusPx)
+        {
+            return WindowExtreme(src, sizeX, sizeZ, radiusPx, true);
+        }
+
+        /// <summary>
+        /// Lowest value within <paramref name="radiusPx"/> pixels on each axis,
+        /// i.e. a grey-scale erosion. Across a valley this returns the thalweg -
+        /// the deepest line of the channel - flattened across its width.
+        /// </summary>
+        public static float[] WindowMin(float[] src, int sizeX, int sizeZ, int radiusPx)
+        {
+            return WindowExtreme(src, sizeX, sizeZ, radiusPx, false);
+        }
+
+        /// <summary>
+        /// Separable sliding-window extreme. Runs a horizontal pass then a
+        /// vertical one, which gives the square-window result at twice the cost of
+        /// a single line pass rather than the window's area.
+        /// </summary>
+        private static float[] WindowExtreme(float[] src, int sizeX, int sizeZ,
+                                             int radiusPx, bool takeMax)
+        {
+            if (src == null) throw new ArgumentNullException("src");
+
+            int count = sizeX * sizeZ;
+            float[] dst = new float[count];
+            if (count == 0) return dst;
+
+            Array.Copy(src, dst, count);
+            if (radiusPx < 1) return dst;
+
+            int longest = sizeX > sizeZ ? sizeX : sizeZ;
+            float[] line = new float[longest];
+            float[] result = new float[longest];
+
+            // Holds indices into `line`, never more than one per element, so one
+            // allocation of the longest axis serves both passes.
+            int[] window = new int[longest];
+
+            for (int z = 0; z < sizeZ; z++)
+            {
+                int row = z * sizeX;
+                Array.Copy(dst, row, line, 0, sizeX);
+                RunExtreme(line, result, window, sizeX, radiusPx, takeMax);
+                Array.Copy(result, 0, dst, row, sizeX);
+            }
+
+            for (int x = 0; x < sizeX; x++)
+            {
+                for (int z = 0; z < sizeZ; z++) line[z] = dst[z * sizeX + x];
+                RunExtreme(line, result, window, sizeZ, radiusPx, takeMax);
+                for (int z = 0; z < sizeZ; z++) dst[z * sizeX + x] = result[z];
+            }
+
+            return dst;
+        }
+
+        /// <summary>
+        /// One line of the sliding extreme, edges clamped to the shortened window
+        /// so borders are not pulled toward zero.
+        /// </summary>
+        /// <remarks>
+        /// Lemire's streaming maximum-minimum filter (2006). `window` keeps only
+        /// the indices that can still win, in decreasing order of value for a max:
+        /// any earlier index whose value a newcomer beats can never win again, so
+        /// it is dropped on arrival. Each element is therefore pushed and popped at
+        /// most once and the whole line costs O(n) no matter how wide the window -
+        /// the naive rescan would be O(n * radius).
+        /// </remarks>
+        private static void RunExtreme(float[] line, float[] result, int[] window,
+                                       int length, int radius, bool takeMax)
+        {
+            int head = 0;   // oldest index still in contention
+            int tail = 0;   // one past the newest
+            int next = 0;   // next input index to admit
+
+            for (int i = 0; i < length; i++)
+            {
+                int leading = i + radius;
+                if (leading > length - 1) leading = length - 1;
+
+                while (next <= leading)
+                {
+                    float v = line[next];
+                    while (tail > head && (takeMax ? line[window[tail - 1]] <= v
+                                                   : line[window[tail - 1]] >= v))
+                        tail--;
+
+                    window[tail++] = next;
+                    next++;
+                }
+
+                // Retire indices that have fallen off the trailing edge. The guard
+                // keeps one entry alive because one always qualifies: index i is
+                // inside its own window and was admitted, and anything that evicted
+                // it was itself no further ahead than the leading edge.
+                int trailing = i - radius;
+                while (head + 1 < tail && window[head] < trailing) head++;
+
+                result[i] = line[window[head]];
+            }
+        }
     }
 }

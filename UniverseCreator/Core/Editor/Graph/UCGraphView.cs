@@ -39,6 +39,24 @@ namespace UniverseCreator.Editor.GraphUI
         /// node/link counter stays honest without polling.</summary>
         public event System.Action StructureChanged;
 
+        /// <summary>
+        /// Which node categories the add-node search offers. Null means all of
+        /// them, which is what the height-graph window wants.
+        /// </summary>
+        /// <remarks>
+        /// The two graph windows share this view, this serializer and this asset
+        /// type, because a texture node and a height node are both Generators and
+        /// duplicating the canvas to filter a menu would be a second copy of every
+        /// bug. The window sets this instead.
+        ///
+        /// Filtering the SEARCH is enough on its own: the port-compatibility rules
+        /// already stop a Surface output reaching a Matrix input, so a node that
+        /// slipped through could not be wired to anything anyway. What the filter
+        /// buys is that the texture window's menu does not offer twenty noise
+        /// generators whose output nothing in that graph can accept.
+        /// </remarks>
+        public System.Func<NodeCategory, bool> CategoryFilter;
+
         private readonly Dictionary<string, UCNodeView> views =
             new Dictionary<string, UCNodeView>();
 
@@ -88,7 +106,15 @@ namespace UniverseCreator.Editor.GraphUI
             Insert(0, grid);
 
             graphViewChanged = OnGraphViewChanged;
-            RegisterCallback<ContextClickEvent>(OnContextClick);
+
+            // Clipboard. GraphView already owns the Ctrl+X / Ctrl+C / Ctrl+V / Ctrl+D
+            // commands, the OS copy buffer and the menu wiring; the one thing it cannot
+            // know is how a Generator becomes text, which is what these three hooks ask.
+            // Left unassigned - which is how this view shipped - Copy produced nothing
+            // and Paste was greyed out for ever.
+            serializeGraphElements = OnSerializeSelection;
+            canPasteSerializedData = OnCanPaste;
+            unserializeAndPaste = OnPaste;
 
             BuildTrashBin();
 
@@ -100,7 +126,7 @@ namespace UniverseCreator.Editor.GraphUI
             // TrickleDown on both: SelectionDragger captures the pointer for the whole
             // drag, so during a capture these events are routed to the captor and a
             // normal bubble-phase handler on the view would never run.
-            RegisterCallback<MouseMoveEvent>(OnMouseMoveForTrash, TrickleDown.TrickleDown);
+            RegisterCallback<MouseMoveEvent>(OnMouseMove, TrickleDown.TrickleDown);
             RegisterCallback<MouseUpEvent>(OnMouseUpOverTrash, TrickleDown.TrickleDown);
         }
 
@@ -185,10 +211,17 @@ namespace UniverseCreator.Editor.GraphUI
             return trashBin != null && trashBin.layout.Contains(viewLocalPos);
         }
 
-        // Arms the bin as a drag passes over it. Registered as a TrickleDown handler so
-        // it still sees the move while SelectionDragger has the pointer captured.
-        private void OnMouseMoveForTrash(MouseMoveEvent evt)
+        // Arms the bin as a drag passes over it, and remembers where the pointer is.
+        // Registered as a TrickleDown handler so it still sees the move while
+        // SelectionDragger has the pointer captured.
+        //
+        // The remembered position is what a paste needs: Ctrl+V is a keyboard command
+        // with no position of its own, and the pointer is the only honest answer to
+        // "where did the user mean this to land".
+        private void OnMouseMove(MouseMoveEvent evt)
         {
+            RememberPointer(evt.mousePosition);
+
             if (trashBin == null) return;
 
             bool dragging = evt.pressedButtons != 0 && HasDeletableSelection();
@@ -305,6 +338,15 @@ namespace UniverseCreator.Editor.GraphUI
             node.editorPosition = contentPos;
             Graph.AddNode(node);
 
+            // Portals pair by channel-name equality: an In and the Out that carry the
+            // same channel are one link. Left on the shared "default" channel, a
+            // second pair silently overlaps the first - every PortalIn then pulls the
+            // same source and the graph reads a collapsed field (the "terrain goes
+            // flat" bug). Give each freshly dropped portal the lowest "Channel N" free
+            // FOR ITS DIRECTION, so the first In and first Out both land on Channel 1
+            // and pair up, the next pair takes Channel 2, and two Ins never share.
+            AssignUniquePortalChannel(node);
+
             CommentGroupNode comment = node as CommentGroupNode;
             if (comment != null)
             {
@@ -326,6 +368,53 @@ namespace UniverseCreator.Editor.GraphUI
 
             MarkGraphDirty();
             OnStructureChanged();
+        }
+
+        // A portal (In or Out) resolves its partner purely by channel name, and an
+        // In is meant to share its channel with an Out - that shared name IS the
+        // pair. So a freshly dropped portal takes the lowest "Channel N" not already
+        // used by another portal OF THE SAME DIRECTION: the first In and first Out
+        // both get "Channel 1" and pair up, a second pair gets "Channel 2", and two
+        // Ins can never collide onto one channel (which is what made both pull the
+        // same feed and flattened the terrain). The opposite direction is ignored on
+        // purpose. Renameable afterwards.
+        void AssignUniquePortalChannel(Generator node)
+        {
+            UniverseCreator.Nodes.Utilities.PortalInNode pin = node as UniverseCreator.Nodes.Utilities.PortalInNode;
+            UniverseCreator.Nodes.Utilities.PortalOutNode pout = node as UniverseCreator.Nodes.Utilities.PortalOutNode;
+            if (pin == null && pout == null) return; // not a portal
+
+            string current = pin != null ? pin.channel : pout.channel;
+            // Only re-channel the shared default; respect a channel the user already set.
+            if (!string.IsNullOrEmpty(current) && current != "default") return;
+
+            bool wantIn = pin != null;
+
+            // Channels already taken by portals of the SAME direction only. An In
+            // sharing a channel with an Out is the desired pairing, so the other
+            // direction must not block the number.
+            System.Collections.Generic.HashSet<string> used =
+                new System.Collections.Generic.HashSet<string>();
+            foreach (Generator g in Graph.nodes)
+            {
+                if (object.ReferenceEquals(g, node)) continue;
+                if (wantIn)
+                {
+                    UniverseCreator.Nodes.Utilities.PortalInNode gi = g as UniverseCreator.Nodes.Utilities.PortalInNode;
+                    if (gi != null && !string.IsNullOrEmpty(gi.channel)) used.Add(gi.channel);
+                }
+                else
+                {
+                    UniverseCreator.Nodes.Utilities.PortalOutNode go = g as UniverseCreator.Nodes.Utilities.PortalOutNode;
+                    if (go != null && !string.IsNullOrEmpty(go.channel)) used.Add(go.channel);
+                }
+            }
+
+            int n = 1;
+            string candidate = "Channel 1";
+            while (used.Contains(candidate)) { n++; candidate = "Channel " + n; }
+
+            if (pin != null) pin.channel = candidate; else pout.channel = candidate;
         }
 
         // A comment frame is added at the back of the content container so every
@@ -496,17 +585,163 @@ namespace UniverseCreator.Editor.GraphUI
         }
 
         // ------------------------------------------------------------------
-        //  Add-node search window
+        //  Right-click menu, add-node search window, clipboard
         // ------------------------------------------------------------------
 
-        private void OnContextClick(ContextClickEvent evt)
+        // Last pointer position in panel space, and whether one has been seen yet.
+        // A menu-driven Add Node and a keyboard paste both need a "here", and this is
+        // the only place that knows it.
+        private Vector2 lastPointerPosition;
+        private bool havePointer;
+
+        private void RememberPointer(Vector2 panelPosition)
         {
-            // evt.mousePosition is local to this GraphView; mapping it through the
-            // content container undoes the zoom/pan so the node lands where the
-            // user actually clicked.
-            pendingAddPosition = contentViewContainer.WorldToLocal(evt.mousePosition);
-            OpenSearchWindow(evt.mousePosition + worldBound.position);
-            evt.StopPropagation();
+            lastPointerPosition = panelPosition;
+            havePointer = true;
+        }
+
+        /// <summary>
+        /// The one canvas context menu: Add Node, then the ordinary editing commands
+        /// with their keyboard equivalents spelled out.
+        /// </summary>
+        /// <remarks>
+        /// This deliberately does NOT call base. GraphView's own menu offers Cut, Copy,
+        /// Delete and Duplicate but no add-node entry, and it appends Paste only when
+        /// the click missed every node - so right-clicking a node gave Cut and Copy with
+        /// no way to paste, and calling both menus would list every shared command twice.
+        ///
+        /// The actions themselves ARE the base's: CutSelectionCallback and friends are
+        /// exactly what Ctrl+X/C/V/D run, so the menu and the keyboard cannot diverge.
+        /// </remarks>
+        public override void BuildContextualMenu(ContextualMenuPopulateEvent evt)
+        {
+            // The click point is taken from the event that opened the menu rather than
+            // from a separate ContextClickEvent handler, so the menu and the node it
+            // creates cannot disagree about where the user clicked.
+            IMouseEvent trigger = evt.triggerEvent as IMouseEvent;
+            Vector2 viewPoint = trigger != null ? trigger.mousePosition : worldBound.center;
+            pendingAddPosition = contentViewContainer.WorldToLocal(viewPoint);
+            RememberPointer(viewPoint);
+
+            Vector2 screenPoint = worldBound.position + viewPoint;
+            evt.menu.AppendAction("Add Node", (a) => OpenSearchWindow(screenPoint));
+            evt.menu.AppendSeparator();
+
+            evt.menu.AppendAction("Cut  Ctrl+X", (a) => CutSelectionCallback(),
+                                  (a) => StatusOf(canCutSelection));
+            evt.menu.AppendAction("Copy  Ctrl+C", (a) => CopySelectionCallback(),
+                                  (a) => StatusOf(canCopySelection));
+            evt.menu.AppendAction("Paste  Ctrl+V", (a) => PasteCallback(),
+                                  (a) => StatusOf(canPaste));
+            evt.menu.AppendAction("Duplicate  Ctrl+D", (a) => DuplicateSelectionCallback(),
+                                  (a) => StatusOf(canDuplicateSelection));
+
+            evt.menu.AppendSeparator();
+            evt.menu.AppendAction("Delete  Del", (a) => DeleteSelection(),
+                                  (a) => StatusOf(HasDeletableMenuSelection()));
+        }
+
+        private static DropdownMenuAction.Status StatusOf(bool enabled)
+        {
+            return enabled ? DropdownMenuAction.Status.Normal
+                           : DropdownMenuAction.Status.Disabled;
+        }
+
+        // The menu's Delete covers wires as well as nodes and frames, which the trash
+        // bin deliberately does not: an edge cannot be picked up and dragged, so the
+        // bin has no gesture for one.
+        private bool HasDeletableMenuSelection()
+        {
+            if (HasDeletableSelection()) return true;
+
+            for (int i = 0; i < selection.Count; i++)
+                if (selection[i] is Edge) return true;
+
+            return false;
+        }
+
+        // GraphView hands this the elements it considers copyable and expects text back.
+        // Only node views carry a Generator; edges are not serialised here because
+        // SelectionToJson re-derives every connection running between two copied nodes
+        // from the graph itself, which is right whether or not the user lassoed the wires.
+        //
+        // Comment frames are absent for a structural reason worth stating: GraphView's
+        // copyable set is Node-and-friends, and UCCommentGroupView is a bare GraphElement,
+        // so the keyboard path could never include one. Filtering the same way here keeps
+        // the menu honest instead of copying frames that Ctrl+C would silently drop.
+        private string OnSerializeSelection(IEnumerable<GraphElement> elements)
+        {
+            if (Graph == null || elements == null) return null;
+
+            List<Generator> nodes = new List<Generator>();
+            foreach (GraphElement element in elements)
+            {
+                UCNodeView view = element as UCNodeView;
+                if (view != null && view.Node != null) nodes.Add(view.Node);
+            }
+
+            return nodes.Count == 0 ? null : GraphSerializer.SelectionToJson(Graph, nodes);
+        }
+
+        private bool OnCanPaste(string data)
+        {
+            return Graph != null && GraphSerializer.IsPasteableJson(data);
+        }
+
+        // Serves Paste, Duplicate and a paste of an exported .ucgraph alike - the base
+        // routes all of them here, so there is one arrival path for new nodes.
+        //
+        // operationName is the label GraphView would put on an undo group. This view has
+        // no undo stack of its own (edits are written straight through the Graph API and
+        // saved by MarkGraphDirty), so there is nothing here to label.
+        private void OnPaste(string operationName, string data)
+        {
+            if (Graph == null) return;
+
+            List<Generator> pasted = GraphSerializer.PasteJson(Graph, data);
+            if (pasted.Count == 0) return;
+
+            MovePastedBlock(pasted);
+
+            // Populate is the single canvas-building path; re-running it is what gives
+            // the pasted nodes their views and restores the wires between them, rather
+            // than a second copy of that loop living here.
+            Populate(Graph);
+
+            ClearSelection();
+            for (int i = 0; i < pasted.Count; i++)
+            {
+                UCNodeView view;
+                if (views.TryGetValue(pasted[i].id, out view)) { AddToSelection(view); continue; }
+
+                UCCommentGroupView frame;
+                if (groupViews.TryGetValue(pasted[i].id, out frame)) AddToSelection(frame);
+            }
+
+            MarkGraphDirty();
+            OnStructureChanged();
+        }
+
+        // Lands the pasted block with its top-left corner under the pointer, keeping the
+        // internal layout of the copied nodes intact. Pasting at the stored positions
+        // would drop the copy exactly on top of the original, and a fixed nudge would
+        // stack every repeated paste on the one before it.
+        private void MovePastedBlock(List<Generator> pasted)
+        {
+            Vector2 min = new Vector2(float.MaxValue, float.MaxValue);
+            for (int i = 0; i < pasted.Count; i++)
+            {
+                min.x = Mathf.Min(min.x, pasted[i].editorPosition.x);
+                min.y = Mathf.Min(min.y, pasted[i].editorPosition.y);
+            }
+            if (min.x == float.MaxValue) return;
+
+            Vector2 anchor = contentViewContainer.WorldToLocal(
+                havePointer ? lastPointerPosition : worldBound.center);
+
+            Vector2 shift = anchor - min;
+            for (int i = 0; i < pasted.Count; i++)
+                pasted[i].editorPosition += shift;
         }
 
         /// <summary>Toolbar path: opens the search window centred on the view.</summary>

@@ -37,6 +37,11 @@ namespace UniverseCreator.Editor.GraphUI
             string lastCategory = null;
             foreach (NodeCatalogEntry entry in NodeCatalog.All)
             {
+                // The owning window decides which categories it can host. Null
+                // means all of them, which is the height graph's answer.
+                if (owner != null && owner.CategoryFilter != null &&
+                    !owner.CategoryFilter(entry.category)) continue;
+
                 if (entry.category.ToString() != lastCategory)
                 {
                     lastCategory = entry.category.ToString();

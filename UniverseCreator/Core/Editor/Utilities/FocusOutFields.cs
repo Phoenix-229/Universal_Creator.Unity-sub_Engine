@@ -376,6 +376,57 @@ namespace UniverseCreator.Editor.Utilities
             return true;
         }
 
+        /// <summary>
+        /// One RangeFilter band: an enable toggle, then min/max/falloff/invert
+        /// indented beneath it.
+        ///
+        /// The sub-fields only draw when the band is enabled. A disabled band
+        /// contributes a weight of 1 to everything, so its numbers have no effect,
+        /// and showing four inert boxes per band would triple the height of a
+        /// composite filter node for no information.
+        ///
+        /// Deliberately number boxes rather than sliders: each band filters a
+        /// different quantity - normalised height is 0-1, slope is 0-90 degrees,
+        /// aspect is 0-360 - and this control cannot tell which, so a single
+        /// assumed span would be wrong for two of the three.
+        /// </summary>
+        public bool RangeFilterField(string label, string fieldName,
+                                     ref UniverseCreator.RangeFilter value, string tooltip)
+        {
+            bool changed = false;
+            UniverseCreator.RangeFilter v = value;
+
+            bool enabled = v.enabled;
+            if (Toggle(label, ref enabled, tooltip)) { v.enabled = enabled; changed = true; }
+
+            if (v.enabled)
+            {
+                EditorGUI.indentLevel++;
+
+                float min = v.min;
+                if (FloatField("Min", fieldName + "#min", ref min, "Lower bound of the accepted band."))
+                { v.min = min; changed = true; }
+
+                float max = v.max;
+                if (FloatField("Max", fieldName + "#max", ref max, "Upper bound of the accepted band."))
+                { v.max = max; changed = true; }
+
+                float falloff = v.falloff;
+                if (FloatField("Falloff", fieldName + "#fall", ref falloff,
+                               "Fade width outside each bound, in the same unit as Min/Max. 0 is a hard cut."))
+                { v.falloff = falloff; changed = true; }
+
+                bool invert = v.invert;
+                if (Toggle("Invert", ref invert, "Turns the band into an exclusion zone."))
+                { v.invert = invert; changed = true; }
+
+                EditorGUI.indentLevel--;
+            }
+
+            if (changed) { value = v; Changed = true; }
+            return changed;
+        }
+
         public bool CurveField(string label, ref AnimationCurve value, string tooltip)
         {
             AnimationCurve current = value ?? AnimationCurve.Linear(0, 0, 1, 1);

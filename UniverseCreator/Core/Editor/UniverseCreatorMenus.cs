@@ -55,6 +55,228 @@ namespace UniverseCreator.Editor
             CreateWorld(GraphTemplates.Template.Empty, false);
         }
 
+        // =====================================================================
+        //  WATER MENU
+        // =====================================================================
+        //
+        //  These four are the only way water appears in a scene by hand, and they
+        //  are the reason nothing creates water on its own. A project that wants
+        //  no water never opens this menu and never gets any: the graph's water
+        //  output nodes are opt-in too, so with neither, the water code does not
+        //  run at all.
+        //
+        //  Each entry only presets the component. Every value it sets is a field
+        //  the user can then change, which is the difference between a starting
+        //  point and an automatic decision.
+        //
+        //  The presets themselves live in SpawnWater rather than in the menu
+        //  callbacks, because the Water System Manager's inspector offers the same
+        //  four buttons. Two copies of "what an ocean starts as" drift apart the
+        //  first time one of them is tuned.
+
+        [MenuItem("GameObject/3D Object/Universe Creator/Water/Ocean", false, 30)]
+        private static void CreateOceanMenu() { SpawnWater(WaterPreset.Ocean, null); }
+
+        [MenuItem("GameObject/3D Object/Universe Creator/Water/Lake", false, 31)]
+        private static void CreateLakeMenu() { SpawnWater(WaterPreset.Lake, null); }
+
+        [MenuItem("GameObject/3D Object/Universe Creator/Water/River (Spline)", false, 32)]
+        private static void CreateRiverMenu() { SpawnWater(WaterPreset.River, null); }
+
+        [MenuItem("GameObject/3D Object/Universe Creator/Water/Pool", false, 33)]
+        private static void CreatePoolMenu() { SpawnWater(WaterPreset.Pool, null); }
+
+        /// <summary>The four water starting points offered by the menu and by the
+        /// Water System Manager inspector.</summary>
+        public enum WaterPreset
+        {
+            Ocean = 0,
+            Lake = 1,
+            River = 2,
+            Pool = 3
+        }
+
+        /// <summary>
+        /// Creates one preset water body, registers the undo, selects it and builds
+        /// it once. parentOverride places it under a specific WaterSystem; null
+        /// falls back to the selected world's, which is what the menu wants.
+        /// </summary>
+        public static UCWaterBody SpawnWater(WaterPreset preset, Transform parentOverride)
+        {
+            UCWaterBody body;
+
+            switch (preset)
+            {
+                case WaterPreset.Lake: body = PresetLake(parentOverride); break;
+                case WaterPreset.River: body = PresetRiver(parentOverride); break;
+                case WaterPreset.Pool: body = PresetPool(parentOverride); break;
+                default: body = PresetOcean(parentOverride); break;
+            }
+
+            // Defaults from the manager are written before the first build, so the
+            // body is built once with the settings it will keep rather than built
+            // twice with a visible flicker between them.
+            WaterPresets.ApplyManagerDefaults(body);
+
+            Finish(body);
+            return body;
+        }
+
+        private static UCWaterBody PresetOcean(Transform parentOverride)
+        {
+            UCWaterBody body = CreateWaterBody("Ocean", WaterBodyKind.Ocean,
+                                               UCWaterBody.ShapeMode.Rectangle, parentOverride);
+
+            // Defaults live in the runtime WaterPresets so the graph path uses the
+            // same numbers. Only authoring extras stay in the menu preset.
+            WaterPresets.ApplyDefaults(body);
+            return body;
+        }
+
+        private static UCWaterBody PresetLake(Transform parentOverride)
+        {
+            UCWaterBody body = CreateWaterBody("Lake", WaterBodyKind.Lake,
+                                               UCWaterBody.ShapeMode.Polygon, parentOverride);
+
+            WaterPresets.ApplyDefaults(body);
+
+            // Seeded rather than left empty: an empty outline builds nothing, and
+            // "I added a lake and nothing happened" is not a useful first minute.
+            // Authoring convenience only - the procedural path sets its own outline.
+            body.SeedOutline(12);
+            body.SnapCourseToGround();
+
+            return body;
+        }
+
+        private static UCWaterBody PresetRiver(Transform parentOverride)
+        {
+            UCWaterBody body = CreateWaterBody("River", WaterBodyKind.River,
+                                               UCWaterBody.ShapeMode.RiverSpline, parentOverride);
+
+            WaterPresets.ApplyDefaults(body);
+
+            // A river starts with NO course, deliberately, and unlike a lake. A lake's
+            // seeded 12-gon is a shape you then adjust; a straight seeded river is a line
+            // through ground it has nothing to do with, and dragging five points off it is
+            // more work than drawing five. So the inspector asks for CTRL + Click instead.
+            return body;
+        }
+
+        private static UCWaterBody PresetPool(Transform parentOverride)
+        {
+            UCWaterBody body = CreateWaterBody("Pool", WaterBodyKind.Pool,
+                                               UCWaterBody.ShapeMode.Rectangle, parentOverride);
+
+            WaterPresets.ApplyDefaults(body);
+            return body;
+        }
+
+        /// <summary>
+        /// Creates the object and the component with nothing preset. Public so a
+        /// test can build one without going through a menu callback.
+        ///
+        /// parentOverride is the WaterSystem to parent under. Null means "work it
+        /// out from the selection", which is what a menu click needs; the manager
+        /// inspector passes its own transform because the selection at that moment
+        /// is the manager itself, not a world.
+        /// </summary>
+        public static UCWaterBody CreateWaterBody(string name, WaterBodyKind kind,
+                                                  UCWaterBody.ShapeMode shape,
+                                                  Transform parentOverride)
+        {
+            GameObject go = new GameObject(name);
+
+            // Parented under the selected world's WaterSystem child when there is
+            // one, so a hand-placed body lands where the hierarchy already says
+            // water belongs instead of at the root of the scene.
+            Transform parent = parentOverride != null ? parentOverride : FindWaterSystem();
+            if (parent != null) go.transform.SetParent(parent, false);
+
+            go.transform.localPosition = GroundedSpawnPoint(parent);
+
+            UCWaterBody body = go.AddComponent<UCWaterBody>();
+
+            // The one place a kind is ever set. SetKindOnce locks it, so the
+            // inspector can show it as text and no later script can re-kind a body
+            // whose other fields were authored against what it already was.
+            body.SetKindOnce(kind);
+            body.shape = shape;
+
+            return body;
+        }
+
+        /// <summary>Selection-parented overload, kept so existing callers and tests
+        /// still compile against the original three-argument signature.</summary>
+        public static UCWaterBody CreateWaterBody(string name, WaterBodyKind kind,
+                                                  UCWaterBody.ShapeMode shape)
+        {
+            return CreateWaterBody(name, kind, shape, null);
+        }
+
+
+        private static void Finish(UCWaterBody body)
+        {
+            Undo.RegisterCreatedObjectUndo(body.gameObject, "Create " + body.name);
+            Selection.activeGameObject = body.gameObject;
+
+            // AddComponent already ran OnEnable, before any of the presets above
+            // were written, so the first build has to be asked for explicitly.
+            body.Rebuild();
+
+            EditorUtility.SetDirty(body);
+        }
+
+        /// <summary>The WaterSystem child of the selected world, or null.</summary>
+        private static Transform FindWaterSystem()
+        {
+            GameObject selected = Selection.activeGameObject;
+            if (selected == null) return null;
+
+            UniverseCreatorObject world = selected.GetComponentInParent<UniverseCreatorObject>();
+            if (world == null) return null;
+
+            return world.transform.Find("WaterSystem");
+        }
+
+        /// <summary>
+        /// Where a new body starts: under the scene view pivot, at the height of
+        /// the terrain there. Dropping it at the origin puts it kilometres from
+        /// what the user is looking at, and dropping it at the pivot's own Y
+        /// leaves it floating above or buried under the ground.
+        /// </summary>
+        private static Vector3 GroundedSpawnPoint(Transform parent)
+        {
+            Vector3 point = Vector3.zero;
+
+            if (SceneView.lastActiveSceneView != null)
+            {
+                Vector3 pivot = SceneView.lastActiveSceneView.pivot;
+                point = new Vector3(pivot.x, 0f, pivot.z);
+            }
+
+            Terrain[] terrains = Terrain.activeTerrains;
+            for (int i = 0; i < terrains.Length; i++)
+            {
+                Terrain terrain = terrains[i];
+                if (terrain == null || terrain.terrainData == null) continue;
+
+                Vector3 local = point - terrain.transform.position;
+                Vector3 size = terrain.terrainData.size;
+
+                if (local.x < 0f || local.z < 0f || local.x > size.x || local.z > size.z) continue;
+
+                point.y = terrain.transform.position.y +
+                          terrain.terrainData.GetInterpolatedHeight(local.x / size.x, local.z / size.z);
+                break;
+            }
+
+            // Local, because the object is parented before this is assigned.
+            if (parent != null) point = parent.InverseTransformPoint(point);
+
+            return point;
+        }
+
         /// <summary>
         /// Builds a world root, its child hierarchy, and optionally a graph asset.
         /// Returns the created component so tests and other menu paths can reuse it.
@@ -76,16 +298,9 @@ namespace UniverseCreator.Editor
             // hundreds of kilometres out, where float precision is coarse enough that
             // Unity itself warns about it and the surface jitters and z-fights. Past
             // that distance the pivot is not a deliberate placement, so origin wins.
-            if (SceneView.lastActiveSceneView != null)
-            {
-                Vector3 pivot = SceneView.lastActiveSceneView.pivot;
-                Vector3 ground = new Vector3(pivot.x, 0f, pivot.z);
-
-                float worldSpan = Mathf.Max(1f, creator.worldSizeKm * 1000f);
-                float limit = Mathf.Max(10000f, worldSpan * 4f);
-
-                root.transform.position = ground.magnitude <= limit ? ground : Vector3.zero;
-            }
+            // The user explicitly requested all terrains start exactly at (0,0,0) global coordinates,
+            // not at a random raycast hit from the Scene View.
+            root.transform.position = Vector3.zero;
 
             if (EditorPrefs.GetBool(PrefBuildHierarchy, true))
                 BuildHierarchy(root, creator);
@@ -153,10 +368,13 @@ namespace UniverseCreator.Editor
         }
 
         /// <summary>
-        /// Creates the child objects listed in the design document, Section 3.1.
-        /// Modules 2-9 fill these in; Module 1 only needs Terrain and ChunkManager
-        /// to be live, so the rest are named placeholders that later modules attach
-        /// their components to rather than restructuring the hierarchy.
+        /// Creates the child objects listed in the design document, Section 3.1,
+        /// and attaches each one's manager.
+        ///
+        /// Terrain deliberately gets nothing. Its cells are created and owned by
+        /// ChunkManager, and every setting that would go on a terrain manager is
+        /// already on the world root or on the graph. A component there would be a
+        /// second place to change the same number, and the two would disagree.
         /// </summary>
         private static void BuildHierarchy(GameObject root, UniverseCreatorObject creator)
         {
@@ -166,10 +384,20 @@ namespace UniverseCreator.Editor
             // a static helper, not a component, so nothing is attached here.
             MakeChild(root, "Terrain");
 
-            MakeChild(root, "WaterSystem");        // Module 3
-            MakeChild(root, "VegetationSystem");   // Module 4
-            MakeChild(root, "WeatherSystem");      // Module 5
-            MakeChild(root, "LightingSystem");     // Module 5
+            // Module 3. Live: this drives both hand-placed and graph-built water.
+            MakeChild(root, "WaterSystem").AddComponent<UCWaterSystemManager>();
+
+            // Module 4. Declared only - the fields describe the module to come.
+            MakeChild(root, "VegetationSystem").AddComponent<UCVegetationSystemManager>();
+
+            // Module 5. Wind is live here; the rest of weather is declared only.
+            // Placed above the terrain at Y=500 as requested, so the WindZone icon doesn't end up underground.
+            GameObject weatherSystem = MakeChild(root, "WeatherSystem");
+            weatherSystem.transform.localPosition = new Vector3(0f, 500f, 0f);
+            weatherSystem.AddComponent<UCWeatherSystemManager>();
+
+            // Module 5. Declared only.
+            MakeChild(root, "LightingSystem").AddComponent<UCLightingSystemManager>();
 
             GameObject chunkManager = MakeChild(root, "ChunkManager");
             ChunkManager cm = chunkManager.AddComponent<ChunkManager>();
@@ -180,7 +408,12 @@ namespace UniverseCreator.Editor
             cm.EnsureSliceMap();
 
             GameObject roadLink = MakeChild(root, "RoadMasterLinker");
-            roadLink.AddComponent<RoadMasterLinker>();   // Module 7 bridge
+            RoadMasterLinker linker = roadLink.AddComponent<RoadMasterLinker>();   // Module 7 bridge
+
+            // Wired here rather than left for the user to drag: the linker is useless
+            // until it knows which world it answers height queries for, and there is
+            // exactly one candidate at this point.
+            linker.universeCreator = creator;
         }
 
         private static GameObject MakeChild(GameObject parent, string name)

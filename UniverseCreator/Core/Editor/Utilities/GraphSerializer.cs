@@ -83,13 +83,54 @@ namespace UniverseCreator.Editor.Utilities
         public static string ToJson(Graph graph)
         {
             if (graph == null) return null;
+            return Write(graph.name, graph.nodes, graph.connections);
+        }
 
-            GraphDTO dto = new GraphDTO();
-            dto.graphName = graph.name;
+        /// <summary>
+        /// Serialises just the given nodes, plus the connections that run between two
+        /// of them. Deliberately the same format as a whole-graph export, so a copied
+        /// selection pastes into any graph window - and an exported .ucgraph pastes
+        /// back as a selection.
+        ///
+        /// Connections crossing the selection boundary are left out on purpose: a
+        /// pasted node cannot share its source's single input slot without silently
+        /// stealing or duplicating upstream data, and guessing which the user meant is
+        /// worse than leaving the inlet open.
+        /// </summary>
+        public static string SelectionToJson(Graph graph, IList<Generator> selection)
+        {
+            if (graph == null || selection == null || selection.Count == 0) return null;
 
-            for (int i = 0; i < graph.nodes.Count; i++)
+            HashSet<string> inside = new HashSet<string>();
+            for (int i = 0; i < selection.Count; i++)
             {
-                Generator node = graph.nodes[i];
+                Generator node = selection[i];
+                if (node != null && !string.IsNullOrEmpty(node.id)) inside.Add(node.id);
+            }
+
+            List<Connection> internalLinks = new List<Connection>();
+            for (int i = 0; i < graph.connections.Count; i++)
+            {
+                Connection c = graph.connections[i];
+                if (inside.Contains(c.sourceNodeId) && inside.Contains(c.targetNodeId))
+                    internalLinks.Add(c);
+            }
+
+            return Write(graph.name, selection, internalLinks);
+        }
+
+        // The one place a graph or a selection becomes .ucgraph text: ToJson hands over
+        // the whole graph, SelectionToJson a subset. A second writer would be a second
+        // format to keep in step with the single reader below.
+        private static string Write(string graphName, IList<Generator> nodes,
+                                    IList<Connection> connections)
+        {
+            GraphDTO dto = new GraphDTO();
+            dto.graphName = graphName;
+
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                Generator node = nodes[i];
                 if (node == null) continue;   // a removed script leaves a null hole in the list
 
                 NodeDTO n = new NodeDTO();
@@ -98,9 +139,9 @@ namespace UniverseCreator.Editor.Utilities
                 dto.nodes.Add(n);
             }
 
-            for (int i = 0; i < graph.connections.Count; i++)
+            for (int i = 0; i < connections.Count; i++)
             {
-                Connection c = graph.connections[i];
+                Connection c = connections[i];
                 if (string.IsNullOrEmpty(c.sourceNodeId)) continue;
 
                 ConnectionDTO cd = new ConnectionDTO();
@@ -151,13 +192,13 @@ namespace UniverseCreator.Editor.Utilities
         //  IMPORT
         // =====================================================================
 
-        /// <summary>
-        /// Rebuilds a graph from .ucgraph JSON as an unsaved in-memory asset.
-        /// Nodes whose type no longer exists are skipped with a warning, and any
-        /// connection touching a skipped node is dropped - a dangling connection
-        /// would otherwise crash evaluation on the first pull.
-        /// </summary>
-        public static Graph FromJson(string json)
+        // The one place .ucgraph text becomes DTOs, shared by import and paste.
+        //
+        // `logErrors` is off for the clipboard probe: IsPasteableJson runs on every
+        // Ctrl+V and on every context-menu build, and the copy buffer normally holds
+        // ordinary text, so logging there would be console spam rather than a
+        // diagnostic. Returns null when the text is not a graph payload at all.
+        private static GraphDTO ReadDto(string json, bool logErrors)
         {
             if (string.IsNullOrEmpty(json)) return null;
 
@@ -168,16 +209,31 @@ namespace UniverseCreator.Editor.Utilities
             }
             catch (Exception e)
             {
-                Debug.LogError("Universe Creator: .ucgraph is not valid JSON - " + e.Message);
+                if (logErrors)
+                    Debug.LogError("Universe Creator: .ucgraph is not valid JSON - " + e.Message);
                 return null;
             }
 
-            if (dto.version > FormatVersion)
+            if (dto.version > FormatVersion && logErrors)
             {
                 Debug.LogWarning("Universe Creator: .ucgraph was written by a newer version (" +
                                  dto.version + " > " + FormatVersion + "). Importing anyway; " +
                                  "unknown fields will be ignored.");
             }
+
+            return dto;
+        }
+
+        /// <summary>
+        /// Rebuilds a graph from .ucgraph JSON as an unsaved in-memory asset.
+        /// Nodes whose type no longer exists are skipped with a warning, and any
+        /// connection touching a skipped node is dropped - a dangling connection
+        /// would otherwise crash evaluation on the first pull.
+        /// </summary>
+        public static Graph FromJson(string json)
+        {
+            GraphDTO dto = ReadDto(json, true);
+            if (dto == null) return null;
 
             Graph graph = ScriptableObject.CreateInstance<Graph>();
             graph.name = string.IsNullOrEmpty(dto.graphName) ? "Imported Graph" : dto.graphName;
@@ -238,85 +294,177 @@ namespace UniverseCreator.Editor.Utilities
         }
 
         // =====================================================================
-        //  DUPLICATE / ID REMAPPING
+        //  CLIPBOARD  (paste / duplicate)
         // =====================================================================
 
         /// <summary>
-        /// Deep-copies a set of nodes into the same graph with fresh ids, and
-        /// rewires connections that ran between two copied nodes so the copy is
-        /// independently functional.
-        ///
-        /// Connections crossing the selection boundary are deliberately NOT
-        /// copied: a duplicated node cannot share its source's single input slot
-        /// without silently stealing or duplicating upstream data, and guessing
-        /// which the user meant is worse than leaving the inlet open.
-        ///
-        /// Returns the new nodes, in the same order as the input.
+        /// True if the text is a .ucgraph payload holding at least one node. Drives
+        /// the Paste command's enabled state, so it has to be cheap and must never
+        /// log - the copy buffer usually holds something else entirely.
         /// </summary>
-        public static List<Generator> DuplicateNodes(Graph graph, IList<Generator> source,
-                                                     Vector2 positionOffset)
+        public static bool IsPasteableJson(string json)
         {
-            List<Generator> copies = new List<Generator>();
-            if (graph == null || source == null || source.Count == 0) return copies;
+            if (string.IsNullOrEmpty(json)) return false;
+
+            // Cheap reject first. Parsing every clipboard string on every menu build
+            // would be work spent on ordinary copied text.
+            if (json.IndexOf("\"nodes\"", StringComparison.Ordinal) < 0) return false;
+
+            GraphDTO dto = ReadDto(json, false);
+            return dto != null && dto.nodes.Count > 0;
+        }
+
+        /// <summary>
+        /// Pastes .ucgraph text into an existing graph as a fresh, independent set of
+        /// nodes, and returns them in payload order.
+        ///
+        /// Positions come straight from the payload; where the block finally lands is
+        /// the caller's call, because only the view knows where the pointer is.
+        /// </summary>
+        public static List<Generator> PasteJson(Graph graph, string json)
+        {
+            List<Generator> pasted = new List<Generator>();
+            if (graph == null) return pasted;
+
+            GraphDTO dto = ReadDto(json, true);
+            if (dto == null) return pasted;
+
+            List<Generator> incoming = new List<Generator>();
+            for (int i = 0; i < dto.nodes.Count; i++)
+            {
+                Generator node = Instantiate(dto.nodes[i]);
+                if (node != null) incoming.Add(node);
+            }
+
+            List<Connection> links = new List<Connection>();
+            for (int i = 0; i < dto.connections.Count; i++)
+            {
+                ConnectionDTO cd = dto.connections[i];
+                links.Add(new Connection(cd.sourceNodeId, cd.sourcePort,
+                                         cd.targetNodeId, cd.targetPort));
+            }
+
+            return Adopt(graph, incoming, links);
+        }
+
+        // Takes nodes that are already independent instances - freshly deserialised,
+        // so nothing is shared with whatever they were copied from - and makes them
+        // members of `graph` under fresh ids, rewiring the connections that ran
+        // between two of them.
+        //
+        // A fresh id is what makes this a paste rather than a second reference to the
+        // same node: Graph keys everything by id, so reusing the payload's ids would
+        // make the copy indistinguishable from the original.
+        private static List<Generator> Adopt(Graph graph, IList<Generator> incoming,
+                                             IList<Connection> links)
+        {
+            List<Generator> adopted = new List<Generator>();
+            if (graph == null || incoming == null || incoming.Count == 0) return adopted;
 
             // old id -> new id, so the connection pass can find the copies.
             Dictionary<string, string> idMap = new Dictionary<string, string>();
 
-            for (int i = 0; i < source.Count; i++)
+            for (int i = 0; i < incoming.Count; i++)
             {
-                Generator original = source[i];
-                if (original == null) continue;
+                Generator node = incoming[i];
+                if (node == null) continue;
 
-                Generator copy = Clone(original);
-                if (copy == null) continue;
-
-                string oldId = original.id;
-
-                // A fresh id is what makes this a copy rather than a second
-                // reference to the same node - Graph keys everything by id.
-                copy.id = Guid.NewGuid().ToString();
-                copy.editorPosition = original.editorPosition + positionOffset;
+                string oldId = node.id;
+                node.id = Guid.NewGuid().ToString();
 
                 if (!string.IsNullOrEmpty(oldId) && !idMap.ContainsKey(oldId))
-                    idMap[oldId] = copy.id;
+                    idMap[oldId] = node.id;
 
-                graph.nodes.Add(copy);
-                copies.Add(copy);
+                graph.AddNode(node);
+                adopted.Add(node);
             }
 
-            for (int i = 0; i < graph.connections.Count; i++)
+            // Portals pair by channel name, so a plain copy would keep the source
+            // channel and collide with the original (both PortalIns then pull the same
+            // feed - the "terrain goes flat" bug). Remap the pasted portals' channels
+            // as a group: a copied In+Out pair stays paired, but on a fresh channel
+            // unused elsewhere.
+            RechannelDuplicatedPortals(graph, adopted);
+
+            if (links != null)
             {
-                Connection c = graph.connections[i];
-                if (string.IsNullOrEmpty(c.sourceNodeId)) continue;
+                for (int i = 0; i < links.Count; i++)
+                {
+                    Connection c = links[i];
+                    if (string.IsNullOrEmpty(c.sourceNodeId) ||
+                        string.IsNullOrEmpty(c.targetNodeId)) continue;
 
-                string newSource, newTarget;
-                if (!idMap.TryGetValue(c.sourceNodeId, out newSource)) continue;
-                if (!idMap.TryGetValue(c.targetNodeId, out newTarget)) continue;
+                    string newSource, newTarget;
+                    if (!idMap.TryGetValue(c.sourceNodeId, out newSource)) continue;
+                    if (!idMap.TryGetValue(c.targetNodeId, out newTarget)) continue;
 
-                graph.AddConnection(new Connection(newSource, c.sourcePortIndex, newTarget, c.targetPortIndex));
+                    graph.AddConnection(new Connection(newSource, c.sourcePortIndex,
+                                                       newTarget, c.targetPortIndex));
+                }
             }
 
             GraphAssetUtility.MarkDirty(graph);
-            return copies;
+            return adopted;
+        }
+
+        // Give each distinct portal channel among the copies a fresh channel that
+        // no portal elsewhere in the graph uses, then apply that mapping to every
+        // copy. Copied pairs share one old channel, so they map to one new channel
+        // and stay paired; a lone copied end just gets its own unused channel.
+        static void RechannelDuplicatedPortals(Graph graph, List<Generator> copies)
+        {
+            if (graph == null || copies == null || copies.Count == 0) return;
+
+            // Channels in use by portals that are NOT among the copies.
+            HashSet<string> used = new HashSet<string>();
+            foreach (Generator g in graph.nodes)
+            {
+                if (copies.Contains(g)) continue;
+                string ch = PortalChannelOf(g);
+                if (!string.IsNullOrEmpty(ch)) used.Add(ch);
+            }
+
+            Dictionary<string, string> remap = new Dictionary<string, string>();
+            int n = 1;
+            foreach (Generator g in copies)
+            {
+                string old = PortalChannelOf(g);
+                if (string.IsNullOrEmpty(old)) continue;
+
+                string fresh;
+                if (!remap.TryGetValue(old, out fresh))
+                {
+                    string candidate = "Channel " + n;
+                    while (used.Contains(candidate)) { n++; candidate = "Channel " + n; }
+                    used.Add(candidate);
+                    remap[old] = candidate;
+                    fresh = candidate;
+                    n++;
+                }
+                SetPortalChannel(g, fresh);
+            }
+        }
+
+        static string PortalChannelOf(Generator g)
+        {
+            UniverseCreator.Nodes.Utilities.PortalInNode pin = g as UniverseCreator.Nodes.Utilities.PortalInNode;
+            if (pin != null) return pin.channel;
+            UniverseCreator.Nodes.Utilities.PortalOutNode pout = g as UniverseCreator.Nodes.Utilities.PortalOutNode;
+            if (pout != null) return pout.channel;
+            return null;
+        }
+
+        static void SetPortalChannel(Generator g, string value)
+        {
+            UniverseCreator.Nodes.Utilities.PortalInNode pin = g as UniverseCreator.Nodes.Utilities.PortalInNode;
+            if (pin != null) { pin.channel = value; return; }
+            UniverseCreator.Nodes.Utilities.PortalOutNode pout = g as UniverseCreator.Nodes.Utilities.PortalOutNode;
+            if (pout != null) pout.channel = value;
         }
 
         // =====================================================================
         //  HELPERS
         // =====================================================================
-
-        // Round-trips a node through JSON to deep-copy it. Reflection field-copying
-        // would alias nested reference types (curves, gradients), so an edit to the
-        // copy would reach back into the original.
-        private static Generator Clone(Generator original)
-        {
-            if (original == null) return null;
-
-            Generator copy = Activator.CreateInstance(original.GetType()) as Generator;
-            if (copy == null) return null;
-
-            EditorJsonUtility.FromJsonOverwrite(EditorJsonUtility.ToJson(original, false), copy);
-            return copy;
-        }
 
         // Resolves a type name across the loaded assemblies and rehydrates it.
         // Type.GetType alone only searches the calling assembly plus mscorlib, so

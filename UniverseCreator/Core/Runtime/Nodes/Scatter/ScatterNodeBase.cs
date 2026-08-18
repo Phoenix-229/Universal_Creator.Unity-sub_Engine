@@ -1,18 +1,23 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
+//                     Module 2: placement solver implemented
 //  File:    ScatterNodeBase.cs
 //  Purpose: Shared base for the six Scatter nodes.
 //
-//  MODULE 1 SCOPE: these nodes are stubs. The graph wiring, port contract,
-//  parameter sets, and OutputBag channel plumbing are real and final — that is
-//  what Module 1 owns. The placement solver (Poisson-disk sampling, density
-//  weighting, slope/height rejection, collision resolution) belongs to Modules
-//  2 and 3 and is marked TODO below.
+//  Module 1 owned the graph wiring, port contract, parameter sets, and OutputBag
+//  channel plumbing. Module 2 fills in the placement solver that was stubbed:
+//  blue-noise sampling at minSpacing, density and mask weighting, height and
+//  slope rejection, Y snapping, and randomised scale and yaw.
 //
-//  A stubbed node reports its stubbed state via WasStubbed rather than quietly
-//  emitting zero instances, so a graph author can tell "no instances because the
-//  solver is not written yet" apart from "no instances because the mask rejected
-//  everything".
+//  Per-type prototype selection and species rules remain the subclass's job via
+//  PlaceInstances, which now receives a populated list instead of an empty one.
+//
+//  SEAMLESSNESS
+//  ------------
+//  The solver is driven from ABSOLUTE world coordinates, not from the tile's
+//  index, exactly as the noise creators are. Two neighbouring chunks solved on
+//  separate workers therefore agree about the instances near their shared edge,
+//  and regenerating a chunk reproduces its layout precisely.
 // -----------------------------------------------------------------------------
 
 using System.Collections.Generic;
@@ -55,11 +60,54 @@ namespace UniverseCreator.Nodes.Scatter
         public bool randomYaw = true;
 
         /// <summary>
-        /// True while the placement solver is unimplemented. Read by the editor
-        /// to badge the node, so an empty result is never mistaken for a working
-        /// node that found nothing.
+        /// Softens the height and slope cutoffs so a field thins out over the last
+        /// few degrees rather than stopping along a contour line. Slope units are
+        /// degrees; the height band uses a fixed small fraction of its own range.
         /// </summary>
-        public bool WasStubbed { get { return true; } }
+        public float slopeFalloff = 5f;
+
+        /// <summary>
+        /// Tilts instances toward the surface normal. 0 keeps everything upright,
+        /// which is right for trees; 1 lays them flat against the slope, which is
+        /// right for rocks and debris.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately NOT named alignToNormal: RockScatterNode and
+        /// ObjectScatterNode already ship a serialized bool by that name, and a
+        /// same-named base field would hide theirs (CS0108) so their inspector
+        /// setting would silently stop reaching the solver. They route their bool
+        /// in through <see cref="NormalAlignment"/> instead.
+        /// </remarks>
+        public float normalAlignment;
+
+        /// <summary>
+        /// Effective 0-1 normal alignment the solver applies. Subclasses with their
+        /// own alignment control override this to feed it in.
+        /// </summary>
+        protected virtual float NormalAlignment { get { return normalAlignment; } }
+
+        /// <summary>
+        /// Above 0, thins sparse areas so the remaining instances read as groves
+        /// and thickets rather than an even field.
+        /// </summary>
+        public float clusterStrength;
+
+        /// <summary>Neighbourhood radius the cluster test measures density over.</summary>
+        public float clusterRadius = 25f;
+
+        /// <summary>
+        /// Safety ceiling on instances emitted per chunk. A misconfigured density
+        /// on a 1 km chunk can ask for millions, which would exhaust memory before
+        /// anything reached the terrain.
+        /// </summary>
+        public int maxInstancesPerChunk = 50000;
+
+        /// <summary>
+        /// False since Module 2: the placement solver is implemented. Subclasses
+        /// whose per-type rules are still outstanding override this back to true
+        /// so the editor keeps badging them.
+        /// </summary>
+        public virtual bool WasStubbed { get { return false; } }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
@@ -70,22 +118,170 @@ namespace UniverseCreator.Nodes.Scatter
 
             List<ScatterInstance> instances = new List<ScatterInstance>();
 
-            // TODO [Module 2/3]: implement the placement solver.
-            //   1. Poisson-disk sample the tile at minSpacing, seeded by
-            //      (seed, tile.chunkCoord) so results are deterministic and
-            //      stable across regeneration.
-            //   2. Weight candidate acceptance by density * mask value.
-            //   3. Reject candidates outside [minHeight, maxHeight] sampled from
-            //      the height matrix, and outside [minSlope, maxSlope] from the
-            //      slope derived off it.
-            //   4. Resolve position to world space, snap Y to the height field,
-            //      randomise scale within scaleRange and yaw when randomYaw.
-            //   5. Call PlaceInstances below to let each subclass apply its own
-            //      prototype selection and per-type rules.
+            // No height field means nothing to stand on. Emitting an empty channel
+            // rather than returning early keeps consumers from distinguishing
+            // "unwired" from "never ran".
+            if (height == null)
+            {
+                tile.outputs.AddScatter(Channel, instances);
+                return null;
+            }
+
+            List<ScatterCandidate> candidates = SolvePlacement(height, mask, tile, stop);
+
+            if (stop != null && stop.StopRequested) return null;
+
+            BuildInstances(candidates, height, tile, instances, stop);
+
+            // Subclass hook. Runs last so per-type rules can filter, duplicate, or
+            // re-parameterise what the shared solver produced.
             PlaceInstances(height, mask, tile, instances, stop);
 
             tile.outputs.AddScatter(Channel, instances);
             return null;
+        }
+
+        /// <summary>
+        /// Runs the blue-noise solve and returns accepted candidates with their
+        /// height, slope, and mask values resolved.
+        /// </summary>
+        protected virtual List<ScatterCandidate> SolvePlacement(
+            Matrix height, Matrix mask, TileData tile, StopToken stop)
+        {
+            ScatterFilter filter = new ScatterFilter();
+
+            // Only enable a filter that actually excludes something. An enabled
+            // slope filter costs a full Sobel pass over the tile, so a node left
+            // at the full 0-90 range should not pay for it.
+            if (minHeight > 0f || maxHeight < 1f)
+                filter.height = RangeFilter.Band(minHeight, maxHeight, 0.02f);
+
+            if (minSlope > 0f || maxSlope < 90f)
+                filter.slope = RangeFilter.Band(minSlope, maxSlope, Mathf.Max(0f, slopeFalloff));
+
+            filter.Bind(height, mask);
+
+            PoissonSettings settings = PoissonSettings.Default;
+
+            // Spacing is whichever constraint binds harder: the explicit minimum,
+            // or the spacing implied by the requested density. Ignoring the second
+            // would let a low density still emit a dense field that is then thinned
+            // probabilistically - far more darts thrown for the same result.
+            float densitySpacing = PoissonDisc.SpacingForDensity(density);
+            settings.minSpacing = Mathf.Max(Mathf.Max(0.01f, minSpacing), densitySpacing);
+
+            // Chunk coordinate does NOT enter the seed. The world cell hash already
+            // makes placement position-dependent, and folding the chunk index in
+            // would make the same world position hash differently depending on
+            // which chunk asked - which is exactly the seam this design avoids.
+            settings.seed = seed;
+            settings.maxPoints = Mathf.Max(1, maxInstancesPerChunk);
+
+            // StopToken is the node-graph cancellation type; the math layer takes a
+            // plain predicate so it stays free of graph types.
+            System.Func<bool> isCancelled = null;
+            if (stop != null) isCancelled = delegate { return stop.StopRequested; };
+
+            List<ScatterCandidate> candidates = PoissonDisc.Solve(
+                settings,
+                tile.worldPos.x, tile.worldPos.z,
+                tile.worldSize.x, tile.worldSize.z,
+                filter.EvaluateWorld,
+                isCancelled);
+
+            if (clusterStrength > 0.001f && clusterRadius > 0f)
+                candidates = PoissonDisc.ApplyClusterBias(
+                    candidates, clusterRadius, clusterStrength, isCancelled);
+
+            // Resolve fills in height, slope, and mask for the survivors only, so
+            // rejected darts never pay for the sampling.
+            filter.ResolveAll(candidates, isCancelled);
+            filter.Unbind();
+
+            return candidates;
+        }
+
+        /// <summary>
+        /// Turns accepted candidates into placed instances: world position with Y
+        /// snapped to the surface, randomised uniform scale, yaw, and optional
+        /// alignment to the surface normal.
+        /// </summary>
+        protected virtual void BuildInstances(
+            List<ScatterCandidate> candidates, Matrix height, TileData tile,
+            List<ScatterInstance> instances, StopToken stop)
+        {
+            if (candidates == null) return;
+
+            float scaleMin = Mathf.Min(scaleRange.x, scaleRange.y);
+            float scaleMax = Mathf.Max(scaleRange.x, scaleRange.y);
+
+            // A second hash stream, offset from the placement seed so scale and yaw
+            // do not correlate with position - reusing candidate.random for all
+            // three would make big instances always face the same way.
+            Noise variation = new Noise(seed + 7919);
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (stop != null && (i & 255) == 0 && stop.StopRequested) return;
+
+                ScatterCandidate c = candidates[i];
+
+                float worldY = tile.worldPos.y + c.height * tile.worldHeight;
+
+                // Quantising to centimetres before hashing keeps the variation
+                // stable: a position that differs in the last float bit between
+                // two runs would otherwise pick a different scale.
+                int hx = Mathf.RoundToInt(c.worldX * 100f);
+                int hz = Mathf.RoundToInt(c.worldZ * 100f);
+
+                float rScale = variation.Random(hx, hz);
+                float rYaw = variation.Random(hz + 104729, hx + 1299709);
+
+                float scale = Mathf.Lerp(scaleMin, scaleMax, rScale);
+
+                Quaternion rotation = Quaternion.identity;
+                if (randomYaw) rotation = Quaternion.Euler(0f, rYaw * 360f, 0f);
+
+                float align = Mathf.Clamp01(NormalAlignment);
+                if (align > 0.001f)
+                {
+                    Vector3 normal = SampleNormal(height, c.worldX, c.worldZ);
+                    Quaternion aligned = Quaternion.FromToRotation(Vector3.up, normal) * rotation;
+                    rotation = Quaternion.Slerp(rotation, aligned, align);
+                }
+
+                instances.Add(new ScatterInstance(
+                    new Vector3(c.worldX, worldY, c.worldZ),
+                    rotation,
+                    new Vector3(scale, scale, scale),
+                    0));
+            }
+        }
+
+        /// <summary>
+        /// Surface normal at a world position, by central difference on the height
+        /// field. Per-instance rather than a whole-field Sobel pass, because only
+        /// the accepted candidates need it.
+        /// </summary>
+        protected static Vector3 SampleNormal(Matrix height, float worldX, float worldZ)
+        {
+            if (height == null) return Vector3.up;
+
+            Vector2 ps = height.PixelSize;
+            if (ps.x <= 1e-9f || ps.y <= 1e-9f) return Vector3.up;
+
+            Vector2 p = height.WorldToPixel(worldX, worldZ);
+
+            float hl = height.GetInterpolated(p.x - 1f, p.y);
+            float hr = height.GetInterpolated(p.x + 1f, p.y);
+            float hd = height.GetInterpolated(p.x, p.y - 1f);
+            float hu = height.GetInterpolated(p.x, p.y + 1f);
+
+            // Rise is normalised height scaled back to metres; run is two pixels.
+            float dx = (hr - hl) * height.worldHeight / (2f * ps.x);
+            float dz = (hu - hd) * height.worldHeight / (2f * ps.y);
+
+            return new Vector3(-dx, 1f, -dz).normalized;
         }
 
         /// <summary>

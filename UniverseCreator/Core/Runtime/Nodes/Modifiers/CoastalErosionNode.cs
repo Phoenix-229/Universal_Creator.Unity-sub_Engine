@@ -4,6 +4,25 @@
 //  Purpose: Cuts a wave-notch terrace in a band around sea level, flattening
 //           beaches and undercutting cliffs. Restricted to the band, so inland
 //           terrain is untouched.
+//
+//  TEXTURING THE BEACH THIS CUTS
+//  ----------------------------
+//  This node shapes the beach; it does not paint it. The mask that says WHERE the
+//  beach is already exists and does not need a second one: Ocean Level's third
+//  output, "Shoreline", peaks exactly at the waterline and falls off in both
+//  directions, which is a beach band and not "everything below sea level".
+//
+//  So the wiring for a continuous dry-ground -> wet-sand -> shallow transition,
+//  with no gap in the splat weights along the waterline, is:
+//
+//      Ocean Level ("Shoreline") -> Height Blend / Texture Output sand weight
+//      Ocean Level ("Depth")     -> the wet/shelf weight beyond it
+//      Coastal Shelf Shaper      -> the underwater slope those weights sit on
+//
+//  Deliberately NOT a second output on this node. A ModifierNode is one height in,
+//  one height out - its Generate ignores outputIndex - so a mask port here would
+//  mean duplicating the ghost-margin plumbing and then maintaining two beach-band
+//  definitions that would drift apart the first time either was tuned.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;

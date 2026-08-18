@@ -2,7 +2,11 @@
     "name": "UniverseCreator.Editor",
     "rootNamespace": "UniverseCreator.Editor",
     "references": [
-        "UniverseCreator"
+        "UniverseCreator",
+        "Unity.RenderPipelines.Core.Runtime",
+        "Unity.RenderPipelines.Core.Editor",
+        "Unity.RenderPipelines.Universal.Runtime",
+        "Unity.RenderPipelines.Universal.Editor"
     ],
     "includePlatforms": [
         "Editor"
@@ -13,6 +17,12 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.render-pipelines.universal",
+            "expression": "17.0.0",
+            "define": "UC_URP"
+        }
+    ],
     "noEngineReferences": false
 }

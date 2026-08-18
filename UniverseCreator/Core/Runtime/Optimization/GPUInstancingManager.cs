@@ -36,12 +36,19 @@ namespace UniverseCreator.Optimization
 
         private readonly Dictionary<int, InstanceBatch> batches = new Dictionary<int, InstanceBatch>();
 
+        // Which batches each owner contributed to. Chunk scatter is the reason this
+        // exists: a recycled chunk has to withdraw exactly its own instances, and
+        // without an owner key the only options are leaking them or clearing the
+        // whole world - one duplicates every prop on recentre, the other blanks
+        // every chunk that was not part of the pass.
+        private readonly Dictionary<int, List<int>> byOwner = new Dictionary<int, List<int>>();
+
         // Reused across submits so a full world of instances does not allocate a
         // fresh array every frame.
         private readonly Matrix4x4[] submitBuffer = new Matrix4x4[MaxInstancesPerBatch];
 
-        /// <summary>Batch key for a mesh+material+layer triple.</summary>
-        public static int BatchId(Mesh mesh, Material material, int layer)
+        /// <summary>Batch key for an owner+mesh+material+layer tuple.</summary>
+        public static int BatchId(int owner, Mesh mesh, Material material, int layer)
         {
             // GetEntityId, not GetInstanceID: the latter is obsolete-as-error in
             // Unity 6.5 and fails the build outright rather than warning.
@@ -52,10 +59,17 @@ namespace UniverseCreator.Optimization
             int materialId = material != null ? material.GetEntityId().GetHashCode() : 0;
 
             int h = 17;
+            h = h * 31 + owner;
             h = h * 31 + meshId;
             h = h * 31 + materialId;
             h = h * 31 + layer;
             return h;
+        }
+
+        /// <summary>Batch key for an unowned mesh+material+layer triple.</summary>
+        public static int BatchId(Mesh mesh, Material material, int layer)
+        {
+            return BatchId(0, mesh, material, layer);
         }
 
         /// <summary>
@@ -67,9 +81,21 @@ namespace UniverseCreator.Optimization
                                     UnityEngine.Rendering.ShadowCastingMode.On,
                                 bool receiveShadows = true)
         {
+            AddInstance(0, mesh, material, matrix, layer, shadowCasting, receiveShadows);
+        }
+
+        /// <summary>
+        /// Registers one instance against an owner, so ClearOwner can withdraw it
+        /// again without touching anything else.
+        /// </summary>
+        public void AddInstance(int owner, Mesh mesh, Material material, Matrix4x4 matrix, int layer,
+                                UnityEngine.Rendering.ShadowCastingMode shadowCasting =
+                                    UnityEngine.Rendering.ShadowCastingMode.On,
+                                bool receiveShadows = true)
+        {
             if (mesh == null || material == null) return;
 
-            int id = BatchId(mesh, material, layer);
+            int id = BatchId(owner, mesh, material, layer);
 
             InstanceBatch batch;
             if (!batches.TryGetValue(id, out batch))
@@ -81,6 +107,14 @@ namespace UniverseCreator.Optimization
                 batch.shadowCastingMode = shadowCasting;
                 batch.receiveShadows = receiveShadows;
                 batches[id] = batch;
+
+                List<int> owned;
+                if (!byOwner.TryGetValue(owner, out owned))
+                {
+                    owned = new List<int>();
+                    byOwner[owner] = owned;
+                }
+                owned.Add(id);
             }
 
             batch.matrices.Add(matrix);
@@ -90,12 +124,23 @@ namespace UniverseCreator.Optimization
         public void ClearAll()
         {
             batches.Clear();
+            byOwner.Clear();
+        }
+
+        /// <summary>Drops every batch one owner contributed, e.g. a recycled chunk.</summary>
+        public void ClearOwner(int owner)
+        {
+            List<int> owned;
+            if (!byOwner.TryGetValue(owner, out owned)) return;
+
+            for (int i = 0; i < owned.Count; i++) batches.Remove(owned[i]);
+            byOwner.Remove(owner);
         }
 
         /// <summary>Drops one batch, e.g. when its source chunk is recycled.</summary>
         public void ClearBatch(Mesh mesh, Material material, int layer)
         {
-            batches.Remove(BatchId(mesh, material, layer));
+            batches.Remove(BatchId(0, mesh, material, layer));
         }
 
         /// <summary>Total instances currently queued, across all batches.</summary>

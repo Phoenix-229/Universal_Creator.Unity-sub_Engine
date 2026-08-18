@@ -85,8 +85,35 @@ namespace UniverseCreator.Editor.Drawing
 
             // World-scale metres
             { "falloffMeters", new Span(0f, 5000f) },
-            { "edgeHeight",    new Span(0f, 1f) }
+            { "edgeHeight",    new Span(0f, 1f) },
+
+            // Qualified "Type.field" entries win over the bare name, for fields
+            // whose name collides with a differently-scaled one above. A blur
+            // radius is measured in pixels and tops out around 64; a brush spot's
+            // radius is world metres and is routinely in the hundreds, so the two
+            // cannot share a span.
+            { "BrushSpot.radius",  new Span(1f, 2000f) },
+            { "BrushSpot.height",  new Span(-1f, 1f) },
+            { "BrushSpot.falloff", new Span(0f, 1f) }
         };
+
+        /// <summary>
+        /// Slider span for a field, preferring a "Type.field" entry over the bare
+        /// field name so a name reused at a different scale can be disambiguated.
+        /// </summary>
+        private static bool TryGetSpan(string name, out Span span)
+        {
+            if (!string.IsNullOrEmpty(name))
+            {
+                if (NamedSpans.TryGetValue(name, out span)) return true;
+
+                int dot = name.LastIndexOf('.');
+                if (dot >= 0 && NamedSpans.TryGetValue(name.Substring(dot + 1), out span)) return true;
+            }
+
+            span = default(Span);
+            return false;
+        }
 
         /// <summary>
         /// Draws every editable public field on the node. Returns true if any value
@@ -149,17 +176,71 @@ namespace UniverseCreator.Editor.Drawing
 
         private static bool IsSupportedType(Type t)
         {
+            if (IsScalarType(t)) return true;
+
+            // A List<T> is drawable when its element is: either a scalar the
+            // drawer already handles, or a small serializable struct whose own
+            // public fields are all scalars. That second case is what makes
+            // List<BrushSpot> work without a hand-written editor per node.
+            Type element = ListElementType(t);
+            if (element != null) return IsScalarType(element) || IsInlineStruct(element);
+
+            return false;
+        }
+
+        /// <summary>Types that map to exactly one FocusOutFields control.</summary>
+        private static bool IsScalarType(Type t)
+        {
             if (t == typeof(float) || t == typeof(int) || t == typeof(bool) ||
                 t == typeof(string) || t == typeof(Vector2) || t == typeof(Vector3) ||
                 t == typeof(Color) || t == typeof(AnimationCurve)) return true;
 
+            // A filter band is a compound of four primitives with one meaning, so
+            // it gets a grouped control rather than four loose fields.
+            if (t == typeof(UniverseCreator.RangeFilter)) return true;
+
             if (t.IsEnum) return true;
             if (typeof(UnityEngine.Object).IsAssignableFrom(t)) return true;
 
-            // Arrays and lists need bespoke UI; the nodes that use them build their
-            // own editors rather than getting a broken generic one.
             return false;
         }
+
+        /// <summary>The T in List&lt;T&gt;, or null when t is not a List&lt;T&gt;.</summary>
+        private static Type ListElementType(Type t)
+        {
+            if (!t.IsGenericType) return null;
+            if (t.GetGenericTypeDefinition() != typeof(List<>)) return null;
+            return t.GetGenericArguments()[0];
+        }
+
+        /// <summary>
+        /// A value type whose public instance fields are all scalars, so it can be
+        /// drawn as an indented block of ordinary controls.
+        /// </summary>
+        /// <remarks>
+        /// Restricted to structs on purpose. A class element would need a null
+        /// check and an instantiate button per row, and no node uses one - so the
+        /// unreachable branch stays unwritten rather than untested.
+        /// </remarks>
+        private static bool IsInlineStruct(Type t)
+        {
+            if (!t.IsValueType || t.IsEnum || t.IsPrimitive) return false;
+
+            FieldInfo[] fs = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
+            if (fs.Length == 0) return false;
+
+            for (int i = 0; i < fs.Length; i++)
+                if (!IsScalarType(fs[i].FieldType)) return false;
+
+            return true;
+        }
+
+        // Which list rows are expanded, keyed by node id + field name so two nodes
+        // of the same type expand independently. Editor-session state only - it is
+        // deliberately not serialised, because a foldout is a view preference and
+        // writing it would dirty the graph asset on a mere click.
+        private static readonly Dictionary<string, bool> expanded =
+            new Dictionary<string, bool>();
 
         private static bool DrawField(Generator node, FieldInfo info, FocusOutFields fields)
         {
@@ -170,90 +251,295 @@ namespace UniverseCreator.Editor.Drawing
             string tooltip = ReadTooltip(info);
             Type t = info.FieldType;
 
+            Type element = ListElementType(t);
+            if (element != null)
+            {
+                // A null list is indistinguishable from an empty one to the user,
+                // but only one of them can be appended to. Materialise it on first
+                // draw rather than making every list node's ctor remember to.
+                System.Collections.IList list = info.GetValue(node) as System.Collections.IList;
+                if (list == null)
+                {
+                    list = (System.Collections.IList)Activator.CreateInstance(t);
+                    info.SetValue(node, list);
+                }
+
+                return DrawList(list, element, label, key, tooltip, fields);
+            }
+
+            object boxed = info.GetValue(node);
+            if (!DrawScalar(t, info.Name, label, key, tooltip, ref boxed, fields)) return false;
+
+            info.SetValue(node, boxed);
+            return true;
+        }
+
+        /// <summary>
+        /// Draws one value of a type in the scalar table, reading and writing it
+        /// through a boxed object.
+        /// </summary>
+        /// <remarks>
+        /// Boxed rather than generic so a list element and a plain field share this
+        /// one control table. Duplicating the table per container is how the two
+        /// drift apart - a span or a seed rule added to one and missed in the other.
+        /// </remarks>
+        private static bool DrawScalar(Type t, string name, string label, string key,
+                                       string tooltip, ref object boxed, FocusOutFields fields)
+        {
             if (t == typeof(float))
             {
-                float v = (float)info.GetValue(node);
+                float v = (float)boxed;
                 Span span;
-                bool ok = NamedSpans.TryGetValue(info.Name, out span)
+                bool ok = TryGetSpan(name, out span)
                     ? fields.FloatSlider(label, key, ref v, span.min, span.max, tooltip)
                     : fields.FloatField(label, key, ref v, tooltip);
-                if (ok) { info.SetValue(node, v); return true; }
+                if (ok) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(int))
             {
-                int v = (int)info.GetValue(node);
+                int v = (int)boxed;
                 Span span;
 
                 // A seed is an arbitrary 32-bit number, not a magnitude - a slider
                 // over it is useless, so seeds always get a plain box.
-                bool isSeed = info.Name.IndexOf("seed", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isSeed = name.IndexOf("seed", StringComparison.OrdinalIgnoreCase) >= 0;
 
-                bool ok = (!isSeed && NamedSpans.TryGetValue(info.Name, out span))
+                bool ok = (!isSeed && TryGetSpan(name, out span))
                     ? fields.IntSlider(label, key, ref v, Mathf.RoundToInt(span.min), Mathf.RoundToInt(span.max), tooltip)
                     : fields.IntField(label, key, ref v, tooltip);
-                if (ok) { info.SetValue(node, v); return true; }
+                if (ok) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(bool))
             {
-                bool v = (bool)info.GetValue(node);
-                if (fields.Toggle(label, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                bool v = (bool)boxed;
+                if (fields.Toggle(label, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(string))
             {
-                string v = (string)info.GetValue(node);
-                if (fields.StringField(label, key, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                string v = (string)boxed;
+                if (fields.StringField(label, key, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(Vector2))
             {
-                Vector2 v = (Vector2)info.GetValue(node);
-                if (fields.Vector2Field(label, key, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                Vector2 v = (Vector2)boxed;
+                if (fields.Vector2Field(label, key, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(Vector3))
             {
-                Vector3 v = (Vector3)info.GetValue(node);
-                if (fields.Vector3Field(label, key, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                Vector3 v = (Vector3)boxed;
+                if (fields.Vector3Field(label, key, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(Color))
             {
-                Color v = (Color)info.GetValue(node);
-                if (fields.ColorField(label, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                Color v = (Color)boxed;
+                if (fields.ColorField(label, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t == typeof(AnimationCurve))
             {
-                AnimationCurve v = (AnimationCurve)info.GetValue(node);
-                if (fields.CurveField(label, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                AnimationCurve v = (AnimationCurve)boxed;
+                if (fields.CurveField(label, ref v, tooltip)) { boxed = v; return true; }
+                return false;
+            }
+
+            if (t == typeof(UniverseCreator.RangeFilter))
+            {
+                UniverseCreator.RangeFilter v = (UniverseCreator.RangeFilter)boxed;
+                if (fields.RangeFilterField(label, key, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (t.IsEnum)
             {
-                Enum v = (Enum)info.GetValue(node);
-                if (fields.EnumField(label, ref v, tooltip)) { info.SetValue(node, v); return true; }
+                Enum v = (Enum)boxed;
+                if (fields.EnumField(label, ref v, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             if (typeof(UnityEngine.Object).IsAssignableFrom(t))
             {
-                UnityEngine.Object v = (UnityEngine.Object)info.GetValue(node);
-                if (fields.ObjectField(label, ref v, t, tooltip)) { info.SetValue(node, v); return true; }
+                UnityEngine.Object v = (UnityEngine.Object)boxed;
+                if (fields.ObjectField(label, ref v, t, tooltip)) { boxed = v; return true; }
                 return false;
             }
 
             return false;
+        }
+
+        // ------------------------------------------------------------------
+        //  Lists
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// A foldout with a row per element, an add and a remove per row, and a
+        /// reorder pair when order carries meaning.
+        /// </summary>
+        /// <remarks>
+        /// Written against IList rather than List&lt;T&gt; because the field type is
+        /// only known by reflection here. Every mutation goes through the same
+        /// IList the node holds, so the node sees the edit immediately - there is
+        /// no copy to write back and therefore no way for the two to disagree.
+        ///
+        /// Structural edits (add, remove, reorder) commit on the click, unlike the
+        /// value fields inside a row, which keep the focus-out contract. A button
+        /// press is already a deliberate, discrete act; there is no half-typed
+        /// state to protect.
+        /// </remarks>
+        private static bool DrawList(System.Collections.IList list, Type element,
+                                     string label, string key, string tooltip,
+                                     FocusOutFields fields)
+        {
+            bool changed = false;
+
+            bool open;
+            if (!expanded.TryGetValue(key, out open)) open = true;
+
+            EditorGUILayout.BeginHorizontal();
+
+            open = EditorGUILayout.Foldout(
+                open, new GUIContent(label + "  (" + list.Count + ")", tooltip), true);
+            expanded[key] = open;
+
+            GUILayout.FlexibleSpace();
+
+            if (GUILayout.Button(UCIcons.Content(UCIcons.Add, "Add an entry to the end of the list.", "+"),
+                                 EditorStyles.miniButton, GUILayout.Width(24f)))
+            {
+                list.Add(DefaultElement(element));
+                changed = true;
+            }
+
+            using (new EditorGUI.DisabledScope(list.Count == 0))
+            {
+                if (GUILayout.Button(UCIcons.Content(UCIcons.Remove, "Remove the last entry.", "-"),
+                                     EditorStyles.miniButton, GUILayout.Width(24f)))
+                {
+                    list.RemoveAt(list.Count - 1);
+                    changed = true;
+                }
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            if (!open) return changed;
+
+            EditorGUI.indentLevel++;
+
+            if (list.Count == 0)
+            {
+                EditorGUILayout.LabelField(" ", "Empty - press + to add one.", EditorStyles.miniLabel);
+            }
+
+            // Descending, so removing an entry cannot shift a later index that this
+            // same pass has yet to visit.
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                if (DrawListRow(list, element, i, key, fields)) changed = true;
+            }
+
+            EditorGUI.indentLevel--;
+            return changed;
+        }
+
+        private static bool DrawListRow(System.Collections.IList list, Type element,
+                                        int index, string key, FocusOutFields fields)
+        {
+            bool changed = false;
+            string rowKey = key + "[" + index + "]";
+            string rowLabel = "  " + index;
+
+            EditorGUILayout.BeginHorizontal();
+
+            if (IsScalarType(element))
+            {
+                object boxed = list[index];
+                if (DrawScalar(element, "", rowLabel, rowKey, "Entry " + index, ref boxed, fields))
+                {
+                    list[index] = boxed;
+                    changed = true;
+                }
+            }
+            else
+            {
+                EditorGUILayout.LabelField(rowLabel, EditorStyles.boldLabel);
+            }
+
+            if (GUILayout.Button(UCIcons.Content(UCIcons.Delete, "Remove this entry.", "x"),
+                                 EditorStyles.miniButton, GUILayout.Width(22f)))
+            {
+                list.RemoveAt(index);
+                EditorGUILayout.EndHorizontal();
+                return true;
+            }
+
+            EditorGUILayout.EndHorizontal();
+
+            // A struct element draws its own fields indented beneath its index.
+            if (!IsScalarType(element))
+            {
+                EditorGUI.indentLevel++;
+
+                // Boxed once, mutated by every field, written back once. A struct
+                // read out of an IList is a copy, so writing back per field would
+                // discard the edits made by the fields before it.
+                object boxed = list[index];
+                FieldInfo[] fs = element.GetFields(BindingFlags.Public | BindingFlags.Instance);
+
+                for (int f = 0; f < fs.Length; f++)
+                {
+                    object member = fs[f].GetValue(boxed);
+                    if (DrawScalar(fs[f].FieldType, element.Name + "." + fs[f].Name, Prettify(fs[f].Name),
+                                   rowKey + "." + fs[f].Name, ReadTooltip(fs[f]), ref member, fields))
+                    {
+                        fs[f].SetValue(boxed, member);
+                        changed = true;
+                    }
+                }
+
+                if (changed) list[index] = boxed;
+
+                EditorGUI.indentLevel--;
+            }
+
+            return changed;
+        }
+
+        /// <summary>
+        /// The value a freshly added row starts at.
+        /// </summary>
+        /// <remarks>
+        /// A default(T) BrushSpot has radius 0, which is a spot that paints nothing
+        /// and reads as a broken node rather than an empty one. Types with a
+        /// meaningful non-zero default get seeded here so adding a row produces
+        /// something the user can see and then adjust.
+        /// </remarks>
+        private static object DefaultElement(Type element)
+        {
+            if (element == typeof(string)) return "";
+            if (element == typeof(AnimationCurve)) return AnimationCurve.Linear(0f, 0f, 1f, 1f);
+            if (element == typeof(Color)) return Color.white;
+
+            // A weight of 0 excludes the prototype it was just added for.
+            if (element == typeof(float)) return 1f;
+
+            if (element == typeof(UniverseCreator.Nodes.Creators.BrushSpot))
+                return new UniverseCreator.Nodes.Creators.BrushSpot(Vector2.zero, 50f, 0.25f, 0.5f);
+
+            if (element.IsValueType) return Activator.CreateInstance(element);
+            return null;
         }
 
         private static string ReadTooltip(FieldInfo info)

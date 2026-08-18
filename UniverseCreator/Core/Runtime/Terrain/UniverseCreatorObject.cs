@@ -185,6 +185,25 @@ namespace UniverseCreator.TerrainSystem
         public TerrainLayer[] terrainLayers;
 
         // =====================================================================
+        //  SCATTER PROTOTYPES
+        // =====================================================================
+
+        [Tooltip("What the prototypeIndex on a scattered instance means. Scatter nodes " +
+                 "run off-thread and cannot touch a prefab, so they emit an index and " +
+                 "this resolves it into trees, detail meshes and props.")]
+        public TerrainSystem.ScatterPrototypeLibrary scatterLibrary =
+            new TerrainSystem.ScatterPrototypeLibrary();
+
+        // =====================================================================
+        //  WATER
+        // =====================================================================
+
+        [Tooltip("Layer the generated water surfaces are put on. Water usually gets " +
+                 "its own layer so a camera can exclude it, an underwater volume can " +
+                 "find it, and character raycasts can pass through it.")]
+        public int waterLayer;
+
+        // =====================================================================
         //  PERFORMANCE
         // =====================================================================
 
@@ -258,7 +277,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         [Tooltip("Capture hand-sculpted height changes before regenerating, so they " +
                  "survive the graph re-run. Off means the graph output replaces them.")]
-        public bool captureManualEditsOnRegenerate = true;
+        public bool captureManualEditsOnRegenerate = false;
 
         // =====================================================================
         //  GENERATION STATE
@@ -342,6 +361,90 @@ namespace UniverseCreator.TerrainSystem
             // Safe when nothing has ever been generated: CaptureManualEdits skips any
             // cell whose appliedHeights baseline is null.
             if (captureManualEditsOnRegenerate) cm.CaptureManualEdits();
+
+            // Evaluate graph for HydrologyNodes and auto-place missing rivers/lakes
+            // Only generate if the creator node is actually connected to the output!
+            if (graph != null)
+            {
+                // Water is procedural ONLY where the graph asks for it. A Hydrology
+                // Spawner must be present AND wired through to an Output before any
+                // river or lake is drawn - a disconnected node, or no node at all,
+                // means no procedural water, full stop. This is the user's rule:
+                // "make sure the lake do not just create themselves but until their
+                // nodes are created." (Bodies orphaned by a since-disconnected node
+                // are torn down by the graph-reactive removal pass, not here.)
+                //
+                // The reach-an-Output walk lives on the water manager rather than being
+                // written out here, because UCWaterBody.IsGraphLinked asks the same
+                // question and two copies of "is it connected" would eventually give
+                // two answers. Switching the manager's Source away from the graph is a
+                // deliberate no as well: no spawn, and the sweep below takes down what
+                // a previous run left standing.
+                UCWaterSystemManager water =
+                    GetComponentInChildren<UCWaterSystemManager>(true);
+                bool spawnAllowed = water == null || water.NodeWaterEnabled;
+
+                System.Collections.Generic.List<UniverseCreator.Nodes.Creators.HydrologyNode> spawners =
+                    UCWaterSystemManager.ConnectedHydrology(graph);
+
+                UniverseCreator.Nodes.Creators.HydrologyNode connectedHydrology =
+                    spawnAllowed && spawners.Count > 0 ? spawners[0] : null;
+
+                // DEFERRED, not called here. RebuildAll below is async, so at this line
+                // the terrains still hold the flat/stale baseline - spawning now traced
+                // every river across dead-flat ground (they collapsed to a single
+                // invisible point) and stacked every lake at one height. Arming it on the
+                // settle hook lets the spawn sample the real surface once the bake has
+                // landed; the closure then calls ReapplyCarves so the new digs - and the
+                // fill-back of any lake the reconcile-down cull removed - are folded into
+                // the settled terrain in one synchronous pass.
+                if (connectedHydrology != null)
+                {
+                    UniverseCreator.Nodes.Creators.HydrologyNode hydrologyToRun = connectedHydrology;
+                    cm.RunAfterSettle(() =>
+                    {
+                        UniverseCreator.TerrainSystem.HydrologyGenerator.GenerateFromNode(this, hydrologyToRun);
+                        cm.ReapplyCarves();
+
+                        // The sea's level has only just been derived, from the settled
+                        // surface, in metres. Every splatmap on the terrain was painted
+                        // before that number existed - from whatever fraction the graph
+                        // happened to hold - so the beach can be sitting at an elevation
+                        // the water never reached, which is the untextured shoreline.
+                        // Locking the two together and re-baking puts the sand on the real
+                        // waterline within the same Generate.
+                        //
+                        // Bounded, and not a loop. The re-bake below does not re-arm this
+                        // callback, so hydrology does not run a second time; the sync is a
+                        // no-op once the two agree, and they stay agreed because the ocean
+                        // holds its placement and no splatmap can move a height. A world
+                        // with no sea, or one already in sync, re-bakes nothing.
+                        UniverseCreator.TerrainSystem.UCWaterSystemManager water =
+                            GetComponentInChildren<UniverseCreator.TerrainSystem.UCWaterSystemManager>(true);
+                        if (water != null && water.SyncSeaLevelFromOcean(this))
+                            cm.RebuildAll();
+                    });
+                }
+                else
+                {
+                    // No Hydrology node reaches an Output any more (disconnected or
+                    // deleted), or the water manager's Source says the graph may not
+                    // produce water, so any river/lake a previously-connected node
+                    // spawned is now orphaned. Sweep them on the SAME settle hook the
+                    // spawn uses: deferred so the destroy runs on an editor update tick
+                    // (DestroyImmediate is illegal mid-OnValidate) and so ReapplyCarves
+                    // folds the freed basins back into the settled terrain in one
+                    // synchronous pass - the exact mirror of the spawn path. Only generated
+                    // bodies are removed; hand-placed water and the UniverseCreator root are
+                    // untouched. The re-carve is skipped when nothing was swept, so a world
+                    // that never had procedural water sees no behaviour change.
+                    cm.RunAfterSettle(() =>
+                    {
+                        int removed = UniverseCreator.TerrainSystem.HydrologyGenerator.RemoveAllGenerated(this);
+                        if (removed > 0) cm.ReapplyCarves();
+                    });
+                }
+            }
 
             cm.RebuildAll();
             return true;

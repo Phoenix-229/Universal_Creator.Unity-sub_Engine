@@ -37,6 +37,11 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool terrainFoldout;
         private static bool layersFoldout;
         private static bool foliageFoldout;
+        private static bool treeLibFoldout;
+        private static bool shrubLibFoldout;
+        private static bool grassLibFoldout;
+        private static bool objectLibFoldout;
+        private static bool budgetFoldout;
         private static bool performanceFoldout;
         private static bool generationFoldout;
         private static bool statsFoldout;
@@ -52,7 +57,6 @@ namespace UniverseCreator.Editor.Inspectors
         // Set once per OnInspectorGUI so the control helpers can record undo.
         private UniverseCreatorObject ucTarget;
         private bool valueChanged;
-        private bool hasAutoCleared = false;
 
         private void OnEnable()
         {
@@ -64,16 +68,23 @@ namespace UniverseCreator.Editor.Inspectors
             EditorApplication.update -= OnEditorUpdate;
         }
 
+        // Repaints the inspector while a build is running, and does nothing else.
+        //
+        // This used to call PumpCompleted() on every editor tick as well, which made
+        // it a second, competing driver: EditModeChunkDriver already pumps every
+        // world in the scene, so selecting the world doubled the pump rate and
+        // applying chunks became dependent on whether the inspector happened to be
+        // open. EditorApplication.update also fires far more often while the mouse
+        // is moving, so that per-tick pump is what made the terrain look like it was
+        // recomputing itself in response to the cursor.
+        //
+        // Repainting is the inspector's own business and stays here - without it the
+        // progress bar and the chunk counters freeze mid-build - but it is gated so
+        // that a settled world costs nothing.
         private void OnEditorUpdate()
         {
             UniverseCreatorObject uc = target as UniverseCreatorObject;
             if (uc == null) return;
-
-            ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
-            if (cm != null)
-            {
-                if (cm.PumpCompleted()) Repaint();
-            }
 
             if (uc.IsGenerating) Repaint();
         }
@@ -113,6 +124,16 @@ namespace UniverseCreator.Editor.Inspectors
             DrawLayerSettings(uc);
             EditorGUILayout.Space(4);
             DrawFoliageSettings(uc);
+            EditorGUILayout.Space(4);
+            DrawTreeLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawShrubLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawGrassLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawObjectLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawScatterBudgets(uc);
             EditorGUILayout.Space(4);
             DrawPerformanceSettings(uc);
             EditorGUILayout.Space(4);
@@ -259,6 +280,13 @@ namespace UniverseCreator.Editor.Inspectors
                 CreateAndAssign(uc, GraphTemplates.Template.Empty);
             }
 
+            if (GUILayout.Button(IconLabel("Action_Focus", "Topographic Map",
+                                           "Open a 2D heightmap view of the world"),
+                                 GUILayout.Height(24)))
+            {
+                UniverseCreator.Editor.Windows.UCTopographicMapWindow.ShowWindow();
+            }
+
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.EndVertical();
         }
@@ -357,6 +385,14 @@ namespace UniverseCreator.Editor.Inspectors
                                            "Open the world settings window"), GUILayout.Height(22)))
             {
                 WorldSettingsWindow.OpenWindow();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button(IconLabel("View_Map", "Topographic Map",
+                                           "View the world's heightmap"), GUILayout.Height(22)))
+            {
+                Windows.UCTopographicMapWindow.ShowWindow();
             }
             EditorGUILayout.EndHorizontal();
 
@@ -586,6 +622,412 @@ namespace UniverseCreator.Editor.Inspectors
                       "How many trees stay full-mesh near the camera before billboarding.");
 
             EditorGUI.indentLevel--;
+        }
+
+        // =====================================================================
+        //  THE VEGETATION LIBRARY - FOUR SEPARATE SECTIONS
+        //
+        //  Trees, shrubs and grass are not one list with a type field, because
+        //  they are not one thing. Each answers to wind differently, each answers
+        //  to being walked into differently, and each reaches the world through a
+        //  different engine mechanism:
+        //
+        //    Trees   TerrainData.treePrototypes. Wind comes from the WindZone and
+        //            only the canopy moves; a trunk does not sway. One control.
+        //    Shrubs  GameObjects with a trigger collider. The base holds, the crown
+        //            gives, and a body walks through and squeezes it aside.
+        //    Grass   TerrainData.detailPrototypes. No collider, no rigidbody at all
+        //            - it lies over in a breeze and parts in the vertex shader.
+        //    Objects Rocks and props. Solid colliders, no wind.
+        //
+        //  Splitting them in the UI is not cosmetic: the section a prototype sits
+        //  in is what tells the generator which motion model and which physics
+        //  state to give it. A prefab in the shrub list becomes walk-through; the
+        //  same prefab in the object list becomes something you bump into.
+        // =====================================================================
+
+        private void DrawTreeLibrary(UniverseCreatorObject uc)
+        {
+            treeLibFoldout = Section(treeLibFoldout, "Trees", "View_LOD_High",
+                                     UCInspectorUI.HeaderGreen);
+            if (!treeLibFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            List<TreePrototypeDef> list = uc.scatterLibrary.trees;
+            ListCount("Tree Count", "Tree prototypes a Tree Scatter node can choose between. "
+                    + "Index 0 is what a node with no prototype set uses.", list, 32);
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                TreePrototypeDef t = list[i];
+                if (t == null) { list[i] = t = new TreePrototypeDef(); }
+
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField(EntryTitle("Tree", i, t.prefab != null ? t.prefab.name : null),
+                                           EditorStyles.miniBoldLabel);
+
+                ObjectSlot("Prefab", ref t.prefab,
+                           "The tree prefab. Needs a LOD Group or a SpeedTree/Nature shader to "
+                         + "billboard properly at distance.");
+
+                // The only wind control a tree gets. Unity's tree renderer takes one
+                // bend factor and drives the canopy with it - there is no separate
+                // trunk term, because a trunk does not visibly move.
+                FloatSlider("Wind Bend", "tree" + i + ".bend", ref t.bendFactor, 0f, 1f, "F2",
+                            "How far the wind moves this tree's canopy. The trunk stays put - a "
+                          + "tree does not sway like grass. Past ~0.5 it starts to look like rubber.");
+
+                Vector2Row("Width Scale", ref t.widthScale, "Random trunk width range.");
+                Vector2Row("Height Scale", ref t.heightScale, "Random trunk height range.");
+
+                FloatSlider("Max Slope", "tree" + i + ".slope", ref t.maxSlope, 0f, 90f, "F0",
+                            "Rejected on ground steeper than this.");
+                AltitudeBand("tree" + i, ref t.minAltitude, ref t.maxAltitude);
+
+                if (t.prefab == null)
+                    InfoRow("No prefab — this slot is skipped when the world builds.");
+
+                if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
+            }
+
+            if (list.Count == 0)
+                InfoRow("No tree prototypes. Tree Scatter nodes will place nothing.");
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawShrubLibrary(UniverseCreatorObject uc)
+        {
+            shrubLibFoldout = Section(shrubLibFoldout, "Shrubs & Bushes", "View_LOD_High",
+                                      UCInspectorUI.HeaderTeal);
+            if (!shrubLibFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            InfoRow("Woody at the base, soft to walk through. Separate from trees and from grass.");
+
+            List<ShrubPrototypeDef> list = uc.scatterLibrary.shrubs;
+            ListCount("Shrub Count", "Shrub prototypes a Shrub Scatter node can choose between.",
+                      list, 32);
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                ShrubPrototypeDef s = list[i];
+                if (s == null) { list[i] = s = new ShrubPrototypeDef(); }
+
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField(EntryTitle("Shrub", i, s.prefab != null ? s.prefab.name : null),
+                                           EditorStyles.miniBoldLabel);
+
+                ObjectSlot("Prefab", ref s.prefab,
+                           "The bush prefab. Use a material on UniverseCreator/WindDetail to get "
+                         + "the shrub motion model and the walk-through squeeze.");
+                FloatSlider("Weight", "shrub" + i + ".weight", ref s.weight, 0f, 8f, "F2",
+                            "Relative chance of this prototype being picked.");
+
+                EditorGUILayout.LabelField("Wind", EditorStyles.miniLabel);
+                FloatSlider("Wind Response", "shrub" + i + ".wind", ref s.windResponse, 0f, 2f, "F2",
+                            "Trim on top of the global shrub response. The motion is already "
+                          + "shrub-shaped — the lower quarter holds still and it takes more wind "
+                          + "than grass before it gives.");
+                FloatSlider("Leaf Flutter", "shrub" + i + ".flutter", ref s.flutter, 0f, 2f, "F2",
+                            "Fast leaf-scale shiver on top of the bend. Low for a dense woody "
+                          + "bush, high for a light fern.");
+                FloatSlider("Mesh Height (m)", "shrub" + i + ".mh", ref s.meshHeight, 0.05f, 10f, "F2",
+                            "Height of the authored mesh. The shader needs it to tell a root "
+                          + "vertex from a crown vertex — wrong values make the whole bush slide "
+                          + "sideways instead of bending.");
+
+                EditorGUILayout.LabelField("Walk-through", EditorStyles.miniLabel);
+                Toggle("Spawn Collider", ref s.spawnCollider,
+                       "Adds a trigger collider so a character can walk into this bush. A trigger "
+                     + "and not a solid one on purpose: the player passes through and the plant "
+                     + "squeezes aside, instead of being stopped dead by a shrub.");
+
+                if (s.spawnCollider)
+                {
+                    FloatSlider("Trigger Radius", "shrub" + i + ".cr", ref s.colliderRadius,
+                                0.05f, 5f, "F2", "Roughly the visual footprint, in metres.");
+                    FloatSlider("Trigger Height", "shrub" + i + ".ch", ref s.colliderHeight,
+                                0.05f, 6f, "F2", "Height of the trigger, in metres.");
+                    LayerRow("Collider Layer", ref s.colliderLayer,
+                             "Layer for the trigger so gameplay can filter for vegetation. "
+                           + "Default keeps the prefab's own layer.");
+                }
+                else
+                {
+                    InfoRow("No collider — this shrub still bends in wind but ignores walkers.");
+                }
+
+                FloatSlider("Squeeze", "shrub" + i + ".sq", ref s.squeeze, 0f, 2f, "F2",
+                            "How far it bends aside when something walks through. 0 ignores "
+                          + "the walker entirely.");
+
+                EditorGUILayout.LabelField("Placement", EditorStyles.miniLabel);
+                FloatSlider("Embed Depth", "shrub" + i + ".embed", ref s.embedDepth, 0f, 1f, "F2",
+                            "Sinks it into the soil so it does not balance on the surface.");
+                FloatSlider("Normal Align", "shrub" + i + ".align", ref s.normalAlignment, 0f, 1f, "F2",
+                            "Tilts it toward the ground normal. 0 stands every bush upright.");
+                FloatSlider("Max Slope", "shrub" + i + ".slope", ref s.maxSlope, 0f, 90f, "F0",
+                            "Rejected on ground steeper than this.");
+                AltitudeBand("shrub" + i, ref s.minAltitude, ref s.maxAltitude);
+                Toggle("Instance When Dense", ref s.gpuInstanceWhenDense,
+                       "Past the collider budget, draw through GPU instancing instead. Instanced "
+                     + "shrubs keep their wind and lose their trigger — the right trade for "
+                     + "distant fill you will never walk into.");
+
+                if (s.prefab == null)
+                    InfoRow("No prefab — this slot is skipped when the world builds.");
+
+                if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
+            }
+
+            if (list.Count == 0)
+                InfoRow("No shrub prototypes. Shrub Scatter nodes will place nothing.");
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawGrassLibrary(UniverseCreatorObject uc)
+        {
+            grassLibFoldout = Section(grassLibFoldout, "Grass & Detail", "View_LOD_High",
+                                      UCInspectorUI.HeaderAmber);
+            if (!grassLibFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            InfoRow("No colliders and no rigidbodies. Parting is done in the shader, so it is free.");
+
+            List<DetailPrototypeDef> list = uc.scatterLibrary.details;
+            ListCount("Detail Count", "Grass and detail prototypes. Terrain detail layers index "
+                    + "these in order, so element 0 is detail layer 0.", list, 32);
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                DetailPrototypeDef d = list[i];
+                if (d == null) { list[i] = d = new DetailPrototypeDef(); }
+
+                string name = d.prefabMesh != null ? d.prefabMesh.name
+                            : d.billboardTexture != null ? d.billboardTexture.name : null;
+
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField(EntryTitle("Detail", i, name), EditorStyles.miniBoldLabel);
+
+                ObjectSlot("Mesh Prototype", ref d.prefabMesh,
+                           "Detail mesh. Takes precedence over the billboard texture.");
+                ObjectSlot("Billboard", ref d.billboardTexture,
+                           "Used when no mesh is set. Cheapest grass there is.");
+
+                FloatSlider("Density /m²", "det" + i + ".den", ref d.densityPerSquareMetre,
+                            0f, 64f, "F1", "Instances per square metre at full mask weight.");
+                Vector2Row("Width", ref d.width, "Random width range.");
+                Vector2Row("Height", ref d.height, "Random height range.");
+
+                ColorRow("Healthy Colour", ref d.healthyColour, "Tint where the mask is strong.");
+                ColorRow("Dry Colour", ref d.dryColour, "Tint where the mask is weak.");
+                FloatSlider("Noise Spread", "det" + i + ".noise", ref d.noiseSpread, 0f, 1f, "F2",
+                            "Colour variation spread. Higher gives a patchier field.");
+
+                EditorGUILayout.LabelField("Motion", EditorStyles.miniLabel);
+
+                // The class is the whole point of this row. Grass lies over from the
+                // root; Shrub holds its base. A fern authored as a detail mesh wants
+                // the shrub model even though it is placed as grass, which is exactly
+                // why this is a per-prototype choice rather than a per-section one.
+                EnumRow("Motion Model", ref d.vegetationClass,
+                        "Grass lies over in a breeze and flutters fast. Shrub holds its base and "
+                      + "needs more wind before it gives. Only read when the prototype's material "
+                      + "uses UniverseCreator/WindDetail.");
+                FloatSlider("Wind Response", "det" + i + ".wind", ref d.windResponse, 0f, 2f, "F2",
+                            "Trim on top of the global response for the chosen model.");
+                FloatSlider("Squeeze", "det" + i + ".sq", ref d.squeeze, 0f, 2f, "F2",
+                            "How far it parts as something walks through. Visual only — grass "
+                          + "carries no collider, which is why it costs nothing.");
+
+                EditorGUILayout.LabelField("Placement", EditorStyles.miniLabel);
+                Toggle("Align To Ground", ref d.alignToGround,
+                       "Lays the billboard against the surface instead of standing it upright.");
+                Toggle("GPU Instancing", ref d.useInstancing,
+                       "Off falls back to per-patch batching.");
+                FloatSlider("Max Slope", "det" + i + ".slope", ref d.maxSlope, 0f, 90f, "F0",
+                            "Rejected on ground steeper than this.");
+                AltitudeBand("det" + i, ref d.minAltitude, ref d.maxAltitude);
+
+                if (d.prefabMesh == null && d.billboardTexture == null)
+                    InfoRow("No mesh and no billboard — this slot is skipped when the world builds.");
+
+                if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
+            }
+
+            if (list.Count == 0)
+                InfoRow("No detail prototypes. Grass Scatter nodes will place nothing.");
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawObjectLibrary(UniverseCreatorObject uc)
+        {
+            objectLibFoldout = Section(objectLibFoldout, "Rocks & Props", "View_LOD_High",
+                                       UCInspectorUI.HeaderGrey);
+            if (!objectLibFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            InfoRow("Solid colliders, no wind. A prop here is something you bump into.");
+
+            List<ObjectPrototypeDef> list = uc.scatterLibrary.objects;
+            ListCount("Object Count", "Prop prototypes an Object Scatter node can choose between.",
+                      list, 32);
+
+            for (int i = 0; i < list.Count; i++)
+            {
+                ObjectPrototypeDef o = list[i];
+                if (o == null) { list[i] = o = new ObjectPrototypeDef(); }
+
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField(EntryTitle("Object", i, o.prefab != null ? o.prefab.name : null),
+                                           EditorStyles.miniBoldLabel);
+
+                ObjectSlot("Prefab", ref o.prefab, "The prop prefab, colliders and all.");
+                FloatSlider("Weight", "obj" + i + ".weight", ref o.weight, 0f, 8f, "F2",
+                            "Relative chance of this prototype being picked.");
+                FloatSlider("Embed Depth", "obj" + i + ".embed", ref o.embedDepth, 0f, 1f, "F2",
+                            "Sinks it into the ground so it does not float on a slope.");
+                FloatSlider("Normal Align", "obj" + i + ".align", ref o.normalAlignment, 0f, 1f, "F2",
+                            "Tilts it toward the ground normal. 1 lies a rock flat on a hillside.");
+                Toggle("GPU Instanced", ref o.gpuInstanced,
+                       "Draw instanced instead of spawning a GameObject. No collider and no "
+                     + "transform — far cheaper past a few thousand.");
+                Toggle("Mark Static", ref o.markStatic,
+                       "Batches the spawn into the scene's static geometry. Only meaningful for "
+                     + "GameObject spawns.");
+
+                if (o.prefab == null)
+                    InfoRow("No prefab — this slot is skipped when the world builds.");
+
+                if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
+            }
+
+            if (list.Count == 0)
+                InfoRow("No object prototypes. Object Scatter nodes will place nothing.");
+
+            EditorGUI.indentLevel--;
+        }
+
+        // Per-chunk ceilings. Separate section because they are platform budgets,
+        // not authoring choices - the numbers you change when you target a phone,
+        // not the ones you change when you design a forest.
+        private void DrawScatterBudgets(UniverseCreatorObject uc)
+        {
+            budgetFoldout = Section(budgetFoldout, "Scatter Budgets", "View_LOD_High",
+                                    UCInspectorUI.HeaderGrey);
+            if (!budgetFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            ScatterPrototypeLibrary lib = uc.scatterLibrary;
+
+            FloatSlider("Global Grass Density", "lib.density",
+                        ref lib.globalDetailDensityScale, 0f, 4f, "F2",
+                        "Scales every detail density at once. The one dial to turn for a "
+                      + "platform budget.");
+            IntSlider("Max Objects / Chunk", "lib.maxObjects", ref lib.maxObjectsPerChunk,
+                      0, 20000, "Hard ceiling on prop spawns per chunk. The mobile budget is 2000.");
+            IntSlider("Max Shrubs / Chunk", "lib.maxShrubs", ref lib.maxShrubsPerChunk,
+                      0, 8000, "Ceiling on shrub spawns per chunk. Separate from the object "
+                             + "budget because a shrub carries a trigger collider and a rock "
+                             + "does not, so they cost different amounts.");
+            IntSlider("Shrub Collider Budget", "lib.shrubColliders", ref lib.shrubColliderBudget,
+                      0, 4000, "Past this many shrubs in a chunk, the rest are GPU-instanced and "
+                             + "lose their triggers. Keeps a dense thicket from filling the "
+                             + "physics scene with triggers nobody will ever touch.");
+            IntSlider("Instancing Threshold", "lib.instThreshold", ref lib.gpuInstancingThreshold,
+                      0, 20000, "Past this per-chunk count, prop spawns switch to GPU instancing "
+                              + "whatever the per-prototype flag says. Protects the hierarchy.");
+
+            EditorGUI.indentLevel--;
+        }
+
+        // ------------------------------------------------------------------
+        //  Shared helpers for the four library sections
+        // ------------------------------------------------------------------
+
+        // Count box plus Add button, following the Terrain Layers resize pattern.
+        // Returns true when the list changed this frame.
+        private bool ListCount<T>(string label, string tooltip, List<T> list, int max) where T : new()
+        {
+            bool changed = false;
+
+            EditorGUILayout.BeginHorizontal();
+
+            EditorGUI.BeginChangeCheck();
+            int next = EditorGUILayout.DelayedIntField(new GUIContent(label, tooltip), list.Count);
+            if (EditorGUI.EndChangeCheck())
+            {
+                next = Mathf.Clamp(next, 0, max);
+                Undo.RecordObject(ucTarget, "Change " + label);
+                while (list.Count > next) list.RemoveAt(list.Count - 1);
+                while (list.Count < next) list.Add(new T());
+                valueChanged = true;
+                changed = true;
+            }
+
+            if (GUILayout.Button("Add", EditorStyles.miniButton, GUILayout.Width(46))
+                && list.Count < max)
+            {
+                Undo.RecordObject(ucTarget, "Add " + label);
+                list.Add(new T());
+                valueChanged = true;
+                changed = true;
+            }
+
+            EditorGUILayout.EndHorizontal();
+            return changed;
+        }
+
+        private bool RemoveButton()
+        {
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            bool clicked = GUILayout.Button("Remove", EditorStyles.miniButton, GUILayout.Width(64));
+            EditorGUILayout.EndHorizontal();
+            if (clicked) Undo.RecordObject(ucTarget, "Remove Prototype");
+            return clicked;
+        }
+
+        private string EntryTitle(string kind, int index, string assetName)
+        {
+            return string.IsNullOrEmpty(assetName)
+                 ? kind + " " + index + "  (empty)"
+                 : kind + " " + index + "  —  " + assetName;
+        }
+
+        // Min and max on one row, with min pushed below max rather than clamped
+        // to it, so dragging min past max widens the band from the other end
+        // instead of silently refusing to move.
+        private void AltitudeBand(string fieldPrefix, ref float min, ref float max)
+        {
+            FloatSlider("Min Altitude", fieldPrefix + ".minAlt", ref min, 0f, 1f, "F2",
+                        "Rejected below this fraction of world height.");
+            FloatSlider("Max Altitude", fieldPrefix + ".maxAlt", ref max, 0f, 1f, "F2",
+                        "Rejected above this fraction of world height.");
+            if (min > max) max = min;
+        }
+
+        private void LayerRow(string label, ref int value, string tooltip)
+        {
+            EditorGUI.BeginChangeCheck();
+            // -1 means "keep the prefab's layer", which LayerField cannot express,
+            // so it is shown as layer 0 with the tooltip carrying the meaning.
+            int shown = value < 0 ? 0 : value;
+            int next = EditorGUILayout.LayerField(new GUIContent(label, tooltip), shown);
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(ucTarget, "Change " + label);
+                value = next;
+                valueChanged = true;
+            }
         }
 
         // =====================================================================

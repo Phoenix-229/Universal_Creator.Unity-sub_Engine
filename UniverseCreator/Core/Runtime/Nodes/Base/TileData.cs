@@ -230,6 +230,65 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public bool requestColliderRebuild;
 
+        // ---- wind ------------------------------------------------------------
+        //
+        //  Written by Wind Output, read by the applier, which uploads them to
+        //  UCWindManager as a texture. Null on a graph with no wind branch, and
+        //  everything downstream treats null as "uniform wind", so nothing here
+        //  changes the behaviour of a graph that does not use it.
+
+        /// <summary>Baked sway amplitude, 0..1, row-major, or null.</summary>
+        public float[] windSwayAmplitude;
+
+        /// <summary>Baked sway phase, 0..1, same layout as amplitude, or null.</summary>
+        public float[] windSwayPhase;
+
+        /// <summary>Sample dimensions of the sway maps.</summary>
+        public Vector2Int windSwaySize;
+
+        /// <summary>World XZ of the sway map's minimum corner, in metres.</summary>
+        public Vector2 windSwayWorldMin;
+
+        /// <summary>World XZ extent the sway map covers, in metres.</summary>
+        public Vector2 windSwayWorldSize;
+
+        // ---- texture graph (Module 2) ---------------------------------------
+        //
+        //  The texture graph terminates in Shader Output, which - like every other
+        //  output node - describes what to write rather than writing it. These four
+        //  fields are that description. They are additive: nothing above reads them,
+        //  and a height-only graph leaves them null exactly as before.
+
+        /// <summary>
+        /// Finished material description from Shader Output, or null when the graph
+        /// has no texture chain. UCTextureGraphApplier turns this into a Material,
+        /// a TerrainLayer array and any baked maps.
+        /// </summary>
+        public SurfaceProduct surface;
+
+        /// <summary>Asset name for the generated material.</summary>
+        public string surfaceMaterialName;
+
+        /// <summary>Whether Shader Output was asked to rewrite the TerrainLayer array.</summary>
+        public bool surfaceWriteLayers;
+
+        /// <summary>Project folder the generated material, layers and maps land in.</summary>
+        public string surfaceOutputFolder;
+
+        /// <summary>
+        /// Which shader Shader Output targeted, as the integer value of its
+        /// ShaderTarget enum. Stored as an int and not as the enum because
+        /// ShaderTarget lives in UniverseCreator.Nodes.Texturing, which is a child
+        /// of this namespace - a parent cannot name a type in a child namespace
+        /// without a using directive, and this file predates that namespace.
+        ///
+        /// Stored here rather than as a key in SurfaceProduct.floats on purpose:
+        /// UCSelfTest asks the shader whether it has every float key the graph
+        /// wrote, and a bookkeeping key that is deliberately not a shader property
+        /// would fail a test that was working correctly.
+        /// </summary>
+        public int surfaceShaderTarget;
+
         /// <summary>Appends instances to a named scatter channel.</summary>
         public void AddScatter(string channel, List<ScatterInstance> instances)
         {
@@ -247,10 +306,24 @@ namespace UniverseCreator.Nodes
             holes = null;
             normals = null;
             requestColliderRebuild = false;
+            surface = null;
+            surfaceMaterialName = null;
+            surfaceOutputFolder = null;
+            surfaceWriteLayers = false;
+            surfaceShaderTarget = 0;
             detailLayers.Clear();
             scatter.Clear();
             meshes.Clear();
             previews.Clear();
+
+            // Wind. A recycled bag whose graph has no wind branch would otherwise
+            // keep the previous chunk's sway map and stamp it over ground that was
+            // never baked - a patch of still air in the middle of a windy field.
+            windSwayAmplitude = null;
+            windSwayPhase = null;
+            windSwaySize = Vector2Int.zero;
+            windSwayWorldMin = Vector2.zero;
+            windSwayWorldSize = Vector2.zero;
         }
     }
 }

@@ -4,36 +4,75 @@
    The grid variables belong to GridBackground, which draws in content space.
    That is what keeps the grid locked to the nodes while zooming; the old IMGUI
    canvas drew the grid in screen space, which is why it appeared to snap.
+
+   The look this file aims for is the one a terrain-graph tool is expected to
+   have: a dark, low-contrast canvas with a wide major grid; flat cards with a
+   tight radius and a near-black outline; a header band separated from the body
+   by a hairline; a sunken parameter panel under the ports; and thin, light
+   wires. Nothing here is copied - it is a set of numbers chosen to read the
+   same way.
+
+   TWO RULES ABOUT WHAT MAY LIVE HERE, both learned the hard way:
+
+     Anything C# writes with style.<property> = ... is an INLINE style, and
+     inline styles outrank every rule in this file. The node header's own colour
+     is written that way (UCNodeView, per category) and so is a comment group's
+     tint (ApplyTint), so this file must not try to set either. Where a state
+     needs to show through on a node whose header colour is already claimed, it
+     shows on the border and on the title LABEL, which are not inline.
+
+     Element names come from Unity's own Node template - #node-border, #title,
+     #title-label, #input, #output, #extension, #collapsible-area. They are not
+     ours to rename, and a typo in one is invisible: the rule simply never
+     matches and the styling silently does not happen.
    ----------------------------------------------------------------------------- */
 
+/* ----------------------------------------------------------------- canvas */
+
 GridBackground {
-    --grid-background-color: #232323;
-    --line-color: rgba(190, 195, 190, 0.08);
-    --thick-line-color: rgba(190, 195, 190, 0.18);
-    --spacing: 24;
+    --grid-background-color: #1e1e1e;
+    --line-color: rgba(190, 195, 190, 0.055);
+    --thick-line-color: rgba(190, 195, 190, 0.14);
+    --spacing: 32;
+}
+
+/* Wires. Thin and pale, so a graph with fifty connections reads as a diagram
+   rather than as a mass of cable. The accent on selection is the same amber the
+   node border uses, because "this is the thing you picked" should be one colour
+   across the whole editor. */
+
+Edge {
+    --edge-width: 2;
+    --edge-color: #7c8288;
+    --selected-edge-color: #ffa528;
+    --ghost-edge-color: rgba(255, 165, 40, 0.45);
+}
+
+Edge:hover {
+    --edge-color: #b9c0c6;
 }
 
 /* ---------------------------------------------------------------- node frame */
 
 .uc-node {
-    min-width: 210px;
+    min-width: 232px;
 }
 
 .uc-node #node-border {
-    border-radius: 7px;
+    border-radius: 4px;
     border-width: 1px;
-    border-color: #101010;
+    border-color: #0b0b0b;
     overflow: hidden;
 }
 
 .uc-node #contents,
 .uc-node #top,
 .uc-node #collapsible-area {
-    background-color: #1d1d1d;
+    background-color: #1a1a1a;
 }
 
 .uc-node:hover #node-border {
-    border-color: #5a5a5a;
+    border-color: #6a6a6a;
 }
 
 .uc-node:selected #node-border {
@@ -43,19 +82,21 @@ GridBackground {
 
 /* ---------------------------------------------------------------- title bar */
 
+/* No background-color here: the header's colour is the node's category and is
+   written inline in C#. This rule owns the header's SHAPE only. */
 .uc-node #title {
-    padding-top: 5px;
-    padding-bottom: 5px;
-    padding-left: 7px;
-    padding-right: 7px;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
     border-bottom-width: 1px;
-    border-bottom-color: rgba(0, 0, 0, 0.45);
+    border-bottom-color: rgba(0, 0, 0, 0.55);
 }
 
 .uc-node #title-label {
     -unity-font-style: bold;
     font-size: 12px;
-    color: #f2f2f2;
+    color: #f4f4f4;
     margin-left: 4px;
     margin-right: 6px;
 }
@@ -69,35 +110,65 @@ GridBackground {
 
 /* ------------------------------------------------------------------- ports */
 
+/* The port rows read as one band under the header, a shade lighter than the
+   card so the connectors sit on something rather than floating on the body. */
 .uc-node #input,
 .uc-node #output {
-    background-color: #1d1d1d;
-    padding-top: 3px;
-    padding-bottom: 3px;
+    background-color: #202020;
+    padding-top: 4px;
+    padding-bottom: 4px;
 }
 
 .uc-node .port {
-    height: 20px;
+    height: 21px;
+    padding-left: 4px;
+    padding-right: 4px;
 }
 
 .uc-node .port > Label {
     font-size: 11px;
-    color: #c8c8c8;
+    color: #cdcdcd;
+}
+
+/* The connector itself: a ring, filled by its cap when something is plugged in.
+   Unity's default is a small square outline, which at graph zoom is hard to aim
+   at and harder to read as connected or not. */
+.uc-node .port #connector {
+    width: 9px;
+    height: 9px;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: #0b0b0b;
+    margin-left: 3px;
+    margin-right: 3px;
+}
+
+.uc-node .port #connector:hover {
+    border-color: #ffa528;
+}
+
+.uc-node .port #connector > #cap {
+    border-radius: 4px;
 }
 
 /* ------------------------------------------------------- body / parameters */
 
+/* Darker than the ports band and darker than the card: the parameters are a
+   sunken panel, which is what separates "settings" from "wiring" at a glance
+   without a divider line across every node. */
 .uc-node #extension {
-    background-color: #1d1d1d;
-    padding-top: 4px;
-    padding-bottom: 6px;
-    padding-left: 6px;
-    padding-right: 6px;
+    background-color: #171717;
+    border-top-width: 1px;
+    border-top-color: rgba(0, 0, 0, 0.5);
+    padding-top: 5px;
+    padding-bottom: 7px;
+    padding-left: 7px;
+    padding-right: 7px;
 }
 
 /* Parameters live here, inside the node, rather than in a side pane. */
 .uc-params {
-    background-color: #1d1d1d;
+    background-color: rgba(0, 0, 0, 0);
 }
 
 .uc-params FloatField,
@@ -117,21 +188,34 @@ GridBackground {
 
 .uc-params Label {
     font-size: 11px;
-    min-width: 74px;
-    color: #b9b9b9;
+    min-width: 82px;
+    color: #bcbcbc;
+}
+
+/* Inputs a touch darker than the panel they sit in, with the same tight radius
+   as the card, so a node's controls belong to the node. */
+.uc-params FloatField > TextInput,
+.uc-params IntegerField > TextInput,
+.uc-params TextField > TextInput,
+.uc-params EnumField > VisualElement,
+.uc-params ObjectField > #unity-object-field-display {
+    background-color: #121212;
+    border-color: #0b0b0b;
+    border-radius: 3px;
 }
 
 .uc-params CurveField {
     height: 46px;
     margin-top: 3px;
     margin-bottom: 3px;
+    border-radius: 3px;
 }
 
 .uc-advanced {
-    margin-top: 4px;
+    margin-top: 5px;
     border-top-width: 1px;
-    border-top-color: rgba(255, 255, 255, 0.07);
-    padding-top: 2px;
+    border-top-color: rgba(255, 255, 255, 0.06);
+    padding-top: 3px;
 }
 
 .uc-advanced > Toggle Label {
@@ -160,8 +244,12 @@ GridBackground {
     border-width: 2px;
 }
 
-.uc-error #title {
-    background-color: #7a1616;
+/* On the LABEL, not on #title. A red header band is the obvious way to show an
+   error and it cannot work: #title's background-color is written inline per
+   category in C#, and inline beats this file. The rule that used to be here set
+   a background nothing ever displayed. */
+.uc-error #title-label {
+    color: #ff9a9a;
 }
 
 /* A terminal Output node is the one that actually writes the terrain, so it
@@ -174,7 +262,7 @@ GridBackground {
 
 .uc-group {
     background-color: rgba(60, 60, 60, 0.35);
-    border-radius: 6px;
+    border-radius: 4px;
 }
 
 .uc-group > #header Label {
@@ -190,7 +278,7 @@ GridBackground {
 
 .uc-comment-group {
     position: absolute;
-    border-radius: 6px;
+    border-radius: 4px;
     padding: 6px;
     min-width: 160px;
     min-height: 90px;
@@ -232,7 +320,7 @@ GridBackground {
     width: 14px;
     height: 14px;
     background-color: rgba(255, 255, 255, 0.25);
-    border-top-left-radius: 6px;
+    border-top-left-radius: 4px;
     cursor: resize-up-left;
 }
 

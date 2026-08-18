@@ -62,7 +62,7 @@ namespace UniverseCreator
     /// Immutable, deterministic, thread-safe noise generator.
     /// </summary>
     [Serializable]
-    public sealed class Noise
+    public sealed partial class Noise
     {
         // ---------------------------------------------------------------------
         //  State (all readonly - see THREAD SAFETY note in the file header)
@@ -555,8 +555,13 @@ namespace UniverseCreator
         /// positive values invert the fold, giving ridges instead of creases.
         /// </param>
         /// <param name="type">Which basis to accumulate.</param>
-        /// <returns>Roughly 0-1. Not hard-clamped, so callers that need a strict
-        /// range should follow with Clamp01 or Normalize.</returns>
+        /// <returns>
+        /// 0-1, given a basis that returns 0-1. Amplitude is divided by the sum
+        /// actually accumulated, so octave count and detail change the character of
+        /// the surface without changing its range - raising detail roughens rather
+        /// than rescales. Not hard-clamped, since a basis that overshoots slightly
+        /// should stay visible to a caller rather than be silently flattened.
+        /// </returns>
         public float Fractal(float x, float z, float size, int iterations = -1,
                              float detail = 0.5f, float turbulence = 0f,
                              NoiseType type = NoiseType.Perlin)
@@ -573,6 +578,7 @@ namespace UniverseCreator
             int permSeed = (int)permutation[subSeed];
 
             float result = 0f;
+            float norm = 0f;
             float freq = size;
             float amp = 1f;
 
@@ -598,14 +604,21 @@ namespace UniverseCreator
                 }
 
                 result += val * amp;
+                norm += amp;
 
                 freq *= 0.5f;
                 amp *= detail;
             }
 
-            // Normalising factor. With detail = 0.5 the geometric series sums to
-            // ~2, so scaling by (1 - detail) brings the result back toward 0-1.
-            return result * (1f - detail);
+            // Divide by the amplitude actually accumulated, not by the closed form
+            // (1 - detail). That closed form is the limit of the geometric series
+            // at infinite octaves; the loop runs a finite count, so the real sum is
+            // (1 - detail^N)/(1 - detail) and the two diverge as detail rises. At
+            // detail 0.8 over 6 octaves the old factor reached only 74% of range
+            // and at 0.9 only 47%, so turning detail up flattened the terrain
+            // instead of roughening it and changing the octave count rescaled the
+            // whole landform. Accumulating matches Fractal3D, which was already right.
+            return norm > 1e-6f ? result / norm : 0f;
         }
 
         /// <summary>

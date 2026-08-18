@@ -95,15 +95,24 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Whether a chunk at this LOD gets a physics collider. High-LOD chunks
-        /// (where the player stands) always do; Low and Buffer skip it unless the
-        /// caller forces it, since the player is never on them. This is the
-        /// anti-fall-through guarantee: the centre ring is never collider-free.
+        /// Whether a chunk at this LOD gets a physics collider.
+        ///
+        /// Every visible cell does - High and Low both. Only the Buffer ring, which is
+        /// outside the visible grid entirely, goes without.
+        ///
+        /// This used to be High only, on the reasoning that the player never stands on
+        /// the outer ring. That is not true at the moment it matters: the grid re-centres
+        /// on the focus transform, so a player walking outward crosses onto cells that
+        /// were Low until the reclassification catches up. For those frames the ground
+        /// ahead had no collider and the character fell through it - a hole with no
+        /// corresponding hole in the surface. A collider on the visible ring closes that
+        /// window, and it costs only the heightfield bake for cells that are already
+        /// resident and already drawn.
         /// </summary>
         public static bool ShouldHaveCollider(LODLevel level, bool generateColliders)
         {
             if (!generateColliders) return false;
-            return level == LODLevel.High;
+            return level == LODLevel.High || level == LODLevel.Low;
         }
     }
 }

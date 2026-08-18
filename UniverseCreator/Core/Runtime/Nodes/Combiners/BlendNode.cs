@@ -1,9 +1,10 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
 //  File:    BlendNode.cs
-//  Purpose: The general-purpose two-input combine. Eleven blend modes matching
-//           standard image-compositing operators, with opacity and an optional
-//           mask that gates where the blend applies.
+//  Purpose: The general-purpose two-input combine. Twenty blend modes matching
+//           standard image-compositing operators plus the Module 2 extended
+//           operator set, with opacity and an optional mask that gates where
+//           the blend applies.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
@@ -20,6 +21,12 @@ namespace UniverseCreator.Nodes.Combiners
         public BlendMode mode = BlendMode.Add;
         public float opacity = 1f;
 
+        /// <summary>
+        /// Second parameter for the weighted operators - WeightedSum, Lerp, and
+        /// WeightedSubtract. Every other mode ignores it.
+        /// </summary>
+        public float weight = 0.5f;
+
         protected override Matrix Combine(Matrix a, Matrix b, Matrix mask, TileData tile, StopToken stop)
         {
             float op = Mathf.Clamp01(opacity);
@@ -35,7 +42,7 @@ namespace UniverseCreator.Nodes.Combiners
                 {
                     int i = rowStart + x;
 
-                    float blended = MatrixOperations.BlendValue(a.arr[i], b.arr[i], mode);
+                    float blended = MatrixOperations.BlendValue(a.arr[i], b.arr[i], mode, weight);
 
                     // Mask gates the blend on top of opacity.
                     float t = op;

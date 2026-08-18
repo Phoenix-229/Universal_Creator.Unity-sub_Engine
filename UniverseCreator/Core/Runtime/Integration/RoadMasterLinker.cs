@@ -79,6 +79,54 @@ namespace UniverseCreator.Integration
         /// </summary>
         public UniverseCreatorObject universeCreator;
 
+        // =====================================================================
+        //  ROAD BEHAVIOUR  -  DECLARED, NOT IMPLEMENTED
+        //
+        //  The provider half above is live: height, normal, bounds and tunnel
+        //  carving all resolve against the real chunk grid today. What is not
+        //  written is the consumer half - how a road decides where to go and what
+        //  it does to the ground it crosses.
+        //
+        //  These name that half, with the units and the constraints the terrain
+        //  side already imposes, so the module that writes it does not invent a
+        //  second set of answers. Nothing reads them yet.
+        // =====================================================================
+
+        [Header("Road Behaviour  (declared, not implemented)")]
+
+        [Tooltip("PLACEHOLDER. Metres either side of a road centre line that the " +
+                 "terrain is flattened to meet it.")]
+        public float roadWidthMetres = 7f;
+
+        [Tooltip("PLACEHOLDER. Metres either side of the road over which the " +
+                 "flattening blends back into the natural ground.")]
+        public float shoulderBlendMetres = 4f;
+
+        [Tooltip("PLACEHOLDER. Steepest gradient a road will climb, as a percentage. " +
+                 "Past this the router cuts, tunnels or switches back.")]
+        [Range(0f, 45f)]
+        public float maxGradientPercent = 12f;
+
+        [Tooltip("PLACEHOLDER. Metres of cut depth past which a tunnel is cheaper " +
+                 "than a cutting, so the router bores instead of digging.")]
+        public float tunnelThresholdMetres = 14f;
+
+        [Tooltip("PLACEHOLDER. Metres of fill height past which a bridge is cheaper " +
+                 "than an embankment.")]
+        public float bridgeThresholdMetres = 8f;
+
+        [Tooltip("PLACEHOLDER. Roads flatten the terrain under them. Off leaves the " +
+                 "ground alone and lets the road mesh float or sink with it.")]
+        public bool conformTerrainToRoad = true;
+
+        [Tooltip("PLACEHOLDER. A cut region is re-flattened after the terrain cell " +
+                 "under it regenerates, so a rebuild does not swallow the road.")]
+        public bool reapplyAfterRegenerate = true;
+
+        [Tooltip("PLACEHOLDER. Metres of clearance kept clear of vegetation either " +
+                 "side of a road.")]
+        public float vegetationClearanceMetres = 2.5f;
+
         // Resolves the world component even when the field was left unset, so a
         // hand-placed linker still works.
         private UniverseCreatorObject World

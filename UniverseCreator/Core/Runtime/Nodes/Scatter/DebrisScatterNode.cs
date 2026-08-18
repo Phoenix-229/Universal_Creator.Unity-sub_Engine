@@ -1,14 +1,22 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
+//                     Module 2: per-type rules implemented
 //  File:    DebrisScatterNode.cs
-//  Purpose: STUB. Small-scale surface litter — pebbles, twigs, bone, rubble.
-//           Wiring is final; the solver lands in Module 2.
+//  Purpose: Small-scale surface litter - pebbles, twigs, bone, rubble.
 //
 //  Debris differs from rocks mainly in scale and in that it clusters rather than
 //  distributing evenly, so it carries a clumping parameter the others don't.
+//
+//  Clumping is expressed through the base solver's cluster bias rather than a
+//  separate two-level sampler: the bias already drops points in sparse
+//  neighbourhoods, which leaves the clumps the blue-noise field naturally
+//  contained. A second sampling level would place clump members without spacing
+//  awareness of the neighbouring clump, reintroducing the overlap the solver
+//  exists to prevent.
 // -----------------------------------------------------------------------------
 
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace UniverseCreator.Nodes.Scatter
 {
@@ -16,7 +24,7 @@ namespace UniverseCreator.Nodes.Scatter
     public class DebrisScatterNode : ScatterNodeBase
     {
         public override string NodeName { get { return "Debris Scatter"; } }
-        public override string Tooltip { get { return "STUB (Module 2). Clustered surface litter."; } }
+        public override string Tooltip { get { return "Clustered surface litter, biased toward hollows."; } }
         public override string Channel { get { return "debris"; } }
 
         /// <summary>0 spreads evenly, 1 concentrates into tight clumps.</summary>
@@ -28,13 +36,42 @@ namespace UniverseCreator.Nodes.Scatter
         /// <summary>Bias placement toward hollows where debris naturally collects.</summary>
         public bool preferCavities = true;
 
+        protected override List<ScatterCandidate> SolvePlacement(
+            Matrix height, Matrix mask, TileData tile, StopToken stop)
+        {
+            // Debris exposes its clumping through its own two parameters, so they
+            // are mapped onto the base solver's cluster controls before it runs.
+            clusterStrength = Mathf.Clamp01(clumping);
+            clusterRadius = Mathf.Max(0.5f, clumpRadius);
+
+            if (!preferCavities || height == null)
+                return base.SolvePlacement(height, mask, tile, stop);
+
+            // Cavity is high in hollows and low on ridges. Folding it into the
+            // mask means the existing weighting path handles the bias - the solver
+            // needs no knowledge of what the extra factor represents.
+            Matrix cavity = MatrixOperations.Cavity(height);
+
+            Matrix combined;
+            if (mask != null)
+            {
+                combined = new Matrix(mask);
+                for (int i = 0; i < combined.arr.Length && i < cavity.arr.Length; i++)
+                    combined.arr[i] *= Mathf.Clamp01(cavity.arr[i]);
+            }
+            else
+            {
+                combined = cavity;
+            }
+
+            return base.SolvePlacement(height, combined, tile, stop);
+        }
+
         protected override void PlaceInstances(Matrix height, Matrix mask, TileData tile,
                                                List<ScatterInstance> instances, StopToken stop)
         {
-            // TODO [Module 2]: replace uniform Poisson sampling with a two-level
-            // process — sample clump centres at clumpRadius spacing, then sample
-            // members around each centre with a falloff set by clumping. When
-            // preferCavities, weight clump centres by MatrixOperations.Cavity.
+            // Placement, clumping, and cavity bias are all resolved before this
+            // point. Debris carries no further per-type rules.
         }
     }
 }

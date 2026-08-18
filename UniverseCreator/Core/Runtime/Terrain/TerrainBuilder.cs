@@ -54,6 +54,19 @@ namespace UniverseCreator.TerrainSystem
             return data;
         }
 
+        // Names the cell being written, in metres, for the height guard's warning.
+        //
+        // The guard fires from inside a static apply with no Chunk in scope, and a
+        // warning that cannot say WHERE it acted is close to useless on a 25-cell
+        // grid: the whole value of the message is being able to fly to that corner
+        // and look at what the graph did there. The bounds are the one piece of
+        // identity this method already has.
+        private static string ChunkLabel(Bounds worldBounds)
+        {
+            return "the chunk at x " + Mathf.RoundToInt(worldBounds.min.x)
+                   + " z " + Mathf.RoundToInt(worldBounds.min.z) + " m";
+        }
+
         /// <summary>
         /// Applies the OutputBag from a finished background generation to the given
         /// TerrainData. Writes heightmap, splatmap, holes, and detail layers.
@@ -94,23 +107,41 @@ namespace UniverseCreator.TerrainSystem
             // Heightmap
             if (outputs.heightmap != null)
             {
+                // WATER DIGS FIRST, SCULPTS SECOND.
+                //
+                // The order is the whole contract. Water carving is a rule re-derived
+                // from the body's own fields on every apply, so a graph re-run cuts
+                // the channel again instead of filling it in - that is what makes
+                // Regenerate stop wiping rivers. Manual sculpting then lands on top,
+                // so a bank the user shaped by hand is not undone by the river that
+                // runs past it. Reverse these two and every hand edit inside a water
+                // body would be erased on the next rebuild.
+                if (settings != null && metresPerSample > 0f)
+                    WaterCarveRegistry.ApplyAll(settings, outputs.heightmap,
+                                                chunkWorldBounds, metresPerSample);
+
                 // Manual edits are re-applied here rather than after the write,
                 // because reading the heights back out of TerrainData to patch them
                 // would cost a full round-trip through native memory per chunk.
                 if (overrides != null && !overrides.IsEmpty && metresPerSample > 0f)
                     overrides.ApplyTo(outputs.heightmap, chunkWorldBounds, metresPerSample);
 
-                // FINAL SAFETY NET: Clamp all height values to Unity's expected [0.0, 1.0] range.
-                // This definitively prevents extreme vertex spikes caused by overflowing noise or blending logic.
-                int resY = outputs.heightmap.GetLength(0);
-                int resX = outputs.heightmap.GetLength(1);
-                for (int y = 0; y < resY; y++)
-                {
-                    for (int x = 0; x < resX; x++)
-                    {
-                        outputs.heightmap[y, x] = Mathf.Clamp01(outputs.heightmap[y, x]);
-                    }
-                }
+                // LAST GATE BEFORE THE SURFACE EXISTS.
+                //
+                // This used to be a Clamp01 loop commented as preventing spikes. It
+                // could not: Unity's Clamp01 is two inequalities and an else, and NaN
+                // fails both inequalities, so every NaN the graph produced fell
+                // straight through into SetHeights - which is what draws a vertex at
+                // an undefined position. See HeightGuard for the arithmetic that
+                // produces one and for what replaces the clamp.
+                //
+                // Placed after the carve and the sculpt deliberately, so it is the
+                // last thing to touch the samples and audits the water dig and the
+                // override layer on the same terms as the node math. Nothing gets to
+                // be trusted here because of where it came from.
+                HeightGuard.Guard(outputs.heightmap, metresPerSample,
+                                  settings != null ? settings.maxHeightMeters : 0f,
+                                  ChunkLabel(chunkWorldBounds), settings);
 
                 data.SetHeightsDelayLOD(0, 0, outputs.heightmap);
 
@@ -150,19 +181,12 @@ namespace UniverseCreator.TerrainSystem
                 data.SetHoles(0, 0, outputs.holes);
             }
 
-            // Detail layers (grass, small rocks)
-            if (outputs.detailLayers != null && outputs.detailLayers.Count > 0)
-            {
-                foreach (var kvp in outputs.detailLayers)
-                {
-                    int layer = kvp.Key;
-                    int[,] densities = kvp.Value;
-                    if (layer >= 0 && layer < data.detailPrototypes.Length && densities != null)
-                    {
-                        data.SetDetailLayer(0, 0, layer, densities);
-                    }
-                }
-            }
+            // Detail layers are NOT written here. SetDetailLayer requires a grid of
+            // exactly detailResolution squared, and the graph produces them at the
+            // heightfield's resolution - the two are independent settings and are
+            // rarely equal, so writing them raw threw on the size mismatch. Module 2
+            // moved that to ScatterApplier.ApplyDetailGrids, which resamples first
+            // and also owns the prototype array those layers index into.
 
             return needsColliderRebuild || outputs.requestColliderRebuild;
         }
@@ -183,15 +207,26 @@ namespace UniverseCreator.TerrainSystem
             // enableInstancing is a plain material bool that stays true on a shader
             // lacking them, so it cannot be used to discover support after the fact -
             // it has to be decided here, alongside the shader choice.
+            // Ordered by preference, not by popularity. Ours first because it is
+            // the one with the UC control surface on it; the stock pipeline
+            // shaders are here so a project that strips this module still draws
+            // terrain instead of magenta.
+            //
+            // Nature/Terrain/Standard sits below the SRP entries deliberately.
+            // It is a built-in-render-pipeline shader, so under URP or HDRP it
+            // resolves - Shader.Find still returns it - and then renders magenta.
+            // Finding a shader is not the same as that shader working in the
+            // active pipeline, and this list is ordered on the latter.
             string[] candidates =
             {
-                "Nature/Terrain/Standard",              // built-in render pipeline
+                "UniverseCreator/TerrainLit",           // ours, URP
                 "Universal Render Pipeline/Terrain/Lit",
                 "HDRP/TerrainLit",
+                "Nature/Terrain/Standard",              // built-in render pipeline only
                 "Nature/Terrain/Diffuse",               // legacy, no instancing path
                 "Standard"                              // last resort, not a terrain shader
             };
-            bool[] supportsInstancing = { true, true, true, false, false };
+            bool[] supportsInstancing = { true, true, true, true, false, false };
 
             for (int i = 0; i < candidates.Length; i++)
             {
@@ -243,22 +278,43 @@ namespace UniverseCreator.TerrainSystem
 
             if (fallbackLayer == null)
             {
-                Texture2D tex = new Texture2D(2, 2);
+                // Earth, not a test pattern. The old stand-in was a light-grey/white
+                // checker, and white is the one colour that cannot be read as ground:
+                // against a blue water surface it reads exactly as "this material
+                // failed to assign", which is precisely the bug reported at the
+                // shoreline when in fact the terrain was drawing correctly with the
+                // stand-in it was given.
+                //
+                // 4x4 rather than 2x2 with bilinear filtering and a several-metre tile,
+                // so it reads as soil breaking up over distance instead of as squares.
+                const int size = 4;
+                Texture2D tex = new Texture2D(size, size);
                 tex.name = "UC_DefaultGroundTex";
                 tex.hideFlags = HideFlags.HideAndDontSave;
-                tex.filterMode = FilterMode.Point; // Keep edges sharp for the checker pattern
+                tex.filterMode = FilterMode.Bilinear;
+                tex.wrapMode = TextureWrapMode.Repeat;
 
-                Color c1 = new Color(0.8f, 0.8f, 0.8f, 1f); // light grey
-                Color c2 = Color.white;
-                
-                tex.SetPixels(new Color[] { c1, c2, c2, c1 });
+                // Damp earth, with the value walked by a small fixed pattern rather than
+                // a random draw: the stand-in has to look identical on every machine and
+                // after every reload, or a screenshot comparison is worthless.
+                Color[] px = new Color[size * size];
+                for (int i = 0; i < px.Length; i++)
+                {
+                    // Two coprime strides over the 16 cells, so light and dark never line
+                    // up into rows or a checker.
+                    float v = 0.88f + 0.06f * (i % 3) + 0.04f * (i % 5);
+                    px[i] = new Color(0.42f * v, 0.35f * v, 0.26f * v, 1f);
+                }
+
+                tex.SetPixels(px);
                 tex.Apply();
 
                 fallbackLayer = new TerrainLayer();
                 fallbackLayer.name = "Default_Terrain_Layer";
                 fallbackLayer.diffuseTexture = tex;
-                // A 2x2 texture mapped over a 2x2 tile makes each checker square exactly 1x1 world units
-                fallbackLayer.tileSize = new Vector2(2f, 2f);
+                // Metres per texture repeat. Large enough that the 4x4 never resolves as
+                // a grid underfoot, small enough to still break up a hillside.
+                fallbackLayer.tileSize = new Vector2(6f, 6f);
                 fallbackLayer.hideFlags = HideFlags.HideAndDontSave;
             }
 
@@ -281,22 +337,18 @@ namespace UniverseCreator.TerrainSystem
             // instead of being left on null: AddComponent<Terrain> starts with no
             // material at all, and trusting the pipeline to substitute one is what left
             // the ground invisible while the slice map floating above it drew fine.
+            //
+            // FallbackMaterial() rather than a fresh Material here, for two reasons.
+            // It walks the candidate chain - UniverseCreator/TerrainLit first - so the
+            // chunk gets our control surface where it exists and still draws where it
+            // does not. And it hands back one shared cached instance: constructing a
+            // material per chunk meant twenty-five identical materials, none of them
+            // owned by anything, none ever destroyed, and each one its own SRP batcher
+            // break for a surface that should batch as one.
             if (settings != null && settings.terrainMaterial != null)
                 terrain.materialTemplate = settings.terrainMaterial;
             else if (terrain.materialTemplate == null)
-            {
-                Shader urpTerrainShader = Shader.Find("Universal Render Pipeline/Terrain/Lit");
-                if (urpTerrainShader != null)
-                {
-                    Material defaultTerrainMat = new Material(urpTerrainShader);
-                    defaultTerrainMat.name = "Default_URP_TerrainMat";
-                    terrain.materialTemplate = defaultTerrainMat;
-                }
-                else
-                {
-                    terrain.materialTemplate = FallbackMaterial();
-                }
-            }
+                terrain.materialTemplate = FallbackMaterial();
 
             // Both of these default on for a fresh component, but either one off draws
             // nothing whatsoever, and they are cheap to reassert.

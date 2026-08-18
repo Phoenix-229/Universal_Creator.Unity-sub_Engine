@@ -72,8 +72,49 @@ namespace UniverseCreator.TerrainSystem
             // cost is keeping it from being collected.
             public float[,] appliedHeights;
 
+            // The graph's own output for this cell, BEFORE any water dig was cut into
+            // it. This is the only surviving record of where the ground was, and a
+            // re-fit needs it for two things: to re-cut a moved channel without
+            // deepening the one it cut last time, and to fill a channel back in when
+            // the body that made it is deleted or moves away.
+            //
+            // Held only while a carver actually reaches this cell, and dropped the
+            // moment none does - see ReapplyCarves. A world with no water pays nothing,
+            // and a world with a river pays for the cells the river crosses rather than
+            // for all 25. That gating is the difference between a quarter of a megabyte
+            // and six and a half.
+            //
+            // NOT merged into appliedHeights: they are different questions. This one is
+            // "where was the ground", that one is "what is on screen now", and the whole
+            // job here is telling those two apart.
+            public float[,] graphHeights;
+
+            // True once ApplyChunk has written this cell in THIS session, which is the
+            // only condition under which the live surface can be trusted to be undug
+            // ground when no snapshot exists.
+            //
+            // A reload wipes graphHeights but leaves the terrain standing, and
+            // RestoreSurfaces seeds appliedHeights by reading that terrain back - so on
+            // a reloaded river cell the live surface already HAS the channel in it.
+            // Adopting it as pristine would make the next re-fit cut a channel into the
+            // channel, then into that one, deepening the river every time the spline was
+            // touched. This flag is what refuses that, at the cost of a re-fit doing
+            // nothing on a reloaded cell until it has been baked once more.
+            public bool bakedThisSession;
+
+            // This cell's four boundary rows as last baked. A neighbour welds against
+            // these rather than reading heights back out of TerrainData, and `ready`
+            // stays false until a real bake has filled them - which is the guard that
+            // stops a flat placeholder from dragging a real edge down into a trench.
+            public EdgeSet edges = new EdgeSet();
+
             public MeshFilter wireframeFilter;
             public MeshRenderer wireframeRenderer;
+
+            // Object-class scatter this cell spawned into the scene. Trees and
+            // details are not listed: the TerrainData owns those and overwriting it
+            // releases them, while these are real GameObjects that leak otherwise.
+            public List<GameObject> scatterObjects = new List<GameObject>();
         }
 
         // Signature of the world's Terrain Settings as last mirrored onto the cells.
@@ -168,15 +209,118 @@ namespace UniverseCreator.TerrainSystem
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
 
-        public bool IsGenerating { get { return activeWorkers > 0 || pending.Count > 0 || IsRebuildingAll; } }
+        // Set whenever something invalidates the welded state - a queued bake, a
+        // resolution change, a world-size change - and cleared by the settle stitch
+        // PumpCompleted runs once the queue drains. Without it a run whose last cell
+        // was superseded would retire with nothing written and never re-weld.
+        private bool settleStitchPending;
+
+        // A one-shot fired the moment the world next settles (see the drain block in
+        // PumpCompleted). The regenerate path arms it via RunAfterSettle so the
+        // hydrology spawn reads the FINAL surface instead of the flat baseline the
+        // async bake starts from - rivers can only trace a real downhill, and lakes
+        // can only find the real low ground, once the heights actually exist.
+        private System.Action pendingAfterSettle;
+
+        public bool IsGenerating 
+        { 
+            get 
+            { 
+                if (activeWorkers > 0 || pending.Count > 0 || setupDepth > 0 || IsRebuildingAll)
+                    return true;
+
+                for (int i = 0; i < pool.Count; i++)
+                    if (pool[i].workerDone && !pool[i].applied) return true;
+
+                return false;
+            } 
+        }
         public bool IsRebuildingAll { get; private set; }
-        
+
+        /// <summary>
+        /// Whether this world owes the main thread anything at all. False means the pump
+        /// has nothing to do and can be skipped outright.
+        /// </summary>
+        /// <remarks>
+        /// The reason this is a property and not just "IsGenerating" is the handoff gap:
+        /// a worker can be finished (workerDone) while its heights are still waiting for
+        /// a pump to write them, and at that moment activeWorkers has already been
+        /// decremented. Pumping only while IsGenerating would strand exactly those cells.
+        ///
+        /// It exists because an idle editor was not idle. The edit-mode driver ran a full
+        /// pump on every EditorApplication.update tick, and that tick fires far more often
+        /// while the mouse is moving - so the world appeared to be recomputing itself in
+        /// response to the cursor. Nothing was actually regenerating, but the cost was
+        /// real and so was the impression. One boolean in front of the pump is what makes
+        /// an idle world free, which is the only acceptable resting state for a tool that
+        /// sits in the editor all day.
+        /// </remarks>
+        public bool HasWork
+        {
+            get
+            {
+                return IsGenerating;
+            }
+        }
+
+        /// <summary>
+        /// Non-zero while a rebuild is still laying out cells and allocating heightfields,
+        /// before it has queued anything.
+        /// </summary>
+        /// <remarks>
+        /// RebuildAll and RebuildLayout both await EnsureFlatDataAsync, which yields every
+        /// few cells. The editor pump runs inside those yields, and until this existed it
+        /// saw an empty queue with no active workers, concluded the world had settled, and
+        /// cleared IsRebuildingAll - retiring the progress item before the first chunk was
+        /// even queued. That is why committing a field showed no background task: the only
+        /// window in which the work was advertised was the one the pump kept closing.
+        ///
+        /// A depth rather than a bool because a second commit can arrive while the first
+        /// is still awaiting, and the inner one finishing must not declare the outer done.
+        /// </remarks>
+        private int setupDepth;
+
+        /// <summary>
+        /// Fraction of the world's cells that are not waiting on a bake, 0-1.
+        /// </summary>
+        /// <remarks>
+        /// Reports a definite fraction during setup rather than 1: the queue is empty
+        /// while cells are still being allocated, and a full bar that then jumps back to
+        /// zero reads as a finished job restarting. Progress.Report treats a negative
+        /// value as indeterminate, which is exactly what that phase is.
+        /// </remarks>
         public float GetProgress()
         {
+            if (setupDepth > 0) return -1f;
             if (pool.Count == 0) return 1f;
-            int done = pool.Count - (activeWorkers + pending.Count);
+            
+            int busy = activeWorkers + pending.Count;
+            for (int i = 0; i < pool.Count; i++)
+                if (pool[i].workerDone && !pool[i].applied) busy++;
+                
+            int done = pool.Count - busy;
             if (done < 0) done = 0;
             return (float)done / pool.Count;
+        }
+
+        /// <summary>
+        /// One line describing what the world is doing, for the editor's background
+        /// task area. Names the phase and counts the cells, because the whole point of
+        /// the indicator is to answer "did my edit actually take effect".
+        /// </summary>
+        public string GetProgressLabel()
+        {
+            if (setupDepth > 0) return "Preparing terrain cells...";
+
+            int outstanding = activeWorkers + pending.Count;
+            for (int i = 0; i < pool.Count; i++)
+                if (pool[i].workerDone && !pool[i].applied) outstanding++;
+
+            if (outstanding <= 0) return "Finishing terrain...";
+
+            int total = pool.Count > 0 ? pool.Count : outstanding;
+            int done = Mathf.Max(0, total - outstanding);
+            return "Generating terrain - chunk " + (done + 1) + " of " + total;
         }
 
         // =====================================================================
@@ -296,6 +440,12 @@ namespace UniverseCreator.TerrainSystem
         private void OnDisable()
         {
             CancelAll();
+
+            // The one shared water material is HideFlags.DontSave and owned by nothing,
+            // so without this it is a leaked material per domain reload. The bodies
+            // themselves are UCWaterBody objects with their own lifetimes; nothing here
+            // takes those away.
+            UCWaterMaterials.ReleaseShared();
         }
 
         // =====================================================================
@@ -312,47 +462,81 @@ namespace UniverseCreator.TerrainSystem
             if (o == null || o.graph == null) return;
 
             IsRebuildingAll = true;
-            EnsurePool(o);
+            settleStitchPending = true;
 
-            // Give every cell a real TerrainData, layers and material BEFORE any worker
-            // is dispatched. A Terrain whose terrainData is still null draws nothing and
-            // offers no sculpt tools, so until this ran the graph path left the world
-            // invisible for the whole time the queue took to drain - the inspector showed
-            // a full terrain block over ground that was not there yet. The heights are
-            // flat for that window and get overwritten per cell as each bake lands.
-            await EnsureFlatDataAsync(o);
+            // Held across the awaits below. The pump ticks inside them, and without this
+            // it would see an empty queue, call the world settled, and close the progress
+            // item before the first cell was queued.
+            setupDepth++;
 
-            centreCell = FocusCell(o);
-
-            // Edit mode holds the entire world; play mode holds a window around the
-            // player. Applied before dispatch so the loop below only queues cells that
-            // are actually up - a bake into a disabled object is a worker slot spent on
-            // terrain nobody can see.
-            ApplyStreamWindow(o);
-
-            for (int i = 0; i < pool.Count; i++)
+            try
             {
-                Chunk c = pool[i];
+                EnsurePool(o);
 
-                // Surplus cells from a larger previous grid are parked inactive and still
-                // carry their old coordinates. Baking them would spend worker slots on
-                // terrain nobody can see and write heights into a disabled object.
-                if (c.go == null || !c.go.activeSelf) continue;
+                // Give every cell a real TerrainData, layers and material BEFORE any worker
+                // is dispatched. A Terrain whose terrainData is still null draws nothing and
+                // offers no sculpt tools, so until this ran the graph path left the world
+                // invisible for the whole time the queue took to drain - the inspector showed
+                // a full terrain block over ground that was not there yet. The heights are
+                // flat for that window and get overwritten per cell as each bake lands.
+                await EnsureFlatDataAsync(o);
 
-                int ring = DualLODSystem.RingDistance(c.cell.x, c.cell.z, centreCell.x, centreCell.z);
-                c.lod = o.ShouldRenderWholeWorld() ? LODLevel.High : DualLODSystem.Classify(ring, o.highLODRingSize, o.chunkCountPerSide);
-                QueueGenerate(o, c);
+                centreCell = FocusCell(o);
+
+                // Edit mode holds the entire world; play mode holds a window around the
+                // player. Applied before dispatch so the loop below only queues cells that
+                // are actually up - a bake into a disabled object is a worker slot spent on
+                // terrain nobody can see.
+                ApplyStreamWindow(o);
+
+                for (int i = 0; i < pool.Count; i++)
+                {
+                    Chunk c = pool[i];
+
+                    // Surplus cells from a larger previous grid are parked inactive and still
+                    // carry their old coordinates. Baking them would spend worker slots on
+                    // terrain nobody can see and write heights into a disabled object.
+                    if (c.go == null || !c.go.activeSelf) continue;
+
+                    int ring = DualLODSystem.RingDistance(c.cell.x, c.cell.z, centreCell.x, centreCell.z);
+                    c.lod = o.ShouldRenderWholeWorld() ? LODLevel.High : DualLODSystem.Classify(ring, o.highLODRingSize, o.chunkCountPerSide);
+                    QueueGenerate(o, c);
+                }
+
+                built = true;
+
+                // Seam the flat baseline together now so the world reads as one surface from
+                // the first frame; PumpCompleted re-stitches as each bake changes resolution.
+                StitchGrid();
+
+                // Map the new layout immediately. It redraws flat here and is refreshed
+                // against the real surface once the generation queue drains.
+                RefreshSliceMap();
             }
+            finally
+            {
+                setupDepth = Mathf.Max(0, setupDepth - 1);
+            }
+        }
 
-            built = true;
-
-            // Seam the flat baseline together now so the world reads as one surface from
-            // the first frame; PumpCompleted re-stitches as each bake changes resolution.
-            StitchGrid();
-
-            // Map the new layout immediately. It redraws flat here and is refreshed
-            // against the real surface once the generation queue drains.
-            RefreshSliceMap();
+        /// <summary>
+        /// Runs <paramref name="action"/> exactly once, on the first pump after the
+        /// world next settles - the queue fully drained and the settle stitch done.
+        /// </summary>
+        /// <remarks>
+        /// RebuildAll is async: the terrains still hold the flat/stale baseline while
+        /// its bake is in flight, so anything that must read the final surface (the
+        /// hydrology spawn) cannot run inline before RebuildAll. Arming it here defers
+        /// it to the drain point in PumpCompleted, which is the moment every cell holds
+        /// its final heights. A second arming before the first fires replaces it, so a
+        /// burst of regenerates spawns water once, from the last one - not once each.
+        /// The callback runs after IsRebuildingAll clears and is fed a synchronous
+        /// carve path (ReapplyCarves), which cannot re-enter the async bake, so it can
+        /// never re-arm itself into a loop.
+        /// </remarks>
+        public void RunAfterSettle(System.Action action)
+        {
+            pendingAfterSettle = action;
         }
 
         /// <summary>
@@ -365,21 +549,223 @@ namespace UniverseCreator.TerrainSystem
             UniverseCreatorObject o = Owner;
             if (o == null) return;
 
+            // Same reason as RebuildAll: EnsureFlatDataAsync yields, the pump ticks in
+            // those gaps, and a layout rebuild queues no chunks at all - so without this
+            // a graphless world resized its cells with no sign anything was happening.
+            setupDepth++;
+
+            try
+            {
+                EnsurePool(o);
+                centreCell = FocusCell(o);
+                ApplyStreamWindow(o);
+                await EnsureFlatDataAsync(o);
+
+                // Propagates a Terrain Settings edit made on the world root. No-ops when
+                // nothing changed, so cells keep any values set by hand in the native
+                // Terrain inspector.
+                SyncTerrainSettings();
+
+                // The flat cells are a real surface the user can sculpt, so they have to be
+                // seamed like any other or hand-sculpting a graphless world shows cracks.
+                StitchGrid();
+
+                RefreshSliceMap();
+            }
+            finally
+            {
+                setupDepth = Mathf.Max(0, setupDepth - 1);
+            }
+        }
+
+        /// <summary>
+        /// Puts the world back on screen after anything that tore down the managed side
+        /// of it - opening the scene, a script recompile, leaving play mode - and
+        /// re-bakes only the cells that genuinely have no surface. Returns how many
+        /// cells it had to queue.
+        /// </summary>
+        /// <remarks>
+        /// This exists because the pool is plain C# state and the scene is not. A reload
+        /// wipes every Chunk while leaving 25 Terrain objects standing, and three
+        /// separate pieces of that state do not come back on their own:
+        ///
+        ///   drawHeightmap. Dispatch switches it off to hide the stale surface behind
+        ///   the wireframe stand-in. It is a serialised Terrain field, so a bake that
+        ///   was still in flight when the editor closed saved it OFF - and reopening the
+        ///   scene showed a world that had disappeared, with the water still floating
+        ///   where the ground used to be. That is the bug this method was written for.
+        ///
+        ///   activeSelf. Play mode parks cells outside the streaming window. Edit mode
+        ///   wants the whole world up so a road or a city can be placed anywhere in it.
+        ///
+        ///   the neighbour links. SetNeighbors is runtime-only state and is dropped by
+        ///   every reload, so the seams reopen until it is called again.
+        ///
+        /// What it deliberately does NOT do is regenerate. A cell whose heightfield
+        /// survived is left exactly as it is, including any hand sculpting - the whole
+        /// point is that coming back from play mode costs nothing and looks identical to
+        /// leaving it. Only a cell with no heights at all is queued, which is the one
+        /// case where there is nothing to preserve and nothing else to show.
+        /// </remarks>
+        public int RestoreSurfaces()
+        {
+            UniverseCreatorObject o = Owner;
+            if (o == null) return 0;
+
             EnsurePool(o);
+
+            // Dispatch dereferences o.graph.nodes with no null check, so a world with no
+            // graph must never reach QueueGenerate from here. That is not a workaround:
+            // for a graphless world flat IS the correct surface, and it is what the
+            // graphless layout path produces too. Such a cell gets a TerrainData so it
+            // draws and sculpts, and nothing is queued.
+            bool canBake = o.graph != null;
+
+            // Whole world in edit mode, streaming window in play. Re-asserted before the
+            // per-cell loop so a cell parked by the last play session is awake again
+            // before anything asks whether it needs a bake.
             centreCell = FocusCell(o);
             ApplyStreamWindow(o);
-            await EnsureFlatDataAsync(o);
 
-            // Propagates a Terrain Settings edit made on the world root. No-ops when
-            // nothing changed, so cells keep any values set by hand in the native
-            // Terrain inspector.
-            SyncTerrainSettings();
+            int queued = 0;
 
-            // The flat cells are a real surface the user can sculpt, so they have to be
-            // seamed like any other or hand-sculpting a graphless world shows cracks.
+            for (int i = 0; i < pool.Count; i++)
+            {
+                Chunk c = pool[i];
+                if (c.go == null || !c.go.activeSelf) continue;
+
+                // A stand-in that outlived the run that spawned it. The holder is
+                // DontSave so it usually dies with the reload, but entering play mode
+                // with scene reload disabled keeps it, and it draws over the surface.
+                HideWireframe(c);
+                if (c.wireframeFilter == null) DisableOrphanedWireframe(c);
+
+                if (c.terrain == null) continue;
+
+                // The one call that turns the surface back on. Cheap and idempotent -
+                // it only writes invariants, never a value the user tunes.
+                TerrainBuilder.EnsureRenderable(c.terrain, o);
+
+                if (c.data == null) c.data = c.terrain.terrainData;
+
+                if (c.data == null)
+                {
+                    if (canBake) { QueueGenerate(o, c); queued++; continue; }
+                    RestoreFlatCell(o, c);
+                    continue;
+                }
+
+                c.resolution = c.data.heightmapResolution;
+
+                // Read the surface back if the managed baseline is gone. This is both the
+                // sculpt-diff baseline and the answer to "does this cell have terrain",
+                // and getting it from the live heightfield is the only source that
+                // survived the reload.
+                if (c.appliedHeights == null && c.resolution > 0)
+                    c.appliedHeights = c.data.GetHeights(0, 0, c.resolution, c.resolution);
+
+                if (canBake && IsEmptySurface(c.appliedHeights))
+                {
+                    // No heights anywhere in the cell. Either it was never baked or its
+                    // TerrainData did not survive, and in both cases a flat placeholder
+                    // is not something to preserve.
+                    QueueGenerate(o, c);
+                    queued++;
+                    continue;
+                }
+
+                // A real surface, so it counts as landed. Without this the cell stays
+                // flagged as an outstanding job and the idle gate never closes.
+                c.applied = true;
+                c.workerDone = false;
+
+                c.terrain.heightmapPixelError = DualLODSystem.PixelErrorFor(c.lod, o.pixelError);
+            }
+
+            // After the window, so every cell that should be up is up: SetNeighbors is
+            // rejected for a disabled terrain and would drop that edge silently.
             StitchGrid();
 
-            RefreshSliceMap();
+            if (queued > 0) settleStitchPending = true;
+
+            return queued;
+        }
+
+        // Gives one cell a flat TerrainData, synchronously, for the graphless case in
+        // RestoreSurfaces. EnsureFlatDataAsync does the same job for the whole pool but
+        // is async and yields, and a restore has to leave the world correct by the time
+        // it returns - the caller reports on its result and the pump gate is evaluated
+        // immediately afterwards.
+        private void RestoreFlatCell(UniverseCreatorObject o, Chunk c)
+        {
+            if (c.terrain == null) return;
+
+            int res = o.GetChunkResolution();
+            Vector3 size = new Vector3(o.GetChunkSize(), o.maxHeightMeters, o.GetChunkSize());
+
+            c.resolution = res;
+            c.data = TerrainBuilder.GetOrCreateTerrainData(c.data, res, size);
+            c.terrain.terrainData = c.data;
+
+            TerrainCollider col = c.go.GetComponent<TerrainCollider>();
+            if (col != null) col.terrainData = c.data;
+
+            TerrainBuilder.ApplyLayers(c.data, o);
+            TerrainBuilder.EnsureVisibleLayer(c.data);
+            TerrainBuilder.EnsureRenderable(c.terrain, o);
+
+            // Baseline for the sculpt diff, so hand-sculpting a graphless world still
+            // survives a reload - CaptureManualEdits skips any cell where this is null.
+            c.appliedHeights = new float[res, res];
+            c.applied = true;
+            c.workerDone = false;
+
+            // Flat, and not a bake: it must not be offered to a neighbour as a weld
+            // source, or a real edge gets welded down to placeholder height.
+            if (c.edges != null) c.edges.ready = false;
+        }
+
+        // True when every sample is zero, i.e. the cell is holding a flat placeholder
+        // rather than a generated surface.
+        //
+        // Sampled on a stride rather than exhaustively. This runs on every cell of every
+        // world on every scene load, and 25 cells at 257 is 1.6 million samples to
+        // establish something a coarse grid answers just as well: any real heightfield
+        // has non-zero samples spread all through it, and a graph that legitimately
+        // produced dead-flat zero across a whole cell is indistinguishable from an empty
+        // one anyway - re-baking it costs one background pass and produces the same
+        // surface.
+        private static bool IsEmptySurface(float[,] heights)
+        {
+            if (heights == null) return true;
+
+            int resZ = heights.GetLength(0);
+            int resX = heights.GetLength(1);
+            if (resZ < 1 || resX < 1) return true;
+
+            int strideZ = Mathf.Max(1, resZ / 16);
+            int strideX = Mathf.Max(1, resX / 16);
+
+            for (int z = 0; z < resZ; z += strideZ)
+                for (int x = 0; x < resX; x += strideX)
+                    if (heights[z, x] > 0.0001f) return false;
+
+            return true;
+        }
+
+        // Switches off a stand-in whose Chunk no longer holds a reference to it. The
+        // holder is found by name because that reference is exactly what the reload
+        // destroyed; it is not destroyed here because this can run during a scene load,
+        // where Destroy on a child is not always legal.
+        private void DisableOrphanedWireframe(Chunk c)
+        {
+            if (c.go == null) return;
+
+            Transform t = c.go.transform.Find("WireframePreview");
+            if (t == null) return;
+
+            MeshRenderer r = t.GetComponent<MeshRenderer>();
+            if (r != null) r.enabled = false;
         }
 
         /// <summary>
@@ -418,6 +804,16 @@ namespace UniverseCreator.TerrainSystem
                         c.data = null;
                         c.appliedHeights = null;
                         c.applied = false;
+
+                        // The snapshot describes a heightfield at the old resolution.
+                        // Kept, it would be cloned into an array of the wrong size on
+                        // the next re-fit and every index in the carve would be wrong.
+                        c.graphHeights = null;
+
+                        // Its stored boundary belongs to a heightfield that no longer
+                        // exists. Leaving it readable would let a neighbour weld to a
+                        // resolution the cell has already dropped.
+                        if (c.edges != null) c.edges.ready = false;
                     }
                     else
                     {
@@ -447,6 +843,11 @@ namespace UniverseCreator.TerrainSystem
                     // connecting a graph after a hand sculpt would erase it - C-04.
                     c.appliedHeights = new float[res, res];
                     c.applied = true;
+
+                    // Flat, and not a bake. It must not be offered to a neighbour as a
+                    // weld source: welding a real edge against a flat placeholder is
+                    // exactly what carved a groove along every boundary before.
+                    if (c.edges != null) c.edges.ready = false;
 
                     // A brand-new cell has Unity's constructor defaults, so the world's
                     // Terrain Settings are pushed once here. From now on only
@@ -480,6 +881,29 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// Whether this cell currently carries a surface worth welding.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately NOT <c>Chunk.applied</c>. That flag means "no bake is in flight
+        /// for this cell", which Dispatch clears on every cell RebuildAll queues - so
+        /// gating the weld on it made the pre-bake stitch a no-op across the whole grid,
+        /// and left SetNeighbors handing out nulls for every neighbour still baking.
+        ///
+        /// A cell that has an active Terrain and a heightfield has a surface the user can
+        /// see, whether or not a newer version of it is on the way, and welding it is
+        /// never worse than leaving the seam open: the bake that lands next overwrites
+        /// the row, and the drain-time stitch in PumpCompleted welds it again for good.
+        /// </remarks>
+        private static bool HasSurface(Chunk c)
+        {
+            return c != null
+                && c.terrain != null
+                && c.terrain.terrainData != null
+                && c.go != null
+                && c.go.activeSelf;
+        }
+
+        /// <summary>
         /// Links every live cell to its four neighbours so Unity stitches the edges into
         /// one continuous surface. This is what makes the virtual slicing invisible in
         /// game: without it each cell computes its own edge normals and LOD skirt in
@@ -493,114 +917,36 @@ namespace UniverseCreator.TerrainSystem
             if (Owner == null) return;
 
             // ----------------------------------------------------------------
-            // PASS 1 — BIDIRECTIONAL AVERAGED EDGE WELD
-            // For every pair of adjacent chunks we read both shared edges,
-            // average them, and write the averaged row back into BOTH chunks.
-            // This is the production-quality approach: neither tile "wins" —
-            // they converge to the mathematical midpoint so the seam value is
-            // identical on both sides.
+            // PASS 1 — SEAM WELD BY DETERMINISTIC OWNERSHIP
+            //
+            // Height agreement is normally already exact: every creator samples
+            // absolute world position, so a cell's east column and its neighbour's
+            // west column are the same world coordinates. This pass exists for the
+            // cases where that is not enough - a non-local modifier reaching past
+            // the ghost margin, a hand sculpt, a cell adopted from the scene.
+            //
+            // It does NOT average. One cell owns each seam, chosen by coordinate,
+            // and the other copies. Copy is idempotent and order-independent, so
+            // running this every pump converges instead of drifting - and a cell
+            // that has not baked yet contributes nothing at all, because welding
+            // against a flat placeholder is what carved the trenches before.
             // ----------------------------------------------------------------
 
-            var sortedCoords = new System.Collections.Generic.List<Coord>(byCell.Keys);
-            sortedCoords.Sort((a, b) => {
-                int zc = a.z.CompareTo(b.z);
-                return zc != 0 ? zc : a.x.CompareTo(b.x);
-            });
-
-            foreach (Coord c in sortedCoords)
+            foreach (var kvp in byCell)
             {
-                Chunk chunkA = byCell[c];
-                if (chunkA == null || !chunkA.applied || chunkA.terrain == null || chunkA.terrain.terrainData == null) continue;
+                Chunk c = kvp.Value;
+                if (!HasSurface(c) || c.appliedHeights == null) continue;
+                if (!WeldChunkEdges(c)) continue;
 
-                int res = chunkA.terrain.terrainData.heightmapResolution;
-
-                // --- RIGHT neighbour (c.x+1) ---
-                Chunk chunkR;
-                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out chunkR)
-                    && chunkR.applied
-                    && chunkR.terrain != null && chunkR.terrain.terrainData != null
-                    && chunkR.terrain.terrainData.heightmapResolution == res)
-                {
-                    float[,] hA_edge = chunkA.terrain.terrainData.GetHeights(res - 1, 0, 1, res);
-                    float[,] hR_edge = chunkR.terrain.terrainData.GetHeights(0, 0, 1, res);
-                    for (int y = 0; y < res; y++)
-                    {
-                        float avg = Mathf.Clamp01((hA_edge[y, 0] + hR_edge[y, 0]) * 0.5f);
-                        hA_edge[y, 0] = avg;
-                        hR_edge[y, 0] = avg;
-                        if (chunkA.appliedHeights != null) chunkA.appliedHeights[y, res - 1] = avg;
-                        if (chunkR.appliedHeights != null) chunkR.appliedHeights[y, 0] = avg;
-                    }
-                    chunkA.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0, hA_edge);
-                    chunkR.terrain.terrainData.SetHeightsDelayLOD(0, 0, hR_edge);
-                }
-
-                // --- TOP neighbour (c.z+1) ---
-                Chunk chunkT;
-                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out chunkT)
-                    && chunkT.applied
-                    && chunkT.terrain != null && chunkT.terrain.terrainData != null
-                    && chunkT.terrain.terrainData.heightmapResolution == res)
-                {
-                    float[,] hA_edge = chunkA.terrain.terrainData.GetHeights(0, res - 1, res, 1);
-                    float[,] hT_edge = chunkT.terrain.terrainData.GetHeights(0, 0, res, 1);
-                    for (int x = 0; x < res; x++)
-                    {
-                        float avg = Mathf.Clamp01((hA_edge[0, x] + hT_edge[0, x]) * 0.5f);
-                        hA_edge[0, x] = avg;
-                        hT_edge[0, x] = avg;
-                        if (chunkA.appliedHeights != null) chunkA.appliedHeights[res - 1, x] = avg;
-                        if (chunkT.appliedHeights != null) chunkT.appliedHeights[0, x] = avg;
-                    }
-                    chunkA.terrain.terrainData.SetHeightsDelayLOD(0, res - 1, hA_edge);
-                    chunkT.terrain.terrainData.SetHeightsDelayLOD(0, 0, hT_edge);
-                }
+                // The welded field is what the cell now shows, so it is also what a
+                // later neighbour must weld against and what a manual-edit diff must
+                // measure from.
+                c.terrain.terrainData.SetHeightsDelayLOD(0, 0, c.appliedHeights);
+                SeamWelder.Capture(c.appliedHeights, c.edges);
             }
 
             // ----------------------------------------------------------------
-            // PASS 2 — 4-WAY CORNER SNAP
-            // After the 4 edge strips are averaged, the corner pixels (where 4
-            // chunks meet) may still disagree because each edge pass only
-            // touched one edge at a time. We must average all 4 corners of
-            // each 2×2 block and write the result into all 4 tiles.
-            // ----------------------------------------------------------------
-
-            foreach (Coord c in sortedCoords)
-            {
-                Chunk cA, cB, cC, cD;
-                // cA = (c.x,   c.z),   cB = (c.x+1, c.z)
-                // cC = (c.x,   c.z+1), cD = (c.x+1, c.z+1)
-                if (!byCell.TryGetValue(c,                          out cA) || cA == null || !cA.applied || cA.terrain == null || cA.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x+1, c.z),     out cB) || cB == null || !cB.applied || cB.terrain == null || cB.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x,   c.z+1),   out cC) || cC == null || !cC.applied || cC.terrain == null || cC.terrain.terrainData == null) continue;
-                if (!byCell.TryGetValue(new Coord(c.x+1, c.z+1),   out cD) || cD == null || !cD.applied || cD.terrain == null || cD.terrain.terrainData == null) continue;
-
-                int res = cA.terrain.terrainData.heightmapResolution;
-
-                // cA is bottom-left chunk -> corner is Top-Right
-                float[,] hA = cA.terrain.terrainData.GetHeights(res - 1, res - 1, 1, 1);
-                // cB is bottom-right chunk -> corner is Top-Left
-                float[,] hB = cB.terrain.terrainData.GetHeights(0,       res - 1, 1, 1);
-                // cC is top-left chunk -> corner is Bottom-Right
-                float[,] hC = cC.terrain.terrainData.GetHeights(res - 1, 0,       1, 1);
-                // cD is top-right chunk -> corner is Bottom-Left
-                float[,] hD = cD.terrain.terrainData.GetHeights(0,       0,       1, 1);
-
-                float corner = Mathf.Clamp01((hA[0,0] + hB[0,0] + hC[0,0] + hD[0,0]) * 0.25f);
-
-                hA[0,0] = corner; cA.terrain.terrainData.SetHeightsDelayLOD(res - 1, res - 1, hA);
-                hB[0,0] = corner; cB.terrain.terrainData.SetHeightsDelayLOD(0,       res - 1, hB);
-                hC[0,0] = corner; cC.terrain.terrainData.SetHeightsDelayLOD(res - 1, 0,       hC);
-                hD[0,0] = corner; cD.terrain.terrainData.SetHeightsDelayLOD(0,       0,       hD);
-
-                if (cA.appliedHeights != null) cA.appliedHeights[res - 1, res - 1] = corner;
-                if (cB.appliedHeights != null) cB.appliedHeights[res - 1, 0] = corner;
-                if (cC.appliedHeights != null) cC.appliedHeights[0, res - 1] = corner;
-                if (cD.appliedHeights != null) cD.appliedHeights[0, 0] = corner;
-            }
-
-            // ----------------------------------------------------------------
-            // PASS 3 — Unity SetNeighbors + SyncHeightmap + Flush
+            // PASS 2 — Unity SetNeighbors + SyncHeightmap + Flush
             // Must happen AFTER all height data is final so Unity bakes the
             // correct LOD skirts, edge normals, and physics heightfields.
             // ----------------------------------------------------------------
@@ -619,14 +965,187 @@ namespace UniverseCreator.TerrainSystem
                 Chunk lc, rc, tc, bc;
                 Terrain left   = null, right  = null, top    = null, bottom = null;
 
-                if (byCell.TryGetValue(new Coord(c.x - 1, c.z), out lc) && lc != null && lc.applied && lc.terrain != null && lc.terrain.terrainData != null && lc.terrain.terrainData.heightmapResolution == res) left   = lc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out rc) && rc != null && rc.applied && rc.terrain != null && rc.terrain.terrainData != null && rc.terrain.terrainData.heightmapResolution == res) right  = rc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out tc) && tc != null && tc.applied && tc.terrain != null && tc.terrain.terrainData != null && tc.terrain.terrainData.heightmapResolution == res) top    = tc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z - 1), out bc) && bc != null && bc.applied && bc.terrain != null && bc.terrain.terrainData != null && bc.terrain.terrainData.heightmapResolution == res) bottom = bc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x - 1, c.z), out lc) && HasSurface(lc) && lc.terrain.terrainData.heightmapResolution == res) left   = lc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out rc) && HasSurface(rc) && rc.terrain.terrainData.heightmapResolution == res) right  = rc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out tc) && HasSurface(tc) && tc.terrain.terrainData.heightmapResolution == res) top    = tc.terrain;
+                if (byCell.TryGetValue(new Coord(c.x, c.z - 1), out bc) && HasSurface(bc) && bc.terrain.terrainData.heightmapResolution == res) bottom = bc.terrain;
 
                 chunk.terrain.SetNeighbors(left, top, right, bottom);
                 chunk.terrain.terrainData.SyncHeightmap();
                 chunk.terrain.Flush();
+            }
+        }
+
+        /// <summary>
+        /// Returns the neighbour at an offset from this cell, but only when it holds a
+        /// real bake at the same resolution. Anything else - absent, inactive, still
+        /// generating, a flat placeholder, a different resolution - returns null and is
+        /// simply not welded against.
+        ///
+        /// That last part is the correction. The old weld deliberately included cells
+        /// that had no bake yet, on the reasoning that a half-weld beats an open seam.
+        /// It does not: a cell with no bake reads as the flat baseline, and averaging a
+        /// real edge against flat drags it halfway to the floor. Every boundary got a
+        /// groove, and because the result was copied into appliedHeights it became the
+        /// baseline that the next bake was measured against.
+        /// </summary>
+        private Chunk WeldSource(Coord cell, int dx, int dz, int res)
+        {
+            Chunk n;
+            if (!byCell.TryGetValue(new Coord(cell.x + dx, cell.z + dz), out n)) return null;
+            if (!HasSurface(n)) return null;
+            if (n.edges == null || !n.edges.Matches(res)) return null;
+            return n;
+        }
+
+        /// <summary>
+        /// Snaps one cell's four boundaries onto the values its neighbours already hold,
+        /// wherever the neighbour owns that seam. Operates on the staged heightfield, so
+        /// it must run before the upload.
+        ///
+        /// Ownership is a pure function of coordinate - lower X owns a vertical seam,
+        /// lower Z owns a horizontal one, and the lowest cell of a 2x2 block owns the
+        /// corner sample. Both sides therefore reach the same verdict without talking to
+        /// each other, which is what makes the result independent of which cell finished
+        /// baking first.
+        ///
+        /// Returns true when the field was touched.
+        /// </summary>
+        private bool WeldChunkEdges(Chunk c)
+        {
+            if (c == null) return false;
+
+            float[,] h = (c.tile != null && c.tile.outputs != null && c.tile.outputs.heightmap != null)
+                ? c.tile.outputs.heightmap
+                : c.appliedHeights;
+            if (h == null) return false;
+
+            int res = h.GetLength(0);
+            if (h.GetLength(1) != res) return false;
+
+            int feather = SeamWelder.DefaultFeather;
+            Coord cell = c.cell;
+            bool touched = false;
+
+            // A cell copies the seams its neighbours own, and keeps the ones it owns.
+            // West and south are owned by the lower coordinate, so those are the two
+            // directions this cell defers on; east and north it is the authority for.
+            Chunk w = WeldSource(cell, -1, 0, res);
+            if (w != null && SeamWelder.OwnsEastSeam(w.cell.x, cell.x))
+            {
+                SeamWelder.ApplyWest(h, w.edges.east, feather);
+                touched = true;
+            }
+
+            Chunk s = WeldSource(cell, 0, -1, res);
+            if (s != null && SeamWelder.OwnsNorthSeam(s.cell.z, cell.z))
+            {
+                SeamWelder.ApplySouth(h, s.edges.north, feather);
+                touched = true;
+            }
+
+            // An edge pass writes its whole row including both end samples, so the
+            // corners are resolved last or the edge would simply overwrite them.
+            // Priority order is fixed, so every one of the four cells meeting at a
+            // corner picks the same source even when some of them are missing.
+            if (ResolveCorner(cell, -1, -1, res, ref h, 0, 0)) touched = true;
+            if (ResolveCorner(cell, +1, -1, res, ref h, res - 1, 0)) touched = true;
+            if (ResolveCorner(cell, -1, +1, res, ref h, 0, res - 1)) touched = true;
+
+            // The north-east corner is owned by this cell unless a lower-coordinate
+            // cell shares it, which for the NE block is never the case - this cell IS
+            // the lowest of that block. Nothing to copy.
+
+            if (touched) c.appliedHeights = h;
+            return touched;
+        }
+
+        /// <summary>
+        /// Writes the authoritative value into one corner sample of this cell.
+        ///
+        /// The corner shared by a 2x2 block belongs to the block's lowest cell. This
+        /// looks up that owner and, when it is not resident, falls back through the two
+        /// cardinal neighbours in a fixed order so all four cells still agree.
+        /// </summary>
+        private bool ResolveCorner(Coord cell, int dx, int dz, int res,
+                                   ref float[,] h, int cornerX, int cornerZ)
+        {
+            // Lowest cell of the block this corner belongs to.
+            int blockX = dx < 0 ? cell.x - 1 : cell.x;
+            int blockZ = dz < 0 ? cell.z - 1 : cell.z;
+            if (SeamWelder.OwnsCorner(cell.x, cell.z, blockX, blockZ)) return false;
+
+            // The diagonal owner first, then the two cardinals, in a fixed order.
+            Chunk diag = WeldSource(cell, dx, dz, res);
+            if (diag != null)
+            {
+                SeamWelder.ApplyCorner(h, cornerX, cornerZ, CornerOf(diag.edges, -dx, -dz, res));
+                return true;
+            }
+
+            Chunk horiz = WeldSource(cell, dx, 0, res);
+            if (horiz != null && SeamWelder.OwnsEastSeam(Mathf.Min(horiz.cell.x, cell.x), Mathf.Max(horiz.cell.x, cell.x))
+                && horiz.cell.x < cell.x)
+            {
+                SeamWelder.ApplyCorner(h, cornerX, cornerZ, CornerOf(horiz.edges, -dx, dz, res));
+                return true;
+            }
+
+            Chunk vert = WeldSource(cell, 0, dz, res);
+            if (vert != null && vert.cell.z < cell.z)
+            {
+                SeamWelder.ApplyCorner(h, cornerX, cornerZ, CornerOf(vert.edges, dx, -dz, res));
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Reads one corner sample out of a neighbour's stored edges. sx/sz select which
+        /// corner of that neighbour: negative means its west/south end, positive its
+        /// east/north end.
+        /// </summary>
+        private static float CornerOf(EdgeSet e, int sx, int sz, int res)
+        {
+            float[] column = sx < 0 ? e.west : e.east;
+            return column[sz < 0 ? 0 : res - 1];
+        }
+
+        /// <summary>
+        /// After this cell lands, pushes the seams it owns into neighbours that are
+        /// already on screen.
+        ///
+        /// Without this, a cell arriving late would weld itself correctly but leave the
+        /// earlier neighbour holding the edge it computed before this one existed. With
+        /// it, the seam ends up at the owner's value no matter which side landed first -
+        /// which is the whole guarantee the user is asking for.
+        /// </summary>
+        private void ReweldNeighbours(Chunk c)
+        {
+            if (c == null || c.edges == null || !c.edges.ready) return;
+
+            int res = c.edges.resolution;
+            int feather = SeamWelder.DefaultFeather;
+            Coord cell = c.cell;
+
+            // This cell owns the seam with the cell to its east and the one to its north.
+            Chunk east = WeldSource(cell, +1, 0, res);
+            if (east != null && east.appliedHeights != null
+                && SeamWelder.OwnsEastSeam(cell.x, east.cell.x))
+            {
+                SeamWelder.ApplyWest(east.appliedHeights, c.edges.east, feather);
+                east.terrain.terrainData.SetHeightsDelayLOD(0, 0, east.appliedHeights);
+                SeamWelder.Capture(east.appliedHeights, east.edges);
+            }
+
+            Chunk north = WeldSource(cell, 0, +1, res);
+            if (north != null && north.appliedHeights != null
+                && SeamWelder.OwnsNorthSeam(cell.z, north.cell.z))
+            {
+                SeamWelder.ApplySouth(north.appliedHeights, c.edges.north, feather);
+                north.terrain.terrainData.SetHeightsDelayLOD(0, 0, north.appliedHeights);
+                SeamWelder.Capture(north.appliedHeights, north.edges);
             }
         }
 
@@ -1101,6 +1620,11 @@ namespace UniverseCreator.TerrainSystem
             // Supersede any run already in flight for this cell.
             if (c.stop != null) c.stop.RequestStop();
 
+            // This cell's heights are about to be rewritten, so whatever weld its edges
+            // currently hold is provisional. Recorded here rather than inferred at apply
+            // time because a superseded run never reaches the apply path at all.
+            settleStitchPending = true;
+
             if (!pending.Contains(c)) pending.Add(c);
             PumpQueue(o);
         }
@@ -1221,6 +1745,7 @@ namespace UniverseCreator.TerrainSystem
 
             bool freed = false;
             bool wrote = false;
+            bool firedAfterSettle = false;
             int applies = 0;
 
             // Wall clock, not frame count. This pump is driven by Update in play mode
@@ -1252,7 +1777,16 @@ namespace UniverseCreator.TerrainSystem
 
                 // A superseded run left stale/partial data; skip applying it. It still
                 // cost a worker slot, so it does not count against the apply budget.
-                if (!willWrite) continue;
+                //
+                // The stand-in has to come down here even though nothing is being
+                // written. Dispatch put it up AND set terrain.drawHeightmap = false to
+                // hide the stale surface underneath it, and ApplyChunk is the only other
+                // place that undoes either - so a run that retires through this line
+                // used to leave the cell showing a preview that would never resolve,
+                // over ground that was switched off. drawHeightmap is a serialised
+                // Terrain field, so that state went into the scene file and came back
+                // after a restart as a world that had vanished.
+                if (!willWrite) { HideWireframe(c); continue; }
 
                 ApplyChunk(o, c);
                 c.tile = null;
@@ -1273,17 +1807,128 @@ namespace UniverseCreator.TerrainSystem
             // The map traces the surface, so it is stale until the last chunk lands.
             // Refreshing once the queue drains costs one line mesh per settle instead
             // of one per chunk.
-            if (activeWorkers == 0 && pending.Count == 0)
+            // setupDepth keeps a rebuild that is still allocating cells from being read
+            // as settled. Its queue is legitimately empty at that point, and treating
+            // that as "done" both closed the progress item early and ran the settle
+            // stitch against a grid whose bakes had not been dispatched yet.
+            bool drained = activeWorkers == 0 && pending.Count == 0 && setupDepth == 0;
+
+            if (drained)
             {
+                // SETTLE STITCH.
+                //
+                // The per-apply stitch above welds a cell against whatever had landed
+                // at that moment, and ApplyChunk overwrites the whole heightfield -
+                // including edge rows a previous pass had already averaged. So the
+                // last cell to land leaves its own seams welded but can have undone
+                // an earlier neighbour's, and a run that was superseded retires with
+                // wrote == false and skips the stitch entirely. Either way the grid
+                // could settle with an unwelded edge, which is the trench.
+                //
+                // One unconditional pass once nothing is in flight closes that: every
+                // cell now holds its final heights, so this weld is the one that
+                // sticks. This is what the ChunkManager inspector's Rebuild Cells
+                // button was doing by hand.
+                if (settleStitchPending || freed)
+                {
+                    StitchGrid();
+                    settleStitchPending = false;
+                }
+
                 if (freed) RefreshSliceMap();
+
+                // Water re-fits itself to the ground that just landed, but only when
+                // something actually landed. An idle pump drains every tick, and
+                // re-solving river courses on each of those would spend the whole edit
+                // loop fitting rivers to terrain that has not moved.
+                if (wrote || freed) SettleCarvers(o);
+
                 IsRebuildingAll = false;
+
+                // The world has settled - every cell now holds its final heights. Fire
+                // the one-shot the regenerate path armed for exactly this moment (the
+                // hydrology spawn, which must read the real surface). Cleared BEFORE the
+                // call so a rebuild the callback happens to trigger arms the next one
+                // cleanly rather than being wiped. The callback carves synchronously
+                // (ReapplyCarves), which does not touch the worker queue, so it cannot
+                // re-enter this async drain and cannot loop.
+                if (pendingAfterSettle != null)
+                {
+                    System.Action afterSettle = pendingAfterSettle;
+                    pendingAfterSettle = null;
+                    afterSettle();
+                    firedAfterSettle = true;
+                }
+            }
+            else
+            {
+                // Something is still in flight, so the grid is not final yet and owes
+                // itself a settle stitch whenever it does drain.
+                settleStitchPending = true;
             }
 
             // Reported so the edit-mode driver can repaint the Scene view. Writing
             // TerrainData does not itself mark the view dirty, so without a repaint a
             // finished chunk can sit invisible until something else happens to redraw
-            // it - which reads as the graph edit having done nothing - C-14.
-            return wrote;
+            // it - which reads as the graph edit having done nothing - C-14. The
+            // after-settle callback carves new water into the terrain, so it needs the
+            // same repaint or the freshly spawned lakes/rivers would not show until a
+            // later nudge.
+            return wrote || firedAfterSettle;
+        }
+
+        /// <summary>
+        /// Tells every carver in this world that the terrain under it has settled, and
+        /// re-cuts once if any of them moved.
+        /// </summary>
+        /// <remarks>
+        /// This is the automatic half of the water/procedural contract. The dig itself
+        /// is already safe without it - ApplyOutputs folds every registered carve into
+        /// each chunk as it is written, so a regeneration cannot erase a channel. What
+        /// this adds is placement: a river whose valley has just moved re-fits its
+        /// course to the new ground rather than staying where the old valley was.
+        ///
+        /// Each carver decides for itself whether it moves (see OnTerrainSettled), and
+        /// the re-cut is hoisted out of the loop because ReapplyCarves rewrites whole
+        /// chunks - doing it per body would rewrite the same chunk once per river.
+        /// </remarks>
+        private void SettleCarvers(UniverseCreatorObject o)
+        {
+            List<IUCTerrainCarver> carvers = WaterCarveRegistry.For(o);
+            if (carvers.Count == 0) return;
+
+            bool moved = false;
+
+            for (int i = 0; i < carvers.Count; i++)
+            {
+                UCWaterBody body = carvers[i] as UCWaterBody;
+                if (body == null) continue;
+
+                bool refitted;
+                try
+                {
+                    refitted = body.OnTerrainSettled();
+                }
+                catch (System.Exception e)
+                {
+                    // A malformed spline must not take the whole pump down with it, or
+                    // one bad river stops every chunk in the world from finishing.
+                    Debug.LogError("Universe Creator: water re-fit failed on '" +
+                                   body.name + "'. " + e.Message, body);
+                    continue;
+                }
+
+                if (!refitted) continue;
+
+                moved = true;
+
+                // The channel moved, so the surface sitting on it has to move with it.
+                // Both read the same solved course, so this is a mesh rebuild and not a
+                // second solve.
+                body.RebuildSurface();
+            }
+
+            if (moved) ReapplyCarves();
         }
 
         private void ApplyChunk(UniverseCreatorObject o, Chunk c)
@@ -1311,10 +1956,49 @@ namespace UniverseCreator.TerrainSystem
             // channels index them and a chunk with no layers renders untextured.
             TerrainBuilder.ApplyLayers(c.data, o);
 
+            // Weld this cell's boundaries to its neighbours BEFORE the upload.
+            //
+            // Order is the whole point. The previous design uploaded raw graph output
+            // and repaired the seams afterwards, so the next cell to land overwrote the
+            // repair and reopened the seam - the "cells not waiting for each other"
+            // symptom. Welding the staged array means the first and only write already
+            // carries the shared edge, and nothing later can undo it.
+            WeldChunkEdges(c);
+
+            Bounds applyBounds = ChunkWorldBounds(c);
+
+            // PRISTINE GROUND, CAPTURED BEFORE THE DIG.
+            //
+            // ApplyOutputs cuts the water channel into this very array, in place, and
+            // the pump drops c.tile on the next line - so once we return, where the
+            // ground USED to be is gone. A re-fit then has nothing to work from: it
+            // cannot re-cut a moved river without carving deeper into the trench it
+            // already made, and it cannot fill an abandoned channel back in at all.
+            // That is what made ReapplyCarves a no-op in every case that mattered.
+            //
+            // Only for cells a carver actually reaches. On a world with no water this
+            // is null everywhere and costs nothing; on a world with a river it holds
+            // the handful of cells the river crosses. ReapplyCarves releases it again
+            // as soon as no body reaches the cell.
+            c.graphHeights = WaterCarveRegistry.CountAffecting(o, applyBounds) > 0
+                ? CloneHeights(c.tile.outputs.heightmap)
+                : null;
+
+            // From here the live surface and the snapshot are known to agree about this
+            // cell, which is what lets a later re-fit trust one to reconstruct the other.
+            c.bakedThisSession = true;
+
             // Manual sculpt edits are folded in here, so they ride on top of whatever
             // the graph just produced instead of being erased by it.
             TerrainBuilder.ApplyOutputs(c.data, c.tile.outputs, o,
-                                        o.overrideLayer, ChunkWorldBounds(c), o.GetMetersPerPixel());
+                                        o.overrideLayer, applyBounds, o.GetMetersPerPixel());
+
+            // Publish the welded boundary for neighbours that bake later, and re-weld
+            // the neighbours already on screen so a late arrival cannot leave a stale
+            // edge behind it. Both operate on cells that are already final, so this
+            // converges rather than drifting.
+            SeamWelder.Capture(c.tile.outputs.heightmap, c.edges);
+            ReweldNeighbours(c);
 
             // Phase 4: SyncHeightmap and Flush are deferred to StitchGrid to happen strictly after SetNeighbors
 
@@ -1338,6 +2022,27 @@ namespace UniverseCreator.TerrainSystem
             // Remember what we just wrote, so a later sculpt can be diffed against it.
             c.appliedHeights = c.tile.outputs.heightmap;
 
+            // Scatter. Released first: this cell may be a recycled pool object that
+            // was standing somewhere else a moment ago, and its old props are still
+            // parented to it at their old world positions.
+            ScatterApplier.Release(c.scatterObjects);
+            ScatterApplier.Apply(c.terrain, c.data, c.tile.outputs, o.scatterLibrary,
+                                 c.go != null ? c.go.transform : null,
+                                 o.enableGPUInstancing ? Instancing() : null,
+                                 c.go != null ? c.go.GetEntityId().GetHashCode() : 0,
+                                 c.scatterObjects);
+
+            // No water step here. Water is not per-chunk any more: a lake that
+            // straddles four cells is one UCWaterBody with one surface and one volume,
+            // owned by the world's WaterSystem, and it re-fits itself to the ground in
+            // SettleCarvers above once every cell has landed. What used to be here
+            // built a throwaway slab per chunk per body, which is how a single lake
+            // became four rectangles that did not line up.
+
+            // Wind. Uploads whatever Wind Output baked for this cell, which is the
+            // step that makes the sway maps visible instead of merely correct.
+            ApplyWind(c);
+
             // Re-stamp tunnels last. A regeneration rewrites the holes map from the
             // graph, so without this every re-run would fill the tunnels back in.
             if (carves.Count > 0 || c.hasCarves) StampCarves(c);
@@ -1350,6 +2055,98 @@ namespace UniverseCreator.TerrainSystem
             // Real surface is up; the stand-in has done its job.
             HideWireframe(c);
         }
+
+        // =====================================================================
+        //  WIND
+        // =====================================================================
+
+        // The world's wind manager, found once and cached. Null is a legitimate
+        // state: a world whose graph has no wind branch never creates one.
+        private UCWindManager windManager;
+
+        /// <summary>
+        /// Pushes this chunk's baked sway maps into the world's wind manager.
+        ///
+        /// Sway describes shelter - the lee of a ridge, the inside of a wood - and
+        /// the graph bakes it per chunk, but the shader reads one global texture.
+        /// So each chunk composites into its own rectangle of that texture rather
+        /// than replacing it, which is what SetSwayRegion is for.
+        ///
+        /// A graph with no Wind Output leaves the arrays null and this returns
+        /// immediately, having created nothing. That matters: worlds that predate
+        /// the wind system must keep behaving exactly as they did.
+        /// </summary>
+        private void ApplyWind(Chunk c)
+        {
+            if (c == null || c.tile == null) return;
+
+            OutputBag bag = c.tile.outputs;
+            if (bag == null || bag.windSwayAmplitude == null) return;
+            if (bag.windSwaySize.x < 2 || bag.windSwaySize.y < 2) return;
+
+            UniverseCreatorObject o = Owner;
+            if (o == null) return;
+
+            UCWindManager wind = EnsureWindManager();
+            if (wind == null) return;
+
+            // The chunk's own rectangle, falling back to the cell's footprint when
+            // Wind Output did not record one - an older graph, or a bake that ran
+            // before SetFullWorld was called.
+            Vector2 regionMin = bag.windSwayWorldMin;
+            Vector2 regionSize = bag.windSwayWorldSize;
+
+            if (regionSize.x <= 1e-3f || regionSize.y <= 1e-3f)
+            {
+                float cell = o.GetChunkSize();
+                Vector3 min = WorldMinCorner(o);
+                regionMin = new Vector2(min.x + c.cell.x * cell, min.z + c.cell.z * cell);
+                regionSize = new Vector2(cell, cell);
+            }
+
+            Vector3 worldMin3 = WorldMinCorner(o);
+            Vector3 worldSize3 = o.GetWorldSize();
+
+            wind.SetSwayRegion(bag.windSwayAmplitude, bag.windSwayPhase,
+                               bag.windSwaySize.x, bag.windSwaySize.y,
+                               regionMin, regionSize,
+                               new Vector2(worldMin3.x, worldMin3.z),
+                               new Vector2(worldSize3.x, worldSize3.z));
+        }
+
+        /// <summary>
+        /// Finds the world's wind manager, or makes one. Created on the world root
+        /// and not on a child, so a user who wants to tune the wind finds it on the
+        /// object they already have selected instead of hunting through the pool.
+        ///
+        /// Not hidden and not DontSave: unlike the generated meshes and textures,
+        /// this is a settings component the user is meant to see, edit and keep.
+        /// </summary>
+        private UCWindManager EnsureWindManager()
+        {
+            if (windManager != null) return windManager;
+
+            UniverseCreatorObject o = Owner;
+            if (o == null) return null;
+
+            // A Weather System Manager, when one exists, is the owner of wind: it
+            // adopts an existing manager rather than creating a second one, and it
+            // is where the wind settings are edited from. Keep that contract - this
+            // fallback only fires for a world built before the manager existed.
+            UCWeatherSystemManager weather = o.GetComponentInChildren<UCWeatherSystemManager>(true);
+            if (weather != null)
+            {
+                windManager = weather.EnsureWind();
+                if (windManager != null) return windManager;
+            }
+
+            windManager = o.GetComponentInChildren<UCWindManager>(true);
+            if (windManager != null) return windManager;
+
+            windManager = o.gameObject.AddComponent<UCWindManager>();
+            return windManager;
+        }
+
 
         // =====================================================================
         //  TUNNEL CARVING  (called by RoadMasterLinker, Module 7)
@@ -1675,6 +2472,155 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// Re-cuts every registered water dig into the terrain that is already on
+        /// screen, without re-running the graph.
+        ///
+        /// WHY THIS EXISTS SEPARATELY FROM A FULL REBUILD
+        /// ---------------------------------------------
+        /// Dragging a river's width slider must show a wider channel now, and a full
+        /// regeneration of every chunk to see it would take seconds and fight the
+        /// 100ms debounce. This replays the last graph output through the same fold-in
+        /// order ApplyChunk uses - dig, then sculpt - so the result is identical to
+        /// what a rebuild would have produced, at the cost of one heightmap write per
+        /// affected chunk instead of a whole generation pass.
+        ///
+        /// Chunks the digs cannot reach are skipped, so editing a pond in one corner
+        /// of a large world touches one terrain.
+        ///
+        /// Returns the number of chunks rewritten.
+        /// </summary>
+        public int ReapplyCarves()
+        {
+            UniverseCreatorObject o = Owner;
+            if (o == null) return 0;
+
+            float metresPerSample = o.GetMetersPerPixel();
+            if (metresPerSample <= 0f) return 0;
+
+            int rewritten = 0;
+
+            for (int i = 0; i < pool.Count; i++)
+            {
+                Chunk c = pool[i];
+                if (c.data == null || !c.applied) continue;
+
+                Bounds bounds = ChunkWorldBounds(c);
+
+                // Nothing here now - but a body that used to be here and has just been
+                // deleted or moved away still needs its old channel filled back in, and
+                // the only record of where that was is c.graphHeights. Comparing the
+                // live heights against it is what catches it.
+                bool affected = WaterCarveRegistry.CountAffecting(o, bounds) > 0;
+                if (!affected && !ChunkDiffersFromGraph(c)) continue;
+
+                // FIRST CUT INTO A CELL NO BODY HAD REACHED BEFORE.
+                //
+                // A body that has just been dragged into this cell finds no snapshot,
+                // because the last bake had nothing to carve here. What is on the
+                // surface right now is therefore already undug ground, so it IS the
+                // pristine record and is adopted as one. Cloned rather than aliased:
+                // appliedHeights must keep describing what is on the terrain until the
+                // new write replaces it, and the carve below mutates its argument.
+                if (c.graphHeights == null)
+                {
+                    if (!affected || c.appliedHeights == null) continue;
+
+                    // Refused on a cell this session has not baked. Its surface was read
+                    // back off a terrain that may already carry a channel, and adopting a
+                    // trench as "undug ground" is how a river digs itself deeper on every
+                    // spline nudge. The cell is left alone until a real bake gives it a
+                    // snapshot; the next Build restores full re-fit behaviour.
+                    if (!c.bakedThisSession) continue;
+
+                    c.graphHeights = CloneHeights(c.appliedHeights);
+                }
+
+                // Re-derived from unaltered ground every time, which is what stops each
+                // pass from cutting the channel deeper into the channel it cut last
+                // time. The snapshot is never written to - only ever copied from.
+                float[,] heights = CloneHeights(c.graphHeights);
+
+                WaterCarveRegistry.ApplyAll(o, heights, bounds, metresPerSample);
+
+                if (o.overrideLayer != null && !o.overrideLayer.IsEmpty)
+                    o.overrideLayer.ApplyTo(heights, bounds, metresPerSample);
+
+                // Same gate ApplyOutputs applies, because this is the second door into
+                // SetHeights and it bypasses ApplyOutputs entirely. Both writers above
+                // are ordinary arithmetic on a depth and a distance, so both can produce
+                // a NaN from a degenerate spline or a zero-width body - and a NaN here
+                // reaches the surface exactly as readily as one from the node graph.
+                // A safeguard that only covers the path you remembered is not one.
+                HeightGuard.Guard(heights, metresPerSample, o.maxHeightMeters,
+                                  "the chunk at cell " + c.cell.x + "," + c.cell.z
+                                  + " during a water re-cut", o);
+
+                c.data.SetHeightsDelayLOD(0, 0, heights);
+                c.data.SyncHeightmap();
+
+                // The new baseline, so a later CaptureManualEdits does not read the
+                // dig itself as something the user sculpted by hand.
+                c.appliedHeights = heights;
+
+                // The last body left this cell and its channel has just been filled in,
+                // so there is no longer anything to restore and the snapshot is dead
+                // weight. Releasing it also settles the loop: with it gone, both tests
+                // above are false next time and the cell stops being rewritten on every
+                // drain. If a body is dragged back in later, the adopt above rebuilds it.
+                if (!affected) c.graphHeights = null;
+
+                rewritten++;
+            }
+
+            if (rewritten > 0) StitchGrid();
+
+            return rewritten;
+        }
+
+        /// <summary>True when the live terrain no longer matches the undug ground it was
+        /// built from, which means a dig is still cut into it.</summary>
+        /// <remarks>
+        /// Reads the snapshot rather than c.tile. The pump drops the tile immediately
+        /// after applying it, so by the time any re-fit runs this test always saw a null
+        /// tile and always returned false - which is what made the "fill an abandoned
+        /// channel back in" case silently impossible.
+        /// </remarks>
+        private bool ChunkDiffersFromGraph(Chunk c)
+        {
+            if (c.appliedHeights == null || c.graphHeights == null) return false;
+
+            float[,] generated = c.graphHeights;
+
+            int resZ = c.appliedHeights.GetLength(0);
+            int resX = c.appliedHeights.GetLength(1);
+
+            if (generated.GetLength(0) != resZ || generated.GetLength(1) != resX) return false;
+
+            // Sparse walk: a carve covers many contiguous samples, so checking every
+            // fourth row and column finds one without reading a million floats.
+            for (int z = 0; z < resZ; z += 4)
+            {
+                for (int x = 0; x < resX; x += 4)
+                {
+                    if (Mathf.Abs(c.appliedHeights[z, x] - generated[z, x]) > 1e-5f) return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static float[,] CloneHeights(float[,] source)
+        {
+            int resZ = source.GetLength(0);
+            int resX = source.GetLength(1);
+
+            float[,] copy = new float[resZ, resX];
+            System.Array.Copy(source, copy, resZ * resX);
+
+            return copy;
+        }
+
+        /// <summary>
         /// Discards every manual edit and rebuilds, returning the world to pure graph
         /// output.
         /// </summary>
@@ -1687,8 +2633,14 @@ namespace UniverseCreator.TerrainSystem
             o.overrideLayer.ClearAll();
 
             // Drop the stale baselines too, or the next capture would read the cleared
-            // edits back in as fresh differences.
-            for (int i = 0; i < pool.Count; i++) pool[i].appliedHeights = null;
+            // edits back in as fresh differences. The undug-ground snapshot goes with
+            // them: it is only ever meaningful alongside the baseline it was taken with,
+            // and RebuildAll below retakes both.
+            for (int i = 0; i < pool.Count; i++)
+            {
+                pool[i].appliedHeights = null;
+                pool[i].graphHeights = null;
+            }
 
             RebuildAll();
         }
@@ -1963,6 +2915,74 @@ namespace UniverseCreator.TerrainSystem
             return new Bounds(centre, size);
         }
 
+        /// <summary>
+        /// Ground elevation at a world XZ as the GRAPH made it, before any water dig
+        /// was cut into it. False when this world holds no undug record of that spot.
+        /// </summary>
+        /// <remarks>
+        /// A river works out its own course by asking how high the ground is under it.
+        /// Ask the live terrain and the answer already contains the channel this river
+        /// cut on the previous pass, so the water surface it derives comes back one
+        /// channel-depth lower, and the bed one depth below that. Repeat per settling
+        /// chunk and the river walks itself down into the world.
+        ///
+        /// Ask here and the answer is the same on every pass until the cell is
+        /// genuinely re-baked - which is the only moment a re-fit is actually owed.
+        ///
+        /// Returns false rather than guessing. A caller that cannot get a pristine
+        /// answer must decline to move, not fall back to the dug surface.
+        /// </remarks>
+        public bool TrySampleGraphHeight(float worldX, float worldZ, out float worldY)
+        {
+            worldY = 0f;
+
+            UniverseCreatorObject o = Owner;
+            if (o == null) return false;
+
+            float cellSize = o.GetChunkSize();
+            if (cellSize <= 0f) return false;
+
+            for (int i = 0; i < pool.Count; i++)
+            {
+                Chunk c = pool[i];
+                if (c == null || c.graphHeights == null || c.go == null) continue;
+
+                Vector3 origin = c.go.transform.position;
+
+                float u = (worldX - origin.x) / cellSize;
+                float v = (worldZ - origin.z) / cellSize;
+                if (u < 0f || u > 1f || v < 0f || v > 1f) continue;
+
+                int resZ = c.graphHeights.GetLength(0);
+                int resX = c.graphHeights.GetLength(1);
+                if (resZ < 2 || resX < 2) continue;
+
+                float fx = u * (resX - 1);
+                float fz = v * (resZ - 1);
+
+                int x0 = (int)fx; if (x0 > resX - 2) x0 = resX - 2;
+                int z0 = (int)fz; if (z0 > resZ - 2) z0 = resZ - 2;
+
+                float tx = fx - x0;
+                float tz = fz - z0;
+
+                // Bilinear, to match what GetInterpolatedHeight does to the live
+                // heightfield - so a pristine answer and a dug answer are measured the
+                // same way and can be compared metre for metre.
+                float h = Mathf.Lerp(
+                    Mathf.Lerp(c.graphHeights[z0, x0], c.graphHeights[z0, x0 + 1], tx),
+                    Mathf.Lerp(c.graphHeights[z0 + 1, x0], c.graphHeights[z0 + 1, x0 + 1], tx),
+                    tz);
+
+                float span = c.data != null ? c.data.size.y : o.maxHeightMeters;
+
+                worldY = origin.y + h * span;
+                return true;
+            }
+
+            return false;
+        }
+
         // =====================================================================
         //  HELPERS
         // =====================================================================
@@ -1970,6 +2990,25 @@ namespace UniverseCreator.TerrainSystem
         // The "Terrain" child of the world root - where the native Terrain cells live.
         // Created on demand so a hand-built world (or one from an older scene that
         // never had the child) still works instead of throwing.
+        // Instanced-draw sink for dense object scatter. Created on the world root the
+        // first time something asks for it, so a world with no instanced prototypes
+        // never carries the component or its LateUpdate.
+        private Optimization.GPUInstancingManager instancing;
+
+        private Optimization.GPUInstancingManager Instancing()
+        {
+            if (instancing != null) return instancing;
+
+            UniverseCreatorObject o = Owner;
+            GameObject host = o != null ? o.gameObject : gameObject;
+
+            instancing = host.GetComponent<Optimization.GPUInstancingManager>();
+            if (instancing == null)
+                instancing = host.AddComponent<Optimization.GPUInstancingManager>();
+
+            return instancing;
+        }
+
         private Transform TerrainRoot()
         {
             UniverseCreatorObject o = Owner;

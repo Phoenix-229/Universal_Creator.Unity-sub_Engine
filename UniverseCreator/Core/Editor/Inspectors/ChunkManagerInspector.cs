@@ -80,7 +80,10 @@ namespace UniverseCreator.Editor.Inspectors
             // path so one edit cannot kick off two runs.
             if (layoutChanged && !Application.isPlaying)
             {
-                manager.RebuildLayout();
+                if (owner.graph != null)
+                    manager.RebuildAll();
+                else
+                    manager.RebuildLayout();
                 EditorUtility.SetDirty(manager);
             }
             // A map-only change (colour, offset, density) does not move a cell, so it
