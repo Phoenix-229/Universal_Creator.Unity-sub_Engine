@@ -153,7 +153,13 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.BeginHorizontal();
             GUILayout.Space(6f);
             EditorGUILayout.BeginVertical();
-            body();
+
+            // Through Panel rather than called directly. A throw inside a group body
+            // would otherwise skip both End calls below as well, so the layout stack
+            // is left unbalanced and the whole component draws blank from then on -
+            // the failure UCGroupedInspector.Panel documents.
+            UCGroupedInspector.Panel(title, body);
+
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndHorizontal();
             EditorGUILayout.Space(2);
@@ -504,24 +510,30 @@ namespace UniverseCreator.Editor.Inspectors
             if (targets.Length != 1) return;
 
             UCVegetationSystemManager veg = (UCVegetationSystemManager)target;
-            DrawResolvedReadout(veg);
+
+            // Every panel below is a readout over the rest of the world - the world
+            // object, the weather manager, the prototype library, the registry - and
+            // any of them can be absent while an author is still assembling a scene.
+            // Wrapped one panel at a time so a throw in a diagnostic costs that
+            // diagnostic and not the whole inspector; see UCGroupedInspector.Panel.
+            UCGroupedInspector.Panel("Resolved", () => DrawResolvedReadout(veg));
 
             // Where prototypes are authored (V-53). This inspector deliberately draws
             // no prototype list: the four lists live on the world object and are edited
             // there once, so this is a link to that one place rather than a second
             // editor that would drift from it.
-            DrawLibraryLink(veg);
+            UCGroupedInspector.Panel("Prototype library", () => DrawLibraryLink(veg));
 
             // Pre-build validation (V-51). Drawn after the resolved readout, because
             // a warning reads better once the author has seen what their dials
             // resolved to - and before any rebuild button, which is the point: catch
             // the silent-empty-world defects before the build, not after it.
-            UCVegetationValidation.Draw(veg);
+            UCGroupedInspector.Panel("Validation", () => UCVegetationValidation.Draw(veg));
 
             // Post-build census (V-52). Last, because it is the after picture: what
             // the build the two panels above shaped actually placed, and where the
             // ecology model planted it.
-            UCVegetationDiagnostics.Draw(veg);
+            UCGroupedInspector.Panel("Diagnostics", () => UCVegetationDiagnostics.Draw(veg));
         }
 
         /// <summary>
@@ -592,7 +604,12 @@ namespace UniverseCreator.Editor.Inspectors
 
                 using (new EditorGUI.DisabledScope(world == null))
                 {
-                    if (GUILayout.Button("Select World", GUILayout.Width(96)))
+                    // The null test is repeated on the click rather than left to the
+                    // disabled scope. A disabled button cannot be pressed today, but
+                    // the guard and the dereference belong in the same place: moving
+                    // this row out of the scope would otherwise be a null crash that
+                    // compiles.
+                    if (GUILayout.Button("Select World", GUILayout.Width(96)) && world != null)
                     {
                         Selection.activeGameObject = world.gameObject;
                         EditorGUIUtility.PingObject(world.gameObject);

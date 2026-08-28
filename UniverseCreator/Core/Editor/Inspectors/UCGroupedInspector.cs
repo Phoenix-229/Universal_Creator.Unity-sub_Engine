@@ -223,6 +223,48 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         /// <summary>
+        /// Runs one optional panel of an inspector and reports a throw as a message
+        /// instead of letting it take the window down.
+        ///
+        /// WHY THIS EXISTS. An exception thrown out of OnInspectorGUI does not just
+        /// lose the panel that threw: IMGUI abandons the layout mid-tree, so the NEXT
+        /// repaint has fewer controls than the layout pass promised and the ENTIRE
+        /// component draws blank. The author sees an empty inspector, with no clue
+        /// that a readout in the last third of it is the reason, and no field to edit
+        /// to get out of it. One bad null in a diagnostic panel silently costs the
+        /// whole editing surface for that component.
+        ///
+        /// Naming the failed panel and carrying on is strictly better: the fields
+        /// stay editable, and the defect is stated rather than presented as a blank
+        /// window. ExitGUIException is re-thrown untouched - Unity uses it as control
+        /// flow to leave the GUI (an object picker, a dialog), and swallowing it
+        /// breaks those instead.
+        /// </summary>
+        public static void Panel(string label, System.Action draw)
+        {
+            if (draw == null) return;
+
+            try
+            {
+                draw();
+            }
+            catch (ExitGUIException)
+            {
+                throw;
+            }
+            catch (System.Exception e)
+            {
+                EditorGUILayout.HelpBox(
+                    "The " + label + " panel could not be drawn: " + e.GetType().Name +
+                    ": " + e.Message + "\n\nThe fields above are unaffected. The full " +
+                    "stack trace is in the Console.",
+                    MessageType.Error);
+
+                Debug.LogException(e);
+            }
+        }
+
+        /// <summary>
         /// A read-only computed line: label on the left, derived value on the
         /// right. What turns these inspectors from a field dump into something
         /// that shows the author what their numbers actually mean.

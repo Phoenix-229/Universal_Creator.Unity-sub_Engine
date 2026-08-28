@@ -368,63 +368,256 @@ namespace UniverseCreator.Editor
         }
 
         /// <summary>
-        /// Creates the child objects listed in the design document, Section 3.1,
-        /// and attaches each one's manager.
-        ///
-        /// Terrain deliberately gets nothing. Its cells are created and owned by
-        /// ChunkManager, and every setting that would go on a terrain manager is
-        /// already on the world root or on the graph. A component there would be a
-        /// second place to change the same number, and the two would disagree.
+        /// One system child of a world root: the name the hierarchy contract fixes,
+        /// and the manager that belongs on it. A null manager is an organising
+        /// object that carries no component.
         /// </summary>
-        private static void BuildHierarchy(GameObject root, UniverseCreatorObject creator)
+        private struct SystemChild
         {
-            // Terrain is the parent of every native Unity Terrain cell - C-03.
-            // ChunkManager is the controller and parents them here rather than under
-            // itself, so the hierarchy reads terrain-under-Terrain. TerrainBuilder is
-            // a static helper, not a component, so nothing is attached here.
-            MakeChild(root, "Terrain");
+            public string name;
+            public System.Type manager;
 
-            // Module 3. Live: this drives both hand-placed and graph-built water.
-            MakeChild(root, "WaterSystem").AddComponent<UCWaterSystemManager>();
+            public SystemChild(string name, System.Type manager)
+            {
+                this.name = name;
+                this.manager = manager;
+            }
+        }
 
-            // Module 3. Live: this resolves the world's climate, site geometry and
-            // density budget into the snapshot the scatter pass places from.
-            MakeChild(root, "VegetationSystem").AddComponent<UCVegetationSystemManager>();
+        /// <summary>
+        /// What a complete world is made of, in hierarchy order.
+        ///
+        /// THE ONLY LIST. It is read by BuildHierarchy, which creates them, and by
+        /// MissingManagers, which reports the ones an older world never got. Two
+        /// hand-written lists would have been the real bug here: the world inspector
+        /// would keep reporting "complete" for a manager it had never heard of, which
+        /// is precisely the failure - a blank inspector and nothing saying why - that
+        /// the repair path exists to end. Adding a manager to this array teaches the
+        /// builder and the checker at once.
+        /// </summary>
+        private static readonly SystemChild[] SystemChildren =
+        {
+            // Terrain deliberately gets no component. Its cells are created and owned
+            // by ChunkManager and parented here rather than under it, so the hierarchy
+            // reads terrain-under-Terrain - C-03. Every setting a terrain manager
+            // would hold already lives on the world root or on the graph, and a
+            // component here would be a second place to change the same number.
+            new SystemChild("Terrain",          null),
 
-            // Module 3. Live: wind, and the climate and season half of the world
+            // Module 3, live: drives both hand-placed and graph-built water.
+            new SystemChild("WaterSystem",      typeof(UCWaterSystemManager)),
+
+            // Module 3, live: resolves the world's climate, site geometry and density
+            // budget into the snapshot the scatter pass places from.
+            new SystemChild("VegetationSystem", typeof(UCVegetationSystemManager)),
+
+            // Module 3, live: wind, plus the climate and season half of the world
             // clock that vegetation reads its temperature and rainfall from.
-            // Placed above the terrain at Y=500 as requested, so the WindZone icon doesn't end up underground.
-            GameObject weatherSystem = MakeChild(root, "WeatherSystem");
-            weatherSystem.transform.localPosition = new Vector3(0f, 500f, 0f);
-            weatherSystem.AddComponent<UCWeatherSystemManager>();
+            new SystemChild("WeatherSystem",    typeof(UCWeatherSystemManager)),
 
-            // Module 3. Live: Time of Day, which owns the day half of the world
-            // clock and the latitude and tilt that solar position follows from.
-            // The sun rig, ambient, shadow and atmosphere groups are declared only.
-            MakeChild(root, "LightingSystem").AddComponent<UCLightingSystemManager>();
+            // Module 3, live: Time of Day, which owns the day half of the world clock
+            // and the latitude and tilt solar position follows from. The sun rig,
+            // ambient, shadow and atmosphere groups are declared only.
+            new SystemChild("LightingSystem",   typeof(UCLightingSystemManager)),
 
-            GameObject chunkManager = MakeChild(root, "ChunkManager");
-            ChunkManager cm = chunkManager.AddComponent<ChunkManager>();
-            cm.Initialize(creator);
+            new SystemChild("ChunkManager",     typeof(ChunkManager)),
+
+            new SystemChild("RoadMasterLinker", typeof(RoadMasterLinker)),   // Module 7 bridge
+        };
+
+        /// <summary>
+        /// Where <paramref name="manager"/> sits in <see cref="SystemChildren"/>, so
+        /// the one-time wiring below addresses a child by what it is rather than by a
+        /// hard-coded index that a reorder of the array would silently break.
+        /// </summary>
+        private static int IndexOf(System.Type manager)
+        {
+            for (int i = 0; i < SystemChildren.Length; i++)
+                if (SystemChildren[i].manager == manager) return i;
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Creates every child in <see cref="SystemChildren"/> and attaches its
+        /// manager. Returns how many managers it had to attach, so a caller can
+        /// report whether it changed anything.
+        ///
+        /// IDEMPOTENT BY DESIGN, and that is load-bearing rather than tidy:
+        /// RepairHierarchy runs this same method on a world that already exists, so
+        /// a world authored before a manager shipped gains it in place. One
+        /// description of what a world is made of, instead of a builder and a
+        /// repairer that drift apart. Nothing here replaces a component that is
+        /// already present, and nothing re-runs one-time wiring.
+        /// </summary>
+        private static int BuildHierarchy(GameObject root, UniverseCreatorObject creator)
+        {
+            int attached = 0;
+
+            GameObject[] child = new GameObject[SystemChildren.Length];
+            bool[] added = new bool[SystemChildren.Length];
+
+            for (int i = 0; i < SystemChildren.Length; i++)
+            {
+                child[i] = EnsureChild(root, SystemChildren[i].name,
+                                       SystemChildren[i].manager, out added[i]);
+                if (added[i]) attached++;
+            }
+
+            // -----------------------------------------------------------------
+            //  One-time wiring. Guarded by added[] rather than run every pass,
+            //  because a repair must not overwrite what the author has since set:
+            //  a WeatherSystem they moved, a ChunkManager they configured, a
+            //  linker they pointed at a different world.
+            // -----------------------------------------------------------------
+
+            // Above the terrain so the WindZone icon doesn't end up underground.
+            int weather = IndexOf(typeof(UCWeatherSystemManager));
+            if (added[weather])
+                child[weather].transform.localPosition = new Vector3(0f, 500f, 0f);
+
+            int chunks = IndexOf(typeof(ChunkManager));
+            ChunkManager cm = child[chunks].GetComponent<ChunkManager>();
+            if (added[chunks]) cm.Initialize(creator);
 
             // The mapping child is made here, at authoring time, so it exists before
-            // play ever starts - it is never created or destroyed during play.
+            // play ever starts - it is never created or destroyed during play. Run
+            // unconditionally: it is itself an Ensure, and a world repaired from an
+            // older version may have the manager but not the map.
             cm.EnsureSliceMap();
-
-            GameObject roadLink = MakeChild(root, "RoadMasterLinker");
-            RoadMasterLinker linker = roadLink.AddComponent<RoadMasterLinker>();   // Module 7 bridge
 
             // Wired here rather than left for the user to drag: the linker is useless
             // until it knows which world it answers height queries for, and there is
-            // exactly one candidate at this point.
-            linker.universeCreator = creator;
+            // exactly one candidate at this point. Filling a null rather than
+            // redirecting a linker that already points somewhere.
+            RoadMasterLinker linker =
+                child[IndexOf(typeof(RoadMasterLinker))].GetComponent<RoadMasterLinker>();
+            if (linker.universeCreator == null) linker.universeCreator = creator;
+
+            return attached;
         }
 
-        private static GameObject MakeChild(GameObject parent, string name)
+        /// <summary>
+        /// The named child of this root, created if absent, carrying
+        /// <paramref name="manager"/>, also attached if absent.
+        ///
+        /// Found by name rather than by type because the name is what the hierarchy
+        /// contract in Section 3.1 fixes, and because a repair has to recognise the
+        /// bare GameObject an older version left behind. <paramref name="added"/>
+        /// reports whether the component was attached by this call, which is how the
+        /// caller runs one-time wiring exactly once instead of re-running it over a
+        /// world that was already complete.
+        /// </summary>
+        private static GameObject EnsureChild(GameObject parent, string name,
+                                              System.Type manager, out bool added)
         {
-            GameObject child = new GameObject(name);
-            child.transform.SetParent(parent.transform, false);
+            Transform existing = parent.transform.Find(name);
+
+            GameObject child;
+            if (existing != null)
+            {
+                child = existing.gameObject;
+            }
+            else
+            {
+                child = new GameObject(name);
+                child.transform.SetParent(parent.transform, false);
+            }
+
+            if (manager == null)
+            {
+                added = false;
+                return child;
+            }
+
+            added = child.GetComponent(manager) == null;
+
+            // Undo.AddComponent rather than AddComponent: on a repair this lands in
+            // a scene the author already has open, and an edit they cannot undo is
+            // not an edit they will thank us for. On the creation path the whole root
+            // is registered anyway, so it costs nothing there.
+            if (added) Undo.AddComponent(child, manager);
+
             return child;
+        }
+
+        // =====================================================================
+        //  HIERARCHY REPAIR
+        //
+        //  A world authored before a manager shipped keeps the system child but not
+        //  the component: the GameObject is there, carries nothing but a Transform,
+        //  and so its inspector is blank. That reads as a broken inspector when what
+        //  is actually missing is the component, and there was no way to tell the
+        //  difference or to fix it short of deleting a world that by then has a
+        //  graph, hand-placed water and painted terrain on it.
+        //
+        //  So the missing halves are attached in place, by the same BuildHierarchy
+        //  the creation path runs - which is exactly why that method is idempotent.
+        // =====================================================================
+
+        /// <summary>
+        /// Attaches any system manager missing from this world. Returns how many were
+        /// attached; 0 means the world was already complete. Safe to run repeatedly.
+        /// </summary>
+        public static int RepairHierarchy(UniverseCreatorObject creator)
+        {
+            if (creator == null) return 0;
+
+            Undo.SetCurrentGroupName("Repair Universe Creator Hierarchy");
+            return BuildHierarchy(creator.gameObject, creator);
+        }
+
+        /// <summary>
+        /// The system managers this world does not have, comma-separated; empty when
+        /// the world is complete. A read-only check, safe to call from OnInspectorGUI.
+        ///
+        /// Searched with GetComponentInChildren rather than by child name, so a
+        /// manager the author reparented or renamed still counts as present and the
+        /// world inspector does not nag about a world that works.
+        /// </summary>
+        public static string MissingManagers(UniverseCreatorObject creator)
+        {
+            if (creator == null) return "";
+
+            string missing = "";
+
+            for (int i = 0; i < SystemChildren.Length; i++)
+            {
+                System.Type manager = SystemChildren[i].manager;
+                if (manager == null) continue;
+
+                if (creator.GetComponentInChildren(manager, true) != null) continue;
+
+                if (missing.Length > 0) missing += ", ";
+                missing += manager.Name;
+            }
+
+            return missing;
+        }
+
+        [MenuItem("Tools/Universe Creator/Diagnostics/Repair World Hierarchy", false, 212)]
+        private static void RepairHierarchyMenu()
+        {
+            UniverseCreatorObject[] worlds = Object.FindObjectsByType<UniverseCreatorObject>(
+                FindObjectsInactive.Include, FindObjectsSortMode.None);
+
+            if (worlds.Length == 0)
+            {
+                Debug.Log("[UC] Repair World Hierarchy: no Universe Creator world in the open scenes.");
+                return;
+            }
+
+            int attached = 0;
+            for (int i = 0; i < worlds.Length; i++) attached += RepairHierarchy(worlds[i]);
+
+            // Logged either way. "Nothing to do" is the useful answer when an author
+            // ran this because an inspector looked wrong: it rules the hierarchy out.
+            Debug.Log(attached == 0
+                ? "[UC] Repair World Hierarchy: nothing to do. " + worlds.Length +
+                  (worlds.Length == 1 ? " world is complete." : " worlds are complete.")
+                : "[UC] Repair World Hierarchy: attached " + attached +
+                  (attached == 1 ? " missing manager across " : " missing managers across ") +
+                  worlds.Length + (worlds.Length == 1 ? " world." : " worlds."));
         }
 
         // Seeds a new world from the Project Settings defaults.

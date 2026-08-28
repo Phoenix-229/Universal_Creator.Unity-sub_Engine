@@ -98,6 +98,7 @@ namespace UniverseCreator.Editor.Inspectors
             DrawHeaderBar(uc);
             EditorGUILayout.Space(6);
             DrawFarFromOriginWarning(uc);
+            DrawMissingManagerWarning(uc);
             DrawGraphSlot(uc);
 
             // ================================================================
@@ -193,6 +194,35 @@ namespace UniverseCreator.Editor.Inspectors
                 if (cm != null) cm.RebuildLayout();
 
                 SceneView.RepaintAll();
+            }
+
+            EditorGUILayout.Space(6);
+        }
+
+        // A world authored before a manager shipped keeps the system child but not the
+        // component, so that child's inspector shows a Transform and nothing else.
+        // From inside the empty inspector there is no way to tell a missing component
+        // from a broken editor, and this is the only surface an author is guaranteed to
+        // be looking at: the warning belongs here, on the world, not on the child that
+        // cannot draw it. Silent on a complete world.
+        private void DrawMissingManagerWarning(UniverseCreatorObject uc)
+        {
+            string missing = UniverseCreatorMenus.MissingManagers(uc);
+            if (missing.Length == 0) return;
+
+            EditorGUILayout.HelpBox(
+                "This world is missing " + missing + ". The system child is there but " +
+                "carries no component, which is why its inspector looks empty. Worlds " +
+                "created before a manager shipped never received it. Repairing attaches " +
+                "only what is absent - the graph, terrain, water and every setting " +
+                "already on this world are untouched, and it is undoable.",
+                MessageType.Warning);
+
+            if (UCInspectorUI.TintedButton("Repair Hierarchy", UCInspectorUI.ButtonAmber))
+            {
+                int attached = UniverseCreatorMenus.RepairHierarchy(uc);
+                Debug.Log("[UC] Repair Hierarchy: attached " + attached +
+                          (attached == 1 ? " manager to " : " managers to ") + uc.name + ".");
             }
 
             EditorGUILayout.Space(6);
