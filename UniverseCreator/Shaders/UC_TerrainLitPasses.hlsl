@@ -40,6 +40,8 @@
 
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
 #include "UC_Underwater.hlsl"
+#include "UC_Lighting.hlsl"
+#include "UC_SurfaceReflectance.hlsl"   // the ray-free wet-sky reflection twin, shared with props and the mobile path
 
 struct Attributes
 {
@@ -348,6 +350,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     // A 256x1 LUT baked by the Color Gradient node, indexed by altitude or by
     // slope. Applied to the painted ground only: cliff, snow and mud below are
     // authored materials in their own right and should not inherit it.
+#ifdef _UC_GRADIENT_ON
     if (_EnableGradient > 0.5h)
     {
         float gMin = _GradientMin;
@@ -362,6 +365,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
                      : (_GradientBlendMode < 1.5h ? UCOverlay(albedo, gCol) : gCol);
         albedo = lerp(albedo, graded, _GradientStrength);
     }
+#endif
 
     // ---- 5. mud ----
     // Mud is ground behaviour: it needs somewhere flat enough to stay put and a
@@ -369,6 +373,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     // top-down projection - mud lies on horizontal ground, so the Y plane of a
     // triplanar would carry all the weight anyway and the other two would be
     // two fetches spent on nothing.
+#ifdef _UC_MUD_ON
     if (_EnableMud > 0.5h)
     {
         half mudFlat  = 1.0h - saturate(slopeDeg / max(_MudSlopeLimit, 0.001h));
@@ -382,6 +387,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
         smoothness = lerp(smoothness, _MudSmoothness, mudMask);
         metallic   = lerp(metallic, 0.0h, mudMask);
     }
+#endif
 
     // ---- 6. slope / cliff ----
 #ifdef _UC_SLOPEBLEND_ON
@@ -454,6 +460,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     // Its whole job is to survive being looked at from a metre away, and past
     // the fade range it is sub-pixel noise, so it is spent there rather than
     // aliased.
+#ifdef _UC_DETAIL_ON
     if (_EnableDetail > 0.5h)
     {
         half detailFade = 1.0h - saturate((viewDist - _DetailFadeStart)
@@ -469,6 +476,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
             albedo = lerp(albedo, blended, _DetailStrength * detailFade);
         }
     }
+#endif
 
     // ---- 9. macro variation ----
     if (_EnableMacroVariation > 0.5h)
@@ -488,9 +496,16 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     // darker - while the flat air/water boundary reflects sharply, so specular
     // reads stronger and tighter. Darkening albedo and raising smoothness
     // together is the standard approximation of both effects at once.
+    // Held at function scope so the wet-sky reflection below reads the same film
+    // and the same puddle basin, never a second copy that could disagree.
+    half surfaceWet = 0.0h;
+    half surfacePuddle = 0.0h;
     if (_EnableWetness > 0.5h)
     {
-        half wet = saturate(_WetnessAmount);
+        // The authored _WetnessAmount is a per-material floor; the live weather wetness
+        // arrives on the _UCWetParams global from the one CPU uploader. The wetter of
+        // the two wins, so a material can start damp and the sky can only add to it.
+        half wet = saturate(max(_WetnessAmount, _UCWetParams.x));
 
         // Puddles need a basin: below the water level, and in a recess. Both
         // terms, so a low-lying ridge crest stays dry.
@@ -506,6 +521,8 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
         smoothness = lerp(smoothness, max(smoothness, _WetSmoothness), wet);
         smoothness = saturate(smoothness + _WetSpecBoost * wet * puddle);
         occlusion  = lerp(occlusion, 1.0h, wet * 0.5h);
+        surfaceWet = wet;
+        surfacePuddle = puddle;
     }
 
     // ---- 11. occlusion ----
@@ -519,11 +536,13 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     // Baked AO from the Occlusion Map node - a raymarched, terrain-wide term
     // the per-layer mask cannot express, because it depends on the landform
     // rather than on the material.
+#ifdef _UC_AOMAP_ON
     if (_EnableAOMap > 0.5h)
     {
         half bakedAO = SAMPLE_TEXTURE2D(_AOMap, sampler_linear_clamp, uvControl).r;
         occlusion *= lerp(1.0h, bakedAO, _AOMapStrength);
     }
+#endif
     occlusion = saturate(occlusion);
 
     // ---- 12. global PBR remap ----
@@ -540,11 +559,13 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
 
     // ---- 13. emission ----
     half3 emission = half3(0, 0, 0);
+#ifdef _UC_EMISSION_ON
     if (_EnableEmission > 0.5h)
     {
         half3 emissionTex = SAMPLE_TEXTURE2D(_EmissionMap, sampler_linear_repeat, uvControl).rgb;
         emission = emissionTex * _EmissionColor.rgb * _EmissionIntensity;
     }
+#endif
 
     // ---- 14. colour grade ----
     albedo = lerp(UCLuma(albedo).xxx, albedo, _Saturation);
@@ -570,6 +591,10 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     inputData.fogCoord = InitializeInputDataFog(float4(input.positionWS, 1.0), input.fogFactorAndVertexLight.x);
     inputData.vertexLighting = input.fogFactorAndVertexLight.yzw;
     inputData.bakedGI = SAMPLE_GI(input.uvControlAndLM.zw, SampleSHPixel(half3(0,0,0), normalWS), normalWS);
+    // The ground is the reference every scattered thing is matched against: read the shared
+    // grid here so terrain, vegetation and water all draw their ambient from one source and
+    // agree at any shared point. No grid bound yet, and the engine ambient stands unchanged.
+    inputData.bakedGI = UCGridAmbientOr(inputData.bakedGI, input.positionWS, normalWS);
     inputData.normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
     inputData.shadowMask = SAMPLE_SHADOWMASK(input.uvControlAndLM.zw);
 
@@ -586,6 +611,17 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     surfaceData.clearCoatSmoothness = 0.0h;
 
     half4 color = UniversalFragmentPBR(inputData, surfaceData);
+
+    // S-81: the ground gets the same ray-free wet-sky/grid reflection every other surface
+    // does, reading the film and puddle basin resolved in section 10 - so a rain-slicked
+    // road and the wet rock beside it reflect one sky, not two. Fresnel x wetness weights it
+    // to nothing when dry (no double-count of URP's probe specular) and the tier gate leaves
+    // it inert until S-82 turns it on. Before the media below: a reflection is surface
+    // radiance, not something the fog or the water tints on the way to the eye.
+    color.rgb += UCEnvReflectionContribution(input.positionWS, normalWS,
+        inputData.viewDirectionWS, 1.0h - saturate(surfaceData.smoothness),
+        surfaceWet, surfacePuddle, surfaceData.occlusion, normalWS);
+
     color.rgb = MixFog(color.rgb, inputData.fogCoord);
 
     // After fog, not before: fog is atmosphere between the camera and the ground,

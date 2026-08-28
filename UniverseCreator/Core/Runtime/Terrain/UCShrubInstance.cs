@@ -73,14 +73,17 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Configures a freshly spawned shrub from its prototype: the trigger volume
         /// it reports through, and the per-instance wind properties its renderers use.
+        /// wantsTrigger comes from the envelope's collider policy, resolved once in
+        /// ScatterApplier against the chunk's collider budget - a shrub past the budget
+        /// keeps its wind and drops its trigger.
         /// </summary>
-        public void Configure(ShrubPrototypeDef def, float scale)
+        public void Configure(ShrubPrototypeDef def, float scale, bool wantsTrigger)
         {
             if (def == null) return;
 
             traversalDrag = Mathf.Clamp01(def.squeeze * 0.45f);
 
-            if (def.spawnCollider) BuildTrigger(def, scale);
+            if (wantsTrigger) BuildTrigger(def, scale);
             ApplyMaterialBlock(def, scale);
         }
 

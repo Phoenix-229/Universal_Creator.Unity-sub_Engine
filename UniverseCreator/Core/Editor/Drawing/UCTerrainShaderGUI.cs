@@ -39,11 +39,25 @@ namespace UniverseCreator.Editor.Drawing
         // fragment shader as a uniform float; adding it here would do nothing
         // except enable a keyword no #ifdef tests. See the variant-budget note
         // at the top of UC_TerrainLitInput.hlsl for why the split falls here.
+        // Property -> keyword. Every entry here MUST have a matching
+        // shader_feature_local_fragment in UC_TerrainLit.shader and an #ifdef
+        // around its sample site in UC_TerrainLitPasses.hlsl, or the toggle
+        // silently stops doing anything.
+        //
+        // The five below slope/snow were uniform branches until the shader hit
+        // "19 texture parameters, more than the 16 supported": a uniform branch
+        // still binds its texture, so an optional map cost a texture unit even
+        // when switched off. Gating them takes the forward pass to 14.
         private static readonly Dictionary<string, string> ToggleKeywords =
             new Dictionary<string, string>
             {
                 { "_EnableSlopeBlend", "_UC_SLOPEBLEND_ON" },
-                { "_EnableSnow",       "_UC_SNOW_ON"       }
+                { "_EnableSnow",       "_UC_SNOW_ON"       },
+                { "_EnableGradient",   "_UC_GRADIENT_ON"   },
+                { "_EnableMud",        "_UC_MUD_ON"        },
+                { "_EnableDetail",     "_UC_DETAIL_ON"     },
+                { "_EnableAOMap",      "_UC_AOMAP_ON"      },
+                { "_EnableEmission",   "_UC_EMISSION_ON"   }
             };
 
         // Foldout state is per-session view preference, not material data.

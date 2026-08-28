@@ -20,6 +20,7 @@
 using UnityEngine;
 using UnityEditor;
 using UniverseCreator.TerrainSystem;
+using UniverseCreator.TerrainSystem.Geometry;
 
 namespace UniverseCreator.Editor.Inspectors
 {
@@ -360,15 +361,25 @@ namespace UniverseCreator.Editor.Inspectors
                 // separated by screen-space error instead, which is Unity's own
                 // continuous terrain LOD and costs nothing at the seams.
                 int res = owner.GetChunkResolution();
-                float hiErr = DualLODSystem.PixelErrorFor(LODLevel.High, owner.pixelError);
-                float loErr = DualLODSystem.PixelErrorFor(LODLevel.Low, owner.pixelError);
 
                 Row("Heightmap Res", res + " on every cell  (uniform, required for seams)");
-                Row("  High fidelity", highSide + " x " + highSide + "  =  " + high +
-                                       " cells  @  " + hiErr.ToString("F0") + " px error");
-                Row("  Low fidelity", low + " cells  @  " + loErr.ToString("F0") + " px error");
+                Row("  High fidelity", highSide + " x " + highSide + "  =  " + high + " cells");
+                Row("  Low fidelity", low + " cells");
                 Row("  Buffer ring", owner.GetBufferChunkCount() +
                                      " cells pre-generated outside the grid");
+
+                EditorGUILayout.Space(2);
+
+                // Pixel error is no longer a per-tier authored number; it is the acuity
+                // budget (L-49) floored at the source field's Nyquist limit (L-50) and
+                // derived per cell from the live view distance, field of view and screen
+                // height, so it is the on-screen error that is held constant across
+                // displays rather than the world-space error a fixed number would freeze.
+                float texelM = AngularError.TexelMetres(owner.GetChunkSize(), res);
+                Row("Acuity budget", owner.acuityPixels.ToString("F2") +
+                                     " px target screen error  (view-driven, per cell)");
+                Row("Source limit", "detail floored at " + texelM.ToString("F2") +
+                                    " m texel spacing  (Nyquist)");
 
                 EditorGUILayout.Space(2);
 

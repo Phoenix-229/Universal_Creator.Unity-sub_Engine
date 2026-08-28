@@ -167,15 +167,17 @@ namespace UniverseCreator.Editor.Inspectors
         // which shows up as jitter, z-fighting and cracks between cells.
         private void DrawFarFromOriginWarning(UniverseCreatorObject uc)
         {
-            Vector3 p = uc.transform.position;
-            float distance = new Vector2(p.x, p.z).magnitude;
+            // One threshold, owned by the world (maxWorldOriginDistance), so the warning
+            // here and the origin row in World Settings can never disagree about what
+            // "too far" means. The old local Max(10000, span*4) rule was a second,
+            // competing limit that ignored the authored field entirely.
+            if (!uc.IsFarFromOrigin()) return;
 
-            float worldSpan = Mathf.Max(1f, uc.worldSizeKm * 1000f);
-            float limit = Mathf.Max(10000f, worldSpan * 4f);
-            if (distance <= limit) return;
+            float distance = uc.OriginDistanceMetres();
 
             EditorGUILayout.HelpBox(
                 "This world sits " + (distance / 1000f).ToString("0.#") + " km from the origin, " +
+                "past its " + (uc.maxWorldOriginDistance / 1000f).ToString("0.#") + " km limit - " +
                 "far enough that float precision degrades across the terrain and the surface " +
                 "can jitter or crack between cells. Nothing about the world changes by moving " +
                 "it - the graph is evaluated from the world seed and origin offset, not the " +
@@ -184,6 +186,7 @@ namespace UniverseCreator.Editor.Inspectors
             if (UCInspectorUI.TintedButton("Move World To Origin", UCInspectorUI.ButtonBlue))
             {
                 Undo.RecordObject(uc.transform, "Move World To Origin");
+                Vector3 p = uc.transform.position;
                 uc.transform.position = new Vector3(0f, p.y, 0f);
 
                 ChunkManager cm = uc.GetComponentInChildren<ChunkManager>();
@@ -436,6 +439,18 @@ namespace UniverseCreator.Editor.Inspectors
             Vector2Row("World Offset", ref uc.worldOriginOffset,
                        "Slides the sampling window through the noise field without moving the object.");
 
+            // The origin clamp (float-precision guard). Shown even when the world is
+            // correctly placed, so the state is never silent - a world at the origin
+            // reads 0.0 km here and confirms it, rather than the inspector saying nothing
+            // until it is already too far out.
+            FloatSlider("Origin Clamp (m)", "uc.maxWorldOriginDistance",
+                        ref uc.maxWorldOriginDistance, 1000f, 1000000f, "F0",
+                        "Metres from the origin past which the world root is flagged for clamping. " +
+                        "A root far from the origin degrades float precision into jitter and cracks.");
+            float originKm = uc.OriginDistanceMetres() / 1000f;
+            ReadOnlyRow("Origin Distance", originKm.ToString("0.###") + " km"
+                        + (uc.IsFarFromOrigin() ? "   (past the clamp - see warning above)" : "   (within the clamp)"));
+
             EditorGUILayout.Space(2);
             InfoRow(string.Format("{0:F0} x {0:F0} m   |   {1:F2} m per heightmap sample",
                                   uc.worldSizeKm * 1000f, uc.GetMetersPerPixel()));
@@ -496,10 +511,25 @@ namespace UniverseCreator.Editor.Inspectors
                 valueChanged = true;
             }
 
-            FloatSlider("Pixel Error", "uc.pixelError", ref uc.pixelError, 1f, 200f, "F1",
-                        "Allowed screen-space error. Higher means fewer triangles and more popping.");
-            FloatSlider("Basemap Distance", "uc.basemapDistance", ref uc.basemapDistance, 0f, 5000f, "F0",
-                        "Beyond this, terrain uses the baked basemap instead of live splat layers.");
+            // Density is now the visual-acuity budget (L-49) floored at the source field's
+            // Nyquist limit (L-50), derived per cell from the live view - not one authored
+            // pixel-error number. These three are the honest dials that replace it.
+            FloatSlider("Acuity Budget (px)", "uc.acuityPixels", ref uc.acuityPixels, 0.25f, 8f, "F2",
+                        "Pixels of terrain silhouette error you accept. Resolution- and FOV-independent, " +
+                        "so the on-screen error is the same on a phone and a monitor. Lower = more triangles.");
+            FloatSlider("Pixel Error Floor", "uc.pixelErrorFloor", ref uc.pixelErrorFloor, 0.25f, 20f, "F2",
+                        "Hard floor on the derived pixel error. The value is never driven below this even " +
+                        "where the source heightmap could carry finer detail.");
+            FloatSlider("Density Hysteresis", "uc.densityHysteresis", ref uc.densityHysteresis, 0f, 4f, "F2",
+                        "Only re-write the pixel error when it moves more than this many pixels. Writing it " +
+                        "rebuilds the patch LOD tree, so a still camera should write it zero times.");
+
+            // The four native draw distances are derived from the Acuity Budget above, not
+            // authored - each is the range at which its own feature drops below that budget
+            // (Geometry/AngularError). They are read-only and move together when the budget
+            // changes. Basemap sits here beside its source; detail and tree distances are
+            // shown read-only in their own sections below.
+            ReadOnlyRow("Basemap Distance", $"{uc.basemapDistance:F0} m   (derived from Acuity Budget)");
 
             Toggle("Cast Shadows", ref uc.castShadows,
                    "Disable on mobile for a large fill-rate saving.");
@@ -589,9 +619,7 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.Space(2);
             EditorGUILayout.LabelField("Detail Meshes & Grass", EditorStyles.miniBoldLabel);
 
-            FloatSlider("Detail Distance", "uc.detailObjectDistance",
-                        ref uc.detailObjectDistance, 0f, 250f, "F0",
-                        "Metres beyond which grass and detail meshes stop drawing.");
+            ReadOnlyRow("Detail Distance", $"{uc.detailObjectDistance:F0} m   (derived from Acuity Budget)");
             FloatSlider("Detail Density", "uc.detailObjectDensity",
                         ref uc.detailObjectDensity, 0f, 1f, "F2",
                         "Fraction of authored density actually drawn. The cheapest grass optimisation.");
@@ -608,12 +636,8 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.Space(2);
             EditorGUILayout.LabelField("Trees", EditorStyles.miniBoldLabel);
 
-            FloatSlider("Tree Distance", "uc.treeDistance",
-                        ref uc.treeDistance, 0f, 5000f, "F0",
-                        "Metres beyond which trees stop drawing entirely.");
-            FloatSlider("Billboard Start", "uc.treeBillboardDistance",
-                        ref uc.treeBillboardDistance, 0f, 2000f, "F0",
-                        "Metres beyond which trees switch from mesh to billboard.");
+            ReadOnlyRow("Tree Distance", $"{uc.treeDistance:F0} m   (derived from Acuity Budget)");
+            ReadOnlyRow("Billboard Start", $"{uc.treeBillboardDistance:F0} m   (derived from Acuity Budget)");
             FloatSlider("Fade Length", "uc.treeCrossFadeLength",
                         ref uc.treeCrossFadeLength, 0f, 200f, "F0",
                         "Metres over which the mesh-to-billboard swap blends. 0 pops visibly.");
@@ -654,6 +678,10 @@ namespace UniverseCreator.Editor.Inspectors
 
             EditorGUI.indentLevel++;
 
+            // One lookup per section rather than one per prototype: ForWorld walks the
+            // hierarchy, and a thirty-species library would walk it thirty times.
+            UCVegetationSystemManager veg = UCVegetationSystemManager.ForWorld(uc.transform);
+
             List<TreePrototypeDef> list = uc.scatterLibrary.trees;
             ListCount("Tree Count", "Tree prototypes a Tree Scatter node can choose between. "
                     + "Index 0 is what a node with no prototype set uses.", list, 32);
@@ -688,6 +716,11 @@ namespace UniverseCreator.Editor.Inspectors
                 if (t.prefab == null)
                     InfoRow("No prefab — this slot is skipped when the world builds.");
 
+                // V-50 and V-53. The species envelope, drawn by the one shared drawer.
+                // The vegetation inspector links to this object rather than repeating the
+                // list, so there is exactly one place in the UI to author a species.
+                UCEcoEnvelopeDrawer.Draw(uc, t.eco, t.prefab, UCScatterKind.Tree, i, veg);
+
                 if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
             }
 
@@ -706,6 +739,8 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUI.indentLevel++;
 
             InfoRow("Woody at the base, soft to walk through. Separate from trees and from grass.");
+
+            UCVegetationSystemManager veg = UCVegetationSystemManager.ForWorld(uc.transform);
 
             List<ShrubPrototypeDef> list = uc.scatterLibrary.shrubs;
             ListCount("Shrub Count", "Shrub prototypes a Shrub Scatter node can choose between.",
@@ -740,12 +775,12 @@ namespace UniverseCreator.Editor.Inspectors
                           + "sideways instead of bending.");
 
                 EditorGUILayout.LabelField("Walk-through", EditorStyles.miniLabel);
-                Toggle("Spawn Collider", ref s.spawnCollider,
-                       "Adds a trigger collider so a character can walk into this bush. A trigger "
-                     + "and not a solid one on purpose: the player passes through and the plant "
-                     + "squeezes aside, instead of being stopped dead by a shrub.");
+                EnumRow("Collider Policy", ref s.eco.colliderPolicy,
+                        "What this shrub carries. Auto reads it from the life form and gives a "
+                      + "shrub a trigger: the player passes through and the plant squeezes aside "
+                      + "instead of being stopped dead by a bush. None makes it pure scenery.");
 
-                if (s.spawnCollider)
+                if (s.eco.ResolveColliderPolicy() != Ecology.ColliderPolicy.None)
                 {
                     FloatSlider("Trigger Radius", "shrub" + i + ".cr", ref s.colliderRadius,
                                 0.05f, 5f, "F2", "Roughly the visual footprint, in metres.");
@@ -772,13 +807,17 @@ namespace UniverseCreator.Editor.Inspectors
                 FloatSlider("Max Slope", "shrub" + i + ".slope", ref s.maxSlope, 0f, 90f, "F0",
                             "Rejected on ground steeper than this.");
                 AltitudeBand("shrub" + i, ref s.minAltitude, ref s.maxAltitude);
-                Toggle("Instance When Dense", ref s.gpuInstanceWhenDense,
-                       "Past the collider budget, draw through GPU instancing instead. Instanced "
-                     + "shrubs keep their wind and lose their trigger — the right trade for "
-                     + "distant fill you will never walk into.");
+                EnumRow("Instancing", ref s.eco.instancingPolicy,
+                        "Past the collider budget, draw through GPU instancing instead. Instanced "
+                      + "shrubs keep their wind and lose their trigger — the right trade for "
+                      + "distant fill you will never walk into. Never holds every instance as a "
+                      + "GameObject.");
 
                 if (s.prefab == null)
                     InfoRow("No prefab — this slot is skipped when the world builds.");
+
+                // The species envelope. Same shared drawer as the tree list above.
+                UCEcoEnvelopeDrawer.Draw(uc, s.eco, s.prefab, UCScatterKind.Shrub, i, veg);
 
                 if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
             }
@@ -798,6 +837,8 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUI.indentLevel++;
 
             InfoRow("No colliders and no rigidbodies. Parting is done in the shader, so it is free.");
+
+            UCVegetationSystemManager veg = UCVegetationSystemManager.ForWorld(uc.transform);
 
             List<DetailPrototypeDef> list = uc.scatterLibrary.details;
             ListCount("Detail Count", "Grass and detail prototypes. Terrain detail layers index "
@@ -857,6 +898,10 @@ namespace UniverseCreator.Editor.Inspectors
                 if (d.prefabMesh == null && d.billboardTexture == null)
                     InfoRow("No mesh and no billboard — this slot is skipped when the world builds.");
 
+                // The species envelope. The thumbnail takes the mesh prototype, because a
+                // billboard texture is not a GameObject and has no asset preview to draw.
+                UCEcoEnvelopeDrawer.Draw(uc, d.eco, d.prefabMesh, UCScatterKind.Detail, i, veg);
+
                 if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
             }
 
@@ -875,6 +920,8 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUI.indentLevel++;
 
             InfoRow("Solid colliders, no wind. A prop here is something you bump into.");
+
+            UCVegetationSystemManager veg = UCVegetationSystemManager.ForWorld(uc.transform);
 
             List<ObjectPrototypeDef> list = uc.scatterLibrary.objects;
             ListCount("Object Count", "Prop prototypes an Object Scatter node can choose between.",
@@ -896,15 +943,24 @@ namespace UniverseCreator.Editor.Inspectors
                             "Sinks it into the ground so it does not float on a slope.");
                 FloatSlider("Normal Align", "obj" + i + ".align", ref o.normalAlignment, 0f, 1f, "F2",
                             "Tilts it toward the ground normal. 1 lies a rock flat on a hillside.");
-                Toggle("GPU Instanced", ref o.gpuInstanced,
-                       "Draw instanced instead of spawning a GameObject. No collider and no "
-                     + "transform — far cheaper past a few thousand.");
+                EnumRow("Instancing", ref o.eco.instancingPolicy,
+                        "Draw instanced instead of spawning a GameObject: no collider and no "
+                      + "transform, far cheaper past a few thousand. Always batches from the "
+                      + "first instance, WhenDense waits for the library threshold.");
+                EnumRow("Collider Policy", ref o.eco.colliderPolicy,
+                        "What the spawn carries. Auto reads it from the life form, so stone "
+                      + "resolves to a solid collider and only the library's instancing "
+                      + "threshold gives it up.");
                 Toggle("Mark Static", ref o.markStatic,
                        "Batches the spawn into the scene's static geometry. Only meaningful for "
                      + "GameObject spawns.");
 
                 if (o.prefab == null)
                     InfoRow("No prefab — this slot is skipped when the world builds.");
+
+                // The species envelope. Stone and props carry one too: it is what decides
+                // whether a boulder belongs on this slope, not only where a plant grows.
+                UCEcoEnvelopeDrawer.Draw(uc, o.eco, o.prefab, UCScatterKind.Object, i, veg);
 
                 if (RemoveButton()) { list.RemoveAt(i); valueChanged = true; break; }
             }
@@ -1179,8 +1235,10 @@ namespace UniverseCreator.Editor.Inspectors
             uc.highLODRingSize = 3;
             uc.bufferRingWidth = 1;
             uc.recenterThreshold = 0.5f;
-            uc.pixelError = 5f;
-            uc.basemapDistance = 1000f;
+            uc.acuityPixels = 1f;
+            uc.pixelErrorFloor = 1f;
+            uc.densityHysteresis = 0.75f;
+            // basemapDistance is derived from acuityPixels by ValidateSettings below.
             uc.castShadows = true;
             uc.drawInstanced = true;
             uc.generateCollider = true;
@@ -1196,10 +1254,9 @@ namespace UniverseCreator.Editor.Inspectors
             // material alone: those are asset references the user wired up by hand,
             // and clearing them on a settings reset would look like data loss.
             uc.drawTreesAndFoliage = true;
-            uc.detailObjectDistance = 80f;
+            // detailObjectDistance, treeDistance and treeBillboardDistance are derived from
+            // acuityPixels by ValidateSettings below, not authored here.
             uc.detailObjectDensity = 1f;
-            uc.treeDistance = 900f;
-            uc.treeBillboardDistance = 50f;
             uc.treeCrossFadeLength = 5f;
             uc.treeMaximumFullLODCount = 50;
             uc.wavingGrassStrength = 0.5f;

@@ -45,7 +45,7 @@ namespace UniverseCreator.Nodes.Biome
         public override string Tooltip { get { return "Classify pixels into Whittaker biomes from temperature and moisture."; } }
 
         /// <summary>Total number of biome classes. Used to encode and decode the field.</summary>
-        public const int BiomeCount = 10;
+        public const int BiomeCount = Ecology.WhittakerBiome.Count;
 
         // Cached: GetInputs is called every editor repaint, so it must not allocate.
         private static readonly Port[] ClimateInputs =
@@ -91,8 +91,9 @@ namespace UniverseCreator.Nodes.Biome
 
                     BiomeType biome = Classify(t, mo);
 
-                    // Encode as index / (count - 1) so the field spans 0-1.
-                    result.arr[i] = (float)(int)biome / (BiomeCount - 1);
+                    // Encoded through the same helper species selection decodes with,
+                    // so the two cannot disagree about what a field value means.
+                    result.arr[i] = Ecology.WhittakerBiome.Encode((int)biome);
                 }
             }
 
@@ -103,38 +104,15 @@ namespace UniverseCreator.Nodes.Biome
         /// Whittaker lookup. Temperature is the primary axis because it gates which
         /// biomes are possible at all; moisture then picks among them.
         /// </summary>
+        /// <remarks>
+        /// The thresholds themselves live in Ecology.WhittakerBiome, because species
+        /// selection has to reach the same verdict this node bakes into the splat
+        /// map. A second copy here would let the ground say tundra while the trees
+        /// growing on it think boreal, with nothing to report the disagreement.
+        /// </remarks>
         public BiomeType Classify(float temperature, float moisture)
         {
-            if (temperature < iceThreshold) return BiomeType.Ice;
-
-            // Cold: below roughly 0.25 normalised temperature.
-            if (temperature < 0.25f)
-            {
-                return moisture < 0.35f ? BiomeType.Tundra : BiomeType.BorealForest;
-            }
-
-            // Cool temperate.
-            if (temperature < 0.5f)
-            {
-                if (moisture < 0.2f) return BiomeType.TemperateGrassland;
-                if (moisture < 0.6f) return BiomeType.TemperateForest;
-                return BiomeType.TemperateRainforest;
-            }
-
-            // Warm temperate.
-            if (temperature < 0.75f)
-            {
-                if (moisture < 0.15f) return BiomeType.Desert;
-                if (moisture < 0.4f) return BiomeType.TemperateGrassland;
-                if (moisture < 0.7f) return BiomeType.TemperateForest;
-                return BiomeType.TemperateRainforest;
-            }
-
-            // Hot.
-            if (moisture < 0.15f) return BiomeType.Desert;
-            if (moisture < 0.4f) return BiomeType.Savanna;
-            if (moisture < 0.7f) return BiomeType.TropicalSeasonalForest;
-            return BiomeType.TropicalRainforest;
+            return (BiomeType)Ecology.WhittakerBiome.Classify(temperature, moisture, iceThreshold);
         }
     }
 }

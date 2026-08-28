@@ -93,6 +93,10 @@ Shader "UniverseCreator/Water"
         _WindRipple         ("Wind Chop", Range(0.0, 4.0)) = 1.0
         _WindChopLength     ("Wind Chop Length (m)", Range(0.15, 6.0)) = 0.9
         _WindFoam           ("Wind Whitecaps", Range(0.0, 2.0)) = 0.35
+
+        // Frozen fraction, set by the weather layer per body and only on still water.
+        // Authored default is open water; it is not a tuning control.
+        [HideInInspector] _UCIce ("Ice Cover", Range(0.0, 1.0)) = 0.0
     }
 
     SubShader

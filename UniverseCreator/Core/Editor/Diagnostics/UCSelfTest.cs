@@ -38,7 +38,11 @@ using UniverseCreator.TerrainSystem;
 
 namespace UniverseCreator.Editor.Diagnostics
 {
-    public static class UCSelfTest
+    // Partial. This file is already long enough that adding a new subject area to
+    // it would make it harder to read, so each later subject gets its own file and
+    // shares the counter and the Check helper rather than starting a second tally.
+    // Module 3's ecology checks live in UCSelfTest.Ecology.cs.
+    public static partial class UCSelfTest
     {
         private static int checks;
         private static readonly List<string> failures = new List<string>();
@@ -88,6 +92,9 @@ namespace UniverseCreator.Editor.Diagnostics
             TestNodePortsAndInstantiation();
             TestNodeFieldsAreDrawable();
             TestShaderPropertyRegistry();
+            TestAllShippedShadersCompile();
+            TestMobileTextureBudget();
+            TestPrefabIntegrity();
             TestTextureNodesWriteRealProperties();
             TestWaterShaderPropertyRegistry();
             TestWaterAppliersAgree();
@@ -95,6 +102,8 @@ namespace UniverseCreator.Editor.Diagnostics
             TestHeightGuardRejectsNonFinite();
             TestHeightGuardKillsNeedlesAndKeepsCliffs();
             TestGraphReachesTheHeightmap();
+            TestWeatherOutputNodeCapturesBiases();
+            TestLightingOutputNodeCapturesBiases();
             TestCarveOnlyLowersGround();
             TestRefitFromSnapshotIsStable();
             TestGroundProbeMatching();
@@ -109,7 +118,271 @@ namespace UniverseCreator.Editor.Diagnostics
             TestLakeShapeAndSizeComeFromTheBasin();
             TestGraphHealsMissingNodeSlots();
 
+            // Module 3, in UCSelfTest.Ecology.cs.
+            TestEcologyConstants();
+            TestEcologyMaths();
+            TestEnvironmentSampleStaysCheap();
+            TestVegetationResolveIsCachedAndInvalidated();
+            TestFoliagePigmentContract();
+            TestSamplerReadsClimateFromBag();
+
+            // Module 3, in UCSelfTest.Weather.cs.
+            TestClockStateStaysCheap();
+            TestSolarDeclination();
+            TestDayLength();
+            TestSunPosition();
+            TestSolarTimeCorrection();
+            TestAirMassAndMoon();
+            TestSolarFormulaeHaveOneOwner();
+            TestClockIsDeterministic();
+            TestLatitudeGradient();
+            TestMoonPosition();
+            TestClockScrubTargets();
+            TestAtmosphericThermodynamics();
+            TestClimateNormals();
+
+            // Module 3, in UCSelfTest.Weather2.cs.
+            TestKoeppenCode();
+            TestWeatherCellField();
+
+            // Module 3, in UCSelfTest.Lighting.cs.
+            TestLightingRig();
+            TestSkyModel();
+            TestSunIlluminance();
+            TestSunDiscAndPenumbra();
+            TestSunMoonHandover();
+            TestSeasonalLatitudinalLight();
+            TestExposureModel();
+            TestTonemappingPolicy();
+            TestAtmosphericExtinction();
+            TestTurbidityModel();
+            TestSkyLutRebuildPolicy();
+            TestPerezSky();
+            TestTwilightBands();
+            TestSkyAmbientProbe();
+            TestAtmosphereState();
+            TestCloudTypeTable();
+            TestSeasonalCloudCharacter();
+            TestCloudRendering();
+            TestStormRender();
+            TestSkyLightSplit();
+            TestSunShafts();
+            TestCloudShadows();
+            TestCloudDeterminism();
+            TestIrradianceProbe();
+            TestIrradianceGrid();
+            TestProbeFill();
+            TestMultiBounceFeedback();
+            TestTerrainAlbedo();
+            TestProbeRefreshScheduler();
+            TestRefreshCadence();
+            TestEnergyConservation();
+            TestHeightfieldTrace();
+            TestSkyVisibility();
+            TestFoliageColorBleed();
+            TestProbeValidity();
+            TestEmissiveContributors();
+            TestSpecularOcclusion();
+            TestWetSurfaceOptics();
+            TestIrradianceUpload();
+            TestIrradianceSampler();
+            TestAmbientOcclusionRule();
+            TestGridAmbientWiring();
+            TestMoonLight();
+            TestStarField();
+            TestPurkinjeShift();
+            TestNightFloor();
+            TestNoSecondAmbientOcclusion();
+            TestContactShadow();
+            TestScreenSpaceGI();
+            TestScreenSpaceReflection();
+            TestMobileReflectionPath();
+            TestTemporalReprojection();
+            TestGridDeterminism();
+            TestLightingTier();
+            TestLightingSettingsDefaults();
+            TestIrradianceGpuByteEstimate();
+            TestLightingManagerResolvesTierAndProbes();
+            TestDayCycleSampling();
+            TestLightingTimeIsWeatherOwned();
+            TestLightingMemoryBudget();
+            TestCascadePolicy();
+            TestSharedShadowDistance();
+            TestShadowBias();
+            TestAuthorAssetSafety();
+            TestRendererFeatureGuards();
+
+            TestAngularError();
+            TestTerrainDensityController();
+            TestDerivedDrawDistances();
+            TestDrawInstancedPairing();
+            TestAcuityTier();
+            TestAutoConnectDisabled();
+            TestOriginClamp();
+            TestMeshLodSelection();
+            TestImpostorSwitchDistance();
+            TestWeberContrast();
+            TestOctahedralViews();
+            TestImpostorDepth();
+            TestImpostorSeason();
+            TestImpostorAtlasBudget();
+            TestDitherCrossFade();
+            TestShadowLodBudget();
+            TestInstancedBatching();
+            TestSelfThinningDensity();
+            TestSplatCacheModel();
+            TestSplatPageResidency();
+            TestSplatMipSelection();
+            TestSplatPageCacheLru();
+            TestComputedLayerComposite();
+            TestTerrainLayerAssignmentGuard();
+            TestBasemapConsistency();
+            TestPaintStroke();
+            TestPaintStore();
+            TestPaintComposite();
+            TestConservingHeightBrush();
+            TestAngleOfReposeClamp();
+            TestTerrainHoleMask();
+            TestChunkPaintKey();
+            TestBrushInputModel();
+            TestPaintLayerResolver();
+            TestVelocityPredictor();
+            TestChunkBuildPriority();
+            TestLoadHysteresis();
+            TestTeleportDetector();
+            TestTierConcurrencyGate();
+            TestGeometryBudget();
+            TestDegradationLadder();
+            TestRecoveryController();
+            TestThermalGovernor();
+            TestGovernorStatus();
+            TestViewSideDegradation();
+            TestGeometrySettings();
+            TestGeometryDebugView();
+            TestImpostorBakePlan();
+
+            TestLithologySanitize();
+            TestLithologyExampleColumn();
+            TestLithologyColumnView();
+            TestStructuralStrikeRotation();
+            TestStructuralStackAndDip();
+            TestOutcropResolution();
+            TestLithologyDifferentialErosion();
+            TestSurficialCover();
+            TestMatrixSurfaceForm();
+            TestLithologyOutputNode();
+            TestMicroReliefOutputNode();
+            TestPatchRingAddressing();
+            TestOverlayNeverWritesTerrain();
+            TestMicroReliefField();
+            TestProcessCompetition();
+            TestSnowReliefLayer();
+            TestWaterSurfaceCoupling();
+            TestPatchEdgeTessellation();
+            TestOverlayTessellationSupport();
+            TestMicroReliefSampleOffset();
+            TestOverlayNormalBlend();
+            TestMicroReliefScatterBias();
+            TestOverlayRingAdoption();
+
             return failures.Count == 0;
+        }
+
+        /// <summary>
+        /// Every texture under Content must carry an Android/iOS import ceiling.
+        ///
+        /// This is a memory test wearing an import-settings costume. Content holds
+        /// 182 textures; uncapped at 2048 they would ask a phone for roughly 453 MB
+        /// of texture memory, which on a 1.2-1.8 GB process budget is an
+        /// out-of-memory kill rather than a slow frame. The ceilings themselves and
+        /// the arithmetic behind them live in UCTextureBudget, which is also what
+        /// the Setup menu command calls - this asserts the policy stayed applied
+        /// rather than restating it, so the two cannot drift.
+        ///
+        /// It writes nothing: Audit runs the same pass in dry-run mode.
+        /// </summary>
+        private static void TestMobileTextureBudget()
+        {
+            List<UCTextureBudget.Entry> entries;
+            int notCompliant = UCTextureBudget.Audit(out entries);
+
+            Check(entries.Count > 0,
+                  "UCTextureBudget found no textures under " +
+                  UCTextureBudget.ContentRoot + " - the audit is not looking where " +
+                  "the content actually is");
+
+            Check(notCompliant == 0,
+                  notCompliant + " of " + entries.Count + " Content textures fail the " +
+                  "mobile import policy (size ceiling, or a normal map importing as " +
+                  "plain colour). Run Tools/Universe Creator/Setup/Apply " +
+                  "Mobile Texture Budget. " + FirstFew(entries));
+        }
+
+        /// <summary>Names a few offenders so a failure is actionable, not just a count.</summary>
+        private static string FirstFew(List<UCTextureBudget.Entry> entries)
+        {
+            StringBuilder sb = new StringBuilder("First offenders: ");
+            int shown = 0;
+            for (int i = 0; i < entries.Count && shown < 5; i++)
+            {
+                if (UCTextureBudget.IsCompliant(entries[i])) continue;
+
+                if (shown > 0) sb.Append(", ");
+                sb.Append(System.IO.Path.GetFileName(entries[i].Path));
+                sb.Append(" (want ").Append(entries[i].Cap).Append("px, ")
+                  .Append(entries[i].Role);
+                if (entries[i].NormalTypeWrong) sb.Append(", mistyped normal");
+                sb.Append(", ").Append(entries[i].Reason).Append(')');
+                shown++;
+            }
+            return shown == 0 ? string.Empty : sb.ToString();
+        }
+
+        /// <summary>
+        /// Structural prefab audit - null renderers, empty LOD levels, broken heights.
+        ///
+        /// A decimated tree with a null renderer in LOD0 produced Unity's
+        /// "LODGroup has a missing renderer" warning every frame in play mode, and
+        /// nothing upstream ever looked at a prefab. Defects (null renderer, empty
+        /// LOD level, non-descending screen heights, missing mesh) fail the test;
+        /// advisories (material/submesh count mismatch, mixed colliders) are counted
+        /// but allowed, matching the package rule that a prefab with no material
+        /// must still work.
+        /// </summary>
+        private static void TestPrefabIntegrity()
+        {
+            int scanned;
+            List<UCPrefabIntegrity.Finding> found = UCPrefabIntegrity.Scan(out scanned);
+
+            Check(scanned > 0, "UCPrefabIntegrity opened no prefabs or models under " +
+                               UCPrefabIntegrity.ContentRoot + " - the scan is not " +
+                               "looking where the shipped content actually is");
+
+            int defects = 0;
+            int advisories = 0;
+            for (int i = 0; i < found.Count; i++)
+            {
+                if (!UCPrefabIntegrity.IsDefect(found[i].Kind))
+                {
+                    advisories++;
+                    continue;
+                }
+
+                defects++;
+                Check(false, found[i].Kind + " in " +
+                             System.IO.Path.GetFileName(found[i].AssetPath) + ": " +
+                             found[i].Detail);
+            }
+
+            // Deliberately no summary Check on the defect total: the per-defect
+            // Check calls above already fail once each, and adding a rollup would
+            // make "failures: N+1" for N problems.
+
+            // Advisories are not failures, but this is the only place they would
+            // ever be seen, so the log carries the count either way.
+            Debug.Log("prefab integrity: " + scanned + " asset(s) scanned, " +
+                      defects + " defect(s), " + advisories + " advisory note(s). " +
+                      "Tools/Universe Creator/Diagnostics/Scan Prefabs lists them in full.");
         }
 
         private static void Check(bool condition, string message)
@@ -382,6 +655,24 @@ namespace UniverseCreator.Editor.Diagnostics
         /// material property. Keywords are checked separately below, against the
         /// shader's actual keyword space.
         /// </remarks>
+        /// <summary>
+        /// Asserts every shader this module ships actually compiles and resolves.
+        ///
+        /// TestShaderPropertyRegistry and TestWaterShaderPropertyRegistry each cover
+        /// one shader, which left VegetationLit, WindDetail, RockLit and the ripple
+        /// shader unverified - a compile error in any of them would surface only as
+        /// magenta geometry at run time, long after the self test said PASS.
+        /// UCShaderDiagnostics already owns the "is this shader sound" question for
+        /// the whole ship list, so this delegates to it rather than restating that
+        /// loop here and letting the two drift apart.
+        /// </summary>
+        private static void TestAllShippedShadersCompile()
+        {
+            string report;
+            bool ok = UCShaderDiagnostics.Check(out report);
+            Check(ok, "one or more shipped shaders failed to compile or resolve:\n" + report);
+        }
+
         private static void TestShaderPropertyRegistry()
         {
             Shader shader = Shader.Find(UCShaderProps.ShaderName);
@@ -1074,10 +1365,198 @@ namespace UniverseCreator.Editor.Diagnostics
             }
         }
 
+        /// <summary>
+        /// Weather Output must keep the five original bias ports first and in order so
+        /// a graph saved against the retired node reconnects, and it must record a wired
+        /// bias into the bag while leaving an unwired one null - the driver's whole way
+        /// of telling "no bias here" from "a bias of zero".
+        /// </summary>
+        private static void TestWeatherOutputNodeCapturesBiases()
+        {
+            WeatherOutputNode probe = new WeatherOutputNode();
+
+            Port[] ins = probe.GetInputs();
+            Check(ins != null && ins.Length == 8, "Weather Output must expose eight bias ports");
+            Check(probe.GetOutputs() != null && probe.GetOutputs().Length == 0,
+                  "Weather Output is a terminal and exposes no output ports");
+            Check(probe is IOutputNode, "Weather Output must be an IOutputNode so the evaluator drives it");
+
+            if (ins != null && ins.Length == 8)
+            {
+                // The five carried-over names, in their original order, are the load-
+                // bearing part: a saved graph reconnects by these.
+                Check(ins[0].name == "In Precip Bias", "port 0 must stay In Precip Bias");
+                Check(ins[1].name == "In Temperature Bias", "port 1 must stay In Temperature Bias");
+                Check(ins[2].name == "In Wind Bias", "port 2 must stay In Wind Bias");
+                Check(ins[3].name == "In Fog Bias", "port 3 must stay In Fog Bias");
+                Check(ins[4].name == "In Cloud Bias", "port 4 must stay In Cloud Bias");
+            }
+
+            const int res = 33;
+            Graph graph = ScriptableObject.CreateInstance<Graph>();
+            try
+            {
+                PerlinNoiseNode noise = new PerlinNoiseNode();
+                WeatherOutputNode output = new WeatherOutputNode();
+                graph.nodes.Add(noise);
+                graph.nodes.Add(output);
+
+                // Wire the source into Temperature Bias (port 1) only, leaving the other
+                // seven ports unwired.
+                Connection link = new Connection();
+                link.sourceNodeId = noise.id;
+                link.sourcePortIndex = 0;
+                link.targetNodeId = output.id;
+                link.targetPortIndex = 1;
+                graph.connections.Add(link);
+
+                TileData tile = new TileData(
+                    new Coord(1, 1),
+                    new CoordRect(new Coord(0, 0), new Coord(res, res)),
+                    new Vector3(800f, 0f, 800f),
+                    new Vector3(800f, 600f, 800f),
+                    600f);
+                tile.SetFullWorld(Vector3.zero, new Vector3(4000f, 600f, 4000f));
+                new GraphEvaluator(graph).Evaluate(tile, new StopToken());
+
+                // The wired port lands as a finite, correctly-sized field.
+                float[] temp = tile.outputs.weatherTemperatureBias;
+                Check(temp != null, "wired Temperature Bias must be captured, not null");
+                if (temp != null)
+                {
+                    Check(temp.Length == res * res, "captured bias must cover the whole sample grid");
+                    bool finite = true;
+                    for (int i = 0; i < temp.Length; i++)
+                        if (!IsFinite(temp[i])) { finite = false; break; }
+                    Check(finite, "captured bias must hold only finite samples");
+                }
+
+                Check(tile.outputs.weatherBiasSize == new Vector2Int(res, res),
+                      "the bias grid must record the sample dimensions of the wired field");
+
+                // Every unwired port stays null - the driver reads that as "leave this
+                // one alone", which is not the same as a bias of zero.
+                Check(tile.outputs.weatherPrecipBias == null, "unwired Precip Bias must stay null");
+                Check(tile.outputs.weatherWindBias == null, "unwired Wind Bias must stay null");
+                Check(tile.outputs.weatherFogBias == null, "unwired Fog Bias must stay null");
+                Check(tile.outputs.weatherCloudBias == null, "unwired Cloud Bias must stay null");
+                Check(tile.outputs.weatherSnowBias == null, "unwired Snow Bias must stay null");
+                Check(tile.outputs.weatherStormBias == null, "unwired Storm Bias must stay null");
+                Check(tile.outputs.weatherTurbidityBias == null, "unwired Turbidity Bias must stay null");
+
+                // A node with nothing wired has no weather branch to record and must
+                // leave the bag exactly as it found it.
+                tile.ClearOutputs();
+                WeatherOutputNode orphan = new WeatherOutputNode();
+                orphan.Generate(0, tile, new StopToken());
+                Check(tile.outputs.weatherTemperatureBias == null,
+                      "an all-unwired Weather Output must write no bias at all");
+                Check(tile.outputs.weatherBiasSize == Vector2Int.zero,
+                      "an all-unwired Weather Output must leave the bias grid unset");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(graph);
+            }
+        }
+
+        /// <summary>
+        /// Lighting Output must keep the three original bias ports first and in order so
+        /// a graph saved against the retired node reconnects, and it must record a wired
+        /// bias into the bag while leaving an unwired one null - the driver's whole way
+        /// of telling "no bias here" from "a bias of zero".
+        /// </summary>
+        private static void TestLightingOutputNodeCapturesBiases()
+        {
+            LightingOutputNode probe = new LightingOutputNode();
+
+            Port[] ins = probe.GetInputs();
+            Check(ins != null && ins.Length == 5, "Lighting Output must expose five bias ports");
+            Check(probe.GetOutputs() != null && probe.GetOutputs().Length == 0,
+                  "Lighting Output is a terminal and exposes no output ports");
+            Check(probe is IOutputNode, "Lighting Output must be an IOutputNode so the evaluator drives it");
+
+            if (ins != null && ins.Length == 5)
+            {
+                // The three carried-over names, in their original order, are the load-
+                // bearing part: a saved graph reconnects by these.
+                Check(ins[0].name == "In Sky Tint", "port 0 must stay In Sky Tint");
+                Check(ins[1].name == "In Ambient Scale", "port 1 must stay In Ambient Scale");
+                Check(ins[2].name == "In Turbidity", "port 2 must stay In Turbidity");
+                // The appended ports follow, never inserted ahead of the originals.
+                Check(ins[3].name == "In Cloud Cover Bias", "port 3 must be the appended In Cloud Cover Bias");
+                Check(ins[4].name == "In Exposure Bias", "port 4 must be the appended In Exposure Bias");
+            }
+
+            const int res = 33;
+            Graph graph = ScriptableObject.CreateInstance<Graph>();
+            try
+            {
+                PerlinNoiseNode noise = new PerlinNoiseNode();
+                LightingOutputNode output = new LightingOutputNode();
+                graph.nodes.Add(noise);
+                graph.nodes.Add(output);
+
+                // Wire the source into Turbidity (port 2) only, leaving the other four
+                // ports unwired - a spatially varying haze mask, the done-when scenario.
+                Connection link = new Connection();
+                link.sourceNodeId = noise.id;
+                link.sourcePortIndex = 0;
+                link.targetNodeId = output.id;
+                link.targetPortIndex = 2;
+                graph.connections.Add(link);
+
+                TileData tile = new TileData(
+                    new Coord(1, 1),
+                    new CoordRect(new Coord(0, 0), new Coord(res, res)),
+                    new Vector3(800f, 0f, 800f),
+                    new Vector3(800f, 600f, 800f),
+                    600f);
+                tile.SetFullWorld(Vector3.zero, new Vector3(4000f, 600f, 4000f));
+                new GraphEvaluator(graph).Evaluate(tile, new StopToken());
+
+                // The wired port lands as a finite, correctly-sized field.
+                float[] turb = tile.outputs.lightingTurbidityBias;
+                Check(turb != null, "wired Turbidity must be captured, not null");
+                if (turb != null)
+                {
+                    Check(turb.Length == res * res, "captured bias must cover the whole sample grid");
+                    bool finite = true;
+                    for (int i = 0; i < turb.Length; i++)
+                        if (!IsFinite(turb[i])) { finite = false; break; }
+                    Check(finite, "captured bias must hold only finite samples");
+                }
+
+                Check(tile.outputs.lightingBiasSize == new Vector2Int(res, res),
+                      "the bias grid must record the sample dimensions of the wired field");
+
+                // Every unwired port stays null - the driver reads that as "leave this
+                // one alone", which is not the same as a bias of zero.
+                Check(tile.outputs.lightingSkyTintBias == null, "unwired Sky Tint must stay null");
+                Check(tile.outputs.lightingAmbientScaleBias == null, "unwired Ambient Scale must stay null");
+                Check(tile.outputs.lightingCloudCoverBias == null, "unwired Cloud Cover Bias must stay null");
+                Check(tile.outputs.lightingExposureBias == null, "unwired Exposure Bias must stay null");
+
+                // A node with nothing wired has no lighting branch to record and must
+                // leave the bag exactly as it found it, so a day cycle with no lighting
+                // output behaves identically to one with an all-unwired node.
+                tile.ClearOutputs();
+                LightingOutputNode orphan = new LightingOutputNode();
+                orphan.Generate(0, tile, new StopToken());
+                Check(tile.outputs.lightingTurbidityBias == null,
+                      "an all-unwired Lighting Output must write no bias at all");
+                Check(tile.outputs.lightingBiasSize == Vector2Int.zero,
+                      "an all-unwired Lighting Output must leave the bias grid unset");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(graph);
+            }
+        }
+
         // ---------------------------------------------------------------------
         //  WATER RE-FIT
         // ---------------------------------------------------------------------
-
         /// <summary>
         /// Builds a straight river channel across a synthetic chunk and returns the
         /// carve layer, ready to apply.

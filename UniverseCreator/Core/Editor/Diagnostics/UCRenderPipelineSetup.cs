@@ -81,6 +81,11 @@ namespace UniverseCreator.Editor.Diagnostics
             }
             else log.AppendLine("reused  " + RendererPath);
 
+            // Ambient occlusion is URP's own Screen Space Ambient Occlusion feature,
+            // configured here - never a second AO pass of our own (it would drift from
+            // Unity's and compete for the same depth prepass).
+            ConfigureAmbientOcclusion(renderer, log);
+
             // ---- pipeline asset ----
             var pipeline = AssetDatabase.LoadAssetAtPath<UniversalRenderPipelineAsset>(PipelinePath);
             if (pipeline == null)
@@ -173,10 +178,13 @@ namespace UniverseCreator.Editor.Diagnostics
         /// </summary>
         public static int EnsureAlwaysIncludedShaders()
         {
-            // UC_Water's declared name and the UC terrain shader. Literals rather than
-            // a reference to UCWaterProps so this editor setup file needs no runtime
-            // using; they match the names in UC_Water.shader and TerrainBuilder.
-            string[] names = { "UniverseCreator/Water", "UniverseCreator/TerrainLit" };
+            // The one list of shaders this module ships, owned by UCShaderDiagnostics.
+            // This was previously a local two-name literal array, which meant every
+            // shader added after it - VegetationLit, RockLit, WindDetail and the
+            // ripple sim - was silently left out of Always Included and could be
+            // stripped from a build. That is the exact fault this method exists to
+            // prevent, so the list must never be restated here.
+            string[] names = UCShaderDiagnostics.ShipShaders;
 
             // GraphicsSettings exposes no scripting API for this list; it is edited
             // through the serialized settings asset, the same object the Graphics
@@ -191,7 +199,10 @@ namespace UniverseCreator.Editor.Diagnostics
             int added = 0;
             for (int n = 0; n < names.Length; n++)
             {
-                Shader shader = Shader.Find(names[n]);
+                // Resolve rather than Shader.Find: the ripple shader is Hidden/,
+                // which Shader.Find does not reliably return in batch mode, and a
+                // null here silently skips the shader it was meant to protect.
+                Shader shader = UCShaderDiagnostics.Resolve(names[n]);
                 if (shader == null) continue;
 
                 bool present = false;
@@ -225,6 +236,226 @@ namespace UniverseCreator.Editor.Diagnostics
             int n = EnsureAlwaysIncludedShaders();
             Debug.Log("[UC] Always-included UC shaders newly added: " + n +
                       " (0 means they were already listed).");
+        }
+
+        /// <summary>True when the renderer already carries a URP SSAO feature.</summary>
+        public static bool HasAmbientOcclusion(UniversalRendererData renderer)
+        {
+            if (renderer == null || renderer.rendererFeatures == null) return false;
+            for (int i = 0; i < renderer.rendererFeatures.Count; i++)
+            {
+                var f = renderer.rendererFeatures[i];
+                if (f != null && f.GetType().Name == "ScreenSpaceAmbientOcclusion") return true;
+            }
+            return false;
+        }
+
+        // The SSAO settings this module chooses. Per-tier dialing (radius/intensity/
+        // samples scaled by device class) is applied at runtime by LightingTier, which
+        // reaches the live feature's settings; these are the baseline written at setup.
+        private const float AoIntensity = 1.1f;
+        private const float AoRadius = 0.30f;
+        private const int AoSampleCount = 8;
+
+        /// <summary>
+        /// Ensures the renderer carries exactly one URP Screen Space Ambient Occlusion
+        /// feature and writes this module's baseline settings onto it. Idempotent: an
+        /// existing feature is reused and re-tuned, never duplicated. Every step is
+        /// guarded - a URP whose SSAO type or serialized layout differs degrades to a
+        /// warning line, never a throw, so setup never takes the runtime menu with it.
+        /// </summary>
+        public static void ConfigureAmbientOcclusion(UniversalRendererData renderer, System.Text.StringBuilder log)
+        {
+            if (renderer == null) { log.AppendLine("SSAO: no renderer to configure"); return; }
+
+            System.Type aoType = System.Type.GetType(
+                "UnityEngine.Rendering.Universal.ScreenSpaceAmbientOcclusion, Unity.RenderPipelines.Universal.Runtime");
+            if (aoType == null) { log.AppendLine("SSAO: URP SSAO type not found (skipped)"); return; }
+
+            try
+            {
+                ScriptableRendererFeature feature = FindOrAddFeature(renderer, aoType, log);
+                if (feature == null) { log.AppendLine("SSAO: feature could not be created"); return; }
+
+                // Settings live in the feature's private m_Settings; edit by serialized
+                // path so a renamed field simply no-ops rather than failing to compile.
+                var fso = new SerializedObject(feature);
+                SetFloat(fso, "m_Settings.Intensity", AoIntensity);
+                SetFloat(fso, "m_Settings.Radius", AoRadius);
+                SetInt(fso, "m_Settings.Samples", AoSampleCount);
+                SetBool(fso, "m_Settings.Downsample", true);
+                fso.ApplyModifiedPropertiesWithoutUndo();
+                EditorUtility.SetDirty(feature);
+                EditorUtility.SetDirty(renderer);
+                AssetDatabase.SaveAssets();
+            }
+            catch (System.Exception e)
+            {
+                log.AppendLine("SSAO: configuration failed (" + e.Message + ")");
+            }
+        }
+
+        // Return the renderer's SSAO feature, adding one as a sub-asset if none exists.
+        // The feature list and its id map are two serialized arrays that must grow
+        // together, or URP flags the renderer out of sync.
+        private static ScriptableRendererFeature FindOrAddFeature(
+            UniversalRendererData renderer, System.Type aoType, System.Text.StringBuilder log)
+        {
+            for (int i = 0; i < renderer.rendererFeatures.Count; i++)
+            {
+                var f = renderer.rendererFeatures[i];
+                if (f != null && aoType.IsInstanceOfType(f)) { log.AppendLine("SSAO: reused existing feature"); return f; }
+            }
+
+            var feature = (ScriptableRendererFeature)ScriptableObject.CreateInstance(aoType);
+            feature.name = "UC Ambient Occlusion";
+            AssetDatabase.AddObjectToAsset(feature, renderer);
+
+            var so = new SerializedObject(renderer);
+            SerializedProperty list = so.FindProperty("m_RendererFeatures");
+            SerializedProperty map = so.FindProperty("m_RendererFeatureMap");
+            if (list == null || map == null) { log.AppendLine("SSAO: renderer feature arrays not found"); return feature; }
+
+            int idx = list.arraySize;
+            list.InsertArrayElementAtIndex(idx);
+            list.GetArrayElementAtIndex(idx).objectReferenceValue = feature;
+            map.InsertArrayElementAtIndex(idx);
+            // URP keys each feature by the sub-asset's local file id (see
+            // ScriptableRendererData.UpdateMap), not an instance id - that is the value this
+            // map column holds, and it is the one that survives a reload where an instance id
+            // would not. Resolve it the same way URP does; leave the slot 0 if it cannot be.
+            if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(feature, out string _, out long localId))
+                map.GetArrayElementAtIndex(idx).longValue = localId;
+            so.ApplyModifiedPropertiesWithoutUndo();
+            log.AppendLine("SSAO: added URP SSAO feature to the renderer");
+            return feature;
+        }
+
+        private static void SetFloat(SerializedObject so, string path, float v)
+        { var p = so.FindProperty(path); if (p != null) p.floatValue = v; }
+        private static void SetInt(SerializedObject so, string path, int v)
+        { var p = so.FindProperty(path); if (p != null) p.intValue = v; }
+        private static void SetBool(SerializedObject so, string path, bool v)
+        { var p = so.FindProperty(path); if (p != null) p.boolValue = v; }
+        private static void SetVector2(SerializedObject so, string path, Vector2 v)
+        { var p = so.FindProperty(path); if (p != null) p.vector2Value = v; }
+
+        // ---- Shadow policy (S-55): one authored table, applied to the URP asset --------
+        // The per-tier numbers live in LightingTier (§ 8.11), NOT here - this method only
+        // APPLIES them, so there is a single source of truth for cascade count, distance,
+        // atlas size and soft-shadow level, and no second copy to drift. Cascade split
+        // fractions are derived from the count (2 -> 0.15/1.0, 3 -> 0.08/0.25/1.0), the
+        // even-ish log split that keeps the near cascade tight without wasting the far one.
+        public static bool ConfigureShadowPolicy(
+            UniversalRenderPipelineAsset asset,
+            UniverseCreator.TerrainSystem.Lighting.LightingTierSettings s,
+            System.Text.StringBuilder log,
+            bool overwriteAuthorEdits = true)
+        {
+            if (asset == null) { if (log != null) log.AppendLine("Shadows: no URP asset"); return false; }
+
+            // S-58: this module configures a pipeline it did not author (§ 2.2). When asked
+            // not to overwrite, diff first and, if the asset's shadow block already differs
+            // from what this preset would write, name every changed row and write NOTHING -
+            // the author's asset survives the preset change untouched.
+            if (!overwriteAuthorEdits)
+            {
+                int pending = PreviewShadowChanges(asset, s, log);
+                if (pending > 0)
+                {
+                    if (log != null)
+                        log.AppendLine("Shadows: " + pending + " author-edited shadow setting(s) left intact " +
+                                       "(preset NOT applied); nothing outside the shadow block was touched");
+                    return false;
+                }
+            }
+
+            var so = new SerializedObject(asset);
+            SetFloat(so, "m_ShadowDistance", s.shadowDistance);
+            SetInt(so, "m_ShadowCascadeCount", s.cascadeCount);
+            if (s.cascadeCount <= 2)
+                SetFloat(so, "m_Cascade2Split", 0.15f);
+            else
+                SetVector2(so, "m_Cascade3Split", new Vector2(0.08f, 0.25f));
+            SetInt(so, "m_MainLightShadowmapResolution", s.shadowAtlasResolution);
+
+            // Shadow bias (S-57). One depth+normal pair on the asset; URP scales it per
+            // cascade by texel world size at runtime, so this base is authored to the tier's
+            // texel coarseness. Normal bias is the grazing-angle terrain acne fix.
+            SetFloat(so, "m_ShadowDepthBias", s.shadowDepthBias);
+            SetFloat(so, "m_ShadowNormalBias", s.shadowNormalBias);
+
+            bool soft = s.softShadows != UniverseCreator.TerrainSystem.Lighting.SoftShadowLevel.Off;
+            SetBool(so, "m_SoftShadowsSupported", soft);
+            // Soft-shadow quality is an int enum on the asset (Low/Medium/High). No-ops on
+            // URP versions that do not expose it, leaving the bool toggle as the control.
+            SetInt(so, "m_SoftShadowQuality", (int)s.softShadows);
+
+            so.ApplyModifiedPropertiesWithoutUndo();
+            EditorUtility.SetDirty(asset);
+            if (log != null)
+                log.AppendLine("Shadows: " + s.cascadeCount + " cascades @ " +
+                               (int)s.shadowDistance + " m, atlas " + s.shadowAtlasResolution +
+                               ", soft " + s.softShadows +
+                               ", bias " + s.shadowDepthBias + "/" + s.shadowNormalBias);
+            return true;
+        }
+
+        // S-58: compare-only. Appends one "WARNING would change <row>: current -> proposed"
+        // line per shadow field whose current asset value differs from what the preset would
+        // write, and returns how many differ. Touches nothing: it never calls Apply, so the
+        // author's asset is unchanged whether or not the caller goes on to write.
+        public static int PreviewShadowChanges(
+            UniversalRenderPipelineAsset asset,
+            UniverseCreator.TerrainSystem.Lighting.LightingTierSettings s,
+            System.Text.StringBuilder log)
+        {
+            if (asset == null) return 0;
+            var so = new SerializedObject(asset);
+            int n = 0;
+            n += DiffFloat(so, "m_ShadowDistance", s.shadowDistance, "shadow distance", log);
+            n += DiffInt(so, "m_ShadowCascadeCount", s.cascadeCount, "cascade count", log);
+            n += DiffInt(so, "m_MainLightShadowmapResolution", s.shadowAtlasResolution, "shadow atlas", log);
+            n += DiffFloat(so, "m_ShadowDepthBias", s.shadowDepthBias, "shadow depth bias", log);
+            n += DiffFloat(so, "m_ShadowNormalBias", s.shadowNormalBias, "shadow normal bias", log);
+            n += DiffBool(so, "m_SoftShadowsSupported",
+                          s.softShadows != UniverseCreator.TerrainSystem.Lighting.SoftShadowLevel.Off,
+                          "soft shadows", log);
+            return n;
+        }
+
+        private static int DiffFloat(SerializedObject so, string path, float proposed, string label, System.Text.StringBuilder log)
+        {
+            var p = so.FindProperty(path);
+            if (p == null || Mathf.Approximately(p.floatValue, proposed)) return 0;
+            if (log != null) log.AppendLine("  WARNING would change " + label + ": " + p.floatValue + " -> " + proposed);
+            return 1;
+        }
+
+        private static int DiffInt(SerializedObject so, string path, int proposed, string label, System.Text.StringBuilder log)
+        {
+            var p = so.FindProperty(path);
+            if (p == null || p.intValue == proposed) return 0;
+            if (log != null) log.AppendLine("  WARNING would change " + label + ": " + p.intValue + " -> " + proposed);
+            return 1;
+        }
+
+        private static int DiffBool(SerializedObject so, string path, bool proposed, string label, System.Text.StringBuilder log)
+        {
+            var p = so.FindProperty(path);
+            if (p == null || p.boolValue == proposed) return 0;
+            if (log != null) log.AppendLine("  WARNING would change " + label + ": " + p.boolValue + " -> " + proposed);
+            return 1;
+        }
+
+        /// <summary>Resolve the tier's settings and apply the shadow policy to the project
+        /// URP asset. The one call the lighting driver makes when the device tier changes.</summary>
+        public static void ApplyShadowPolicyForTier(
+            UniverseCreator.Optimization.AdaptiveQuality.QualityTier tier, System.Text.StringBuilder log)
+        {
+            var asset = AssetDatabase.LoadAssetAtPath<UniversalRenderPipelineAsset>(PipelinePath);
+            var s = UniverseCreator.TerrainSystem.Lighting.LightingTier.Resolve(tier);
+            ConfigureShadowPolicy(asset, s, log);
         }
 
         /// <summary>True when URP is the active pipeline. Used by the self-test.</summary>

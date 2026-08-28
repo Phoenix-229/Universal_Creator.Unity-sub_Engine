@@ -387,16 +387,20 @@ namespace UniverseCreator.Editor
             // Module 3. Live: this drives both hand-placed and graph-built water.
             MakeChild(root, "WaterSystem").AddComponent<UCWaterSystemManager>();
 
-            // Module 4. Declared only - the fields describe the module to come.
+            // Module 3. Live: this resolves the world's climate, site geometry and
+            // density budget into the snapshot the scatter pass places from.
             MakeChild(root, "VegetationSystem").AddComponent<UCVegetationSystemManager>();
 
-            // Module 5. Wind is live here; the rest of weather is declared only.
+            // Module 3. Live: wind, and the climate and season half of the world
+            // clock that vegetation reads its temperature and rainfall from.
             // Placed above the terrain at Y=500 as requested, so the WindZone icon doesn't end up underground.
             GameObject weatherSystem = MakeChild(root, "WeatherSystem");
             weatherSystem.transform.localPosition = new Vector3(0f, 500f, 0f);
             weatherSystem.AddComponent<UCWeatherSystemManager>();
 
-            // Module 5. Declared only.
+            // Module 3. Live: Time of Day, which owns the day half of the world
+            // clock and the latitude and tilt that solar position follows from.
+            // The sun rig, ambient, shadow and atmosphere groups are declared only.
             MakeChild(root, "LightingSystem").AddComponent<UCLightingSystemManager>();
 
             GameObject chunkManager = MakeChild(root, "ChunkManager");
@@ -456,10 +460,39 @@ namespace UniverseCreator.Editor
             WorldSettingsWindow.OpenWindow();
         }
 
+        [MenuItem("Window/Universe Creator/Lighting Day Cycle", false, 2003)]
+        private static void OpenLightingDayCycleWindow()
+        {
+            LightingDayCycleWindow.OpenWindow();
+        }
+
+        [MenuItem("Window/Universe Creator/Geometry Debug", false, 2004)]
+        private static void OpenGeometryDebugWindow()
+        {
+            GeometryDebugWindow.OpenWindow();
+        }
+
         [MenuItem("Window/Universe Creator/About", false, 2020)]
         private static void OpenAboutWindow()
         {
             AboutWindow.OpenWindow();
+        }
+
+        // =====================================================================
+        //  IMPOSTOR BAKING
+        // =====================================================================
+
+        [MenuItem("Tools/Universe Creator/Bake Impostor (Selection)", false, 910)]
+        private static void BakeImpostorForSelection()
+        {
+            var go = Selection.activeGameObject;
+            UniverseCreator.Editor.Baking.ImpostorBaker.Enqueue(go, go != null ? go.name : "");
+        }
+
+        [MenuItem("Tools/Universe Creator/Bake Impostor (Selection)", true)]
+        private static bool BakeImpostorForSelectionValidate()
+        {
+            return Selection.activeGameObject != null;
         }
 
         // =====================================================================

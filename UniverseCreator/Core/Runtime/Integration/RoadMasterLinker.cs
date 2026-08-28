@@ -176,8 +176,13 @@ namespace UniverseCreator.Integration
         public void NotifyCutRegion(Bounds worldBounds)
         {
             // Module 1 has nothing to pre-load: the whole continent is resident and
-            // only its LOD varies. Kept as a real no-op so Module 7 can call it
-            // unconditionally; TerrainHealer will hook in here.
+            // only its LOD varies, so there is still no terrain work to do here.
+            //
+            // What there is now is vegetation work (V-23). A road cut is a fact about
+            // the world that the road system is the only one who knows, and recording
+            // it is what lets the next scatter bake keep trees off the carriageway.
+            // TerrainHealer will hook in alongside this.
+            UniverseCreator.Ecology.CutRegionRegistry.Shared.Add(worldBounds);
         }
 
         public int RequestTunnelOpening(Bounds worldBounds)

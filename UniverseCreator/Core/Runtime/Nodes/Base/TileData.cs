@@ -68,6 +68,18 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public OutputBag outputs = new OutputBag();
 
+        /// <summary>
+        /// Ecology snapshot for this chunk: sample settings, a bound environment
+        /// sampler, and the species tables scatter nodes choose from. Built on the
+        /// main thread before evaluation because a worker must never read the
+        /// vegetation manager, and read-only from then on.
+        ///
+        /// Null is a valid and common state - it means this graph was evaluated
+        /// without ecology, and every node must then behave exactly as it did
+        /// before Module 3 rather than placing nothing.
+        /// </summary>
+        public Ecology.EcoScatterContext ecology;
+
         // Set by GraphEvaluator.Evaluate before any node runs. Nodes reach it
         // indirectly through Generator.GetInputMatrix; they never touch it directly.
         private GraphEvaluator evaluator;
@@ -170,12 +182,36 @@ namespace UniverseCreator.Nodes
         public Vector3 scale;
         public int prototypeIndex;    // index into the node's prototype list
 
+        /// <summary>
+        /// 0-1 how well this site suited the species that took it, or 0 when nothing
+        /// scored it. Carried on the instance because the budgets downstream have to
+        /// drop instances, and dropping by iteration order means the retained set
+        /// changes whenever the emission order does - which is what makes a rebuild
+        /// move colliders around for no reason the author can see (V-34).
+        ///
+        /// Zero reads as unscored rather than as worthless: a graph that places props
+        /// geometrically has no suitability to report, and the budget must not treat
+        /// that as "least fit" and evict all of it.
+        /// </summary>
+        public float suitability;
+
         public ScatterInstance(Vector3 position, Quaternion rotation, Vector3 scale, int prototypeIndex)
         {
             this.position = position;
             this.rotation = rotation;
             this.scale = scale;
             this.prototypeIndex = prototypeIndex;
+            this.suitability = 0f;
+        }
+
+        public ScatterInstance(Vector3 position, Quaternion rotation, Vector3 scale,
+                               int prototypeIndex, float suitability)
+        {
+            this.position = position;
+            this.rotation = rotation;
+            this.scale = scale;
+            this.prototypeIndex = prototypeIndex;
+            this.suitability = suitability;
         }
     }
 
@@ -217,6 +253,18 @@ namespace UniverseCreator.Nodes
         public Dictionary<string, List<ScatterInstance>> scatter =
             new Dictionary<string, List<ScatterInstance>>();
 
+        /// <summary>
+        /// Tally of ecology-admitted scatter placements per <see cref="Ecology.LandformZone"/>,
+        /// accumulated by species assignment as it keeps each instance. It counts what
+        /// the ecology model ADMITTED, before the render budget thins a crowded chunk,
+        /// and only the discrete channels that pass through species assignment - trees,
+        /// shrubs, objects, underwater. Grass is not here on purpose: it is a rasterised
+        /// density grid, never a per-site species decision, so it has no zone to tally.
+        /// The applier flushes this to the vegetation manager's registry (V-52) so the
+        /// diagnostics panel can show where a world's planting actually landed.
+        /// </summary>
+        public int[] zoneHistogram = new int[Ecology.LandformAssemblage.ZoneCount];
+
         /// <summary>Meshes to construct on the main thread, keyed by channel name.</summary>
         public Dictionary<string, MeshBuildData> meshes =
             new Dictionary<string, MeshBuildData>();
@@ -251,6 +299,95 @@ namespace UniverseCreator.Nodes
 
         /// <summary>World XZ extent the sway map covers, in metres.</summary>
         public Vector2 windSwayWorldSize;
+
+        // ---- weather ---------------------------------------------------------
+        //
+        //  Written by Weather Output, read by the weather driver as biases on the
+        //  climate the physics already computed - added or scaled onto it, never a
+        //  replacement for it. Null on a graph with no weather branch, and the driver
+        //  reads a null field as "no bias here", so a world that wires none behaves
+        //  exactly as one with no weather output. All eight share the one sample grid.
+
+        /// <summary>Precipitation bias field, row-major, or null.</summary>
+        public float[] weatherPrecipBias;
+
+        /// <summary>Temperature bias field, same layout, or null.</summary>
+        public float[] weatherTemperatureBias;
+
+        /// <summary>Wind bias field, same layout, or null.</summary>
+        public float[] weatherWindBias;
+
+        /// <summary>Fog bias field, same layout, or null.</summary>
+        public float[] weatherFogBias;
+
+        /// <summary>Cloud bias field, same layout, or null.</summary>
+        public float[] weatherCloudBias;
+
+        /// <summary>Snow bias field, same layout, or null.</summary>
+        public float[] weatherSnowBias;
+
+        /// <summary>Storm bias field, same layout, or null.</summary>
+        public float[] weatherStormBias;
+
+        /// <summary>Turbidity bias field, same layout, or null.</summary>
+        public float[] weatherTurbidityBias;
+
+        /// <summary>Sample dimensions of the bias fields.</summary>
+        public Vector2Int weatherBiasSize;
+
+        /// <summary>World XZ of the bias grid's minimum corner, in metres.</summary>
+        public Vector2 weatherBiasWorldMin;
+
+        /// <summary>World XZ extent the bias grid covers, in metres.</summary>
+        public Vector2 weatherBiasWorldSize;
+
+        // ---- lighting biases (§ 8.12) ---------------------------------------
+        //
+        //  Written by Lighting Output, read by the lighting driver as biases on the
+        //  physically-based sky the atmosphere model already produced - a graph may
+        //  push one region's air hazier or its sky warmer, but it never decouples the
+        //  sky from the sun's position. Null on a graph with no lighting branch, read
+        //  as "no bias here", so a world that wires none behaves exactly as one with no
+        //  lighting output. The first three keep the retired M4 § 4.7 names so a saved
+        //  graph reconnects; the last two are appended. All five share one sample grid.
+
+        /// <summary>Sky tint bias field, row-major, or null.</summary>
+        public float[] lightingSkyTintBias;
+
+        /// <summary>Ambient scale bias field, same layout, or null.</summary>
+        public float[] lightingAmbientScaleBias;
+
+        /// <summary>Turbidity bias field, same layout, or null.</summary>
+        public float[] lightingTurbidityBias;
+
+        /// <summary>Cloud-cover bias field, same layout, or null.</summary>
+        public float[] lightingCloudCoverBias;
+
+        /// <summary>Exposure bias field, same layout, or null.</summary>
+        public float[] lightingExposureBias;
+
+        /// <summary>Sample dimensions of the lighting bias fields.</summary>
+        public Vector2Int lightingBiasSize;
+
+        /// <summary>World XZ of the lighting bias grid's minimum corner, in metres.</summary>
+        public Vector2 lightingBiasWorldMin;
+
+        /// <summary>World XZ extent the lighting bias grid covers, in metres.</summary>
+        public Vector2 lightingBiasWorldSize;
+
+        // ---- climate normals -------------------------------------------------
+        //
+        //  The chunk's twelve-month climate (W-09), computed once per chunk and
+        //  recorded here so the ecology layer reads the SAME climate the weather
+        //  module derived rather than a second one of its own. Null on a graph with
+        //  no weather branch, and the ecology sampler reads null as "use the resolved
+        //  settings", so a world that never produces normals behaves exactly as it
+        //  did before. A reference, not a copy: ClimateNormals owns six month arrays,
+        //  so sharing the one instance is both cheaper and the only way two readers
+        //  cannot disagree about a month.
+
+        /// <summary>The chunk's climate normals, or null when no weather branch produced them.</summary>
+        public Weather.ClimateNormals climateNormal;
 
         // ---- texture graph (Module 2) ---------------------------------------
         //
@@ -299,6 +436,18 @@ namespace UniverseCreator.Nodes
             else scatter[channel] = new List<ScatterInstance>(instances);
         }
 
+        /// <summary>
+        /// Records one kept instance against its landform zone. Called by species
+        /// assignment for the survivor of each site, so the tally follows the same
+        /// admit/reject decision the world was built from. Out-of-range ids are
+        /// ignored rather than throwing: a zone the classifier cannot return is a
+        /// bug to find in the classifier, not a reason to lose a whole chunk's build.
+        /// </summary>
+        public void AddZone(int zone)
+        {
+            if ((uint)zone < (uint)zoneHistogram.Length) zoneHistogram[zone]++;
+        }
+
         public void Clear()
         {
             heightmap = null;
@@ -315,6 +464,7 @@ namespace UniverseCreator.Nodes
             scatter.Clear();
             meshes.Clear();
             previews.Clear();
+            Array.Clear(zoneHistogram, 0, zoneHistogram.Length);
 
             // Wind. A recycled bag whose graph has no wind branch would otherwise
             // keep the previous chunk's sway map and stamp it over ground that was
@@ -324,6 +474,37 @@ namespace UniverseCreator.Nodes
             windSwaySize = Vector2Int.zero;
             windSwayWorldMin = Vector2.zero;
             windSwayWorldSize = Vector2.zero;
+
+            // Weather. Same reason as the wind maps: a recycled bag must not carry one
+            // chunk's authored biases onto the next, or a painted wet coast would smear
+            // inland across ground the author never touched.
+            weatherPrecipBias = null;
+            weatherTemperatureBias = null;
+            weatherWindBias = null;
+            weatherFogBias = null;
+            weatherCloudBias = null;
+            weatherSnowBias = null;
+            weatherStormBias = null;
+            weatherTurbidityBias = null;
+            weatherBiasSize = Vector2Int.zero;
+            weatherBiasWorldMin = Vector2.zero;
+            weatherBiasWorldSize = Vector2.zero;
+
+            // Lighting. Same reason: a recycled bag must not carry one chunk's authored
+            // sky/air biases onto the next, or a painted patch of hazy air would drift
+            // across ground the author never touched.
+            lightingSkyTintBias = null;
+            lightingAmbientScaleBias = null;
+            lightingTurbidityBias = null;
+            lightingCloudCoverBias = null;
+            lightingExposureBias = null;
+            lightingBiasSize = Vector2Int.zero;
+            lightingBiasWorldMin = Vector2.zero;
+            lightingBiasWorldSize = Vector2.zero;
+
+            // Climate normals. A recycled bag must not hand the next chunk the last
+            // chunk's year, or a valley's climate would be read on the ridge above it.
+            climateNormal = null;
         }
     }
 }

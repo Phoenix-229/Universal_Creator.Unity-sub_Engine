@@ -36,6 +36,13 @@ namespace UniverseCreator.Nodes.Scatter
         /// <summary>Bias placement toward hollows where debris naturally collects.</summary>
         public bool preferCavities = true;
 
+        /// <summary>
+        /// Which prototype represents each DebrisKind, indexed by the enum; -1 means
+        /// unbound and nothing is placed for that kind. Asset binding, not placement
+        /// authoring - see DebrisShaping.
+        /// </summary>
+        public int[] debrisPrototypes;
+
         protected override List<ScatterCandidate> SolvePlacement(
             Matrix height, Matrix mask, TileData tile, StopToken stop)
         {
@@ -70,8 +77,23 @@ namespace UniverseCreator.Nodes.Scatter
         protected override void PlaceInstances(Matrix height, Matrix mask, TileData tile,
                                                List<ScatterInstance> instances, StopToken stop)
         {
-            // Placement, clumping, and cavity bias are all resolved before this
-            // point. Debris carries no further per-type rules.
+            if (instances.Count == 0) return;
+
+            // V-44. Cavity bias above says where litter COLLECTS; the deposit model
+            // says whether any arrived and what it is - deadfall under a canopy,
+            // driftwood at the strandline, frost rubble on level ground above the
+            // frost line. The two are complementary rather than redundant: the mask
+            // shapes the dart field, this grades and orients what the darts became.
+            //
+            // Nothing is removed to make room for it, because this method had no body
+            // before: clumping and cavity bias were, and still are, resolved upstream.
+            DebrisShaping.Apply(tile, height, seed, instances,
+                                HasBinding() ? debrisPrototypes : null, stop);
+        }
+
+        private bool HasBinding()
+        {
+            return debrisPrototypes != null && debrisPrototypes.Length > 0;
         }
     }
 }

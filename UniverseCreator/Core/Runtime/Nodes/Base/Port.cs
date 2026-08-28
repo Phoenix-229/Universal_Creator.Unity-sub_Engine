@@ -157,6 +157,24 @@ namespace UniverseCreator.Nodes
             new Port("Mask",   PortType.Matrix, PortDirection.Input)
         };
 
+        // A third slot for the scatter nodes, and a separate array rather than a
+        // third entry in HeightMaskIn because the filter nodes share that one and
+        // would grow a Biome socket they cannot read. The Biome port is optional: a
+        // graph that leaves it unwired scatters exactly as it did before, since an
+        // absent classification withdraws every species' biome preference.
+        //
+        // Wired as a port instead of taken from the tile, because a port is what
+        // makes the classifier a dependency of the scatter node. The evaluator walks
+        // inputs to decide what to run first, so the biome field is guaranteed built
+        // before anything reads it - where a shared side-channel would work or not
+        // depending on the order nodes happen to sit in the list.
+        public static readonly Port[] HeightMaskBiomeIn =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            new Port("Mask",   PortType.Matrix, PortDirection.Input),
+            new Port("Biome",  PortType.Matrix, PortDirection.Input)
+        };
+
         public static readonly Port[] TwoHeightIn =
         {
             new Port("A", PortType.Matrix, PortDirection.Input),

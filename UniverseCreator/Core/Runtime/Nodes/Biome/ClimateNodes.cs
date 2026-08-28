@@ -455,7 +455,14 @@ namespace UniverseCreator.Nodes.Biome
             return dst;
         }
 
-        private static int Classify(float celsius, float rainMm)
+        /// <summary>
+        /// The per-pixel approximation: one annual mean and one annual total, which
+        /// is all a matrix element carries. Public so the diagnostic classifier that
+        /// works from a full year of monthly normals can be checked against it -
+        /// where both have enough information to be sure, the two must agree, and an
+        /// assertion that they do is what stops the pair drifting apart.
+        /// </summary>
+        public static int Classify(float celsius, float rainMm)
         {
             // Polar: the warmest month never gets above 10 C.
             if (celsius < 0f) return (int)KoeppenClass.Polar;

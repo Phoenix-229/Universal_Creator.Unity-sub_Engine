@@ -196,7 +196,18 @@ Shader "UniverseCreator/TerrainLit"
     }
 
     HLSLINCLUDE
-    #pragma multi_compile_fragment __ _ALPHATEST_ON
+    // Terrain hole clipping, declared ONCE for every pass in this shader.
+    //
+    // It was previously declared twice: globally here as multi_compile_fragment
+    // and again inside the forward pass as multi_compile_local_fragment. Unity
+    // refuses a keyword that is both global and local in one shader, which is
+    // what made this file fail to compile.
+    //
+    // shader_feature rather than multi_compile is deliberate: it lets the build
+    // drop the hole-clipping variant entirely when no terrain in the project has
+    // painted holes, instead of always shipping both. That is a smaller shader
+    // and less GPU memory on a mid-range phone, for no loss of function.
+    #pragma shader_feature_local_fragment _ALPHATEST_ON
     ENDHLSL
 
     SubShader
@@ -262,23 +273,46 @@ Shader "UniverseCreator/TerrainLit"
             #pragma multi_compile_fragment _ _WRITE_RENDERING_LAYERS
 
             // ---- terrain ----
-            #pragma multi_compile_local_fragment __ _ALPHATEST_ON
             #pragma multi_compile_fragment __ _TERRAIN_INSTANCED_PERPIXEL_NORMAL
             #pragma multi_compile_instancing
             #pragma instancing_options assumeuniformscaling nomatrices nolightprobe nolightmap
 
-            // ---- UC features. multi_compile_local keeps these out of the
-            //      global keyword budget, which is a hard 256 per project.
+            // ---- UC features. _local keeps these out of the global keyword
+            //      budget, which is a hard 256 per project.
             //
-            //      Only two. Each of these costs six extra texture fetches,
-            //      which a uniform branch cannot avoid paying for in register
-            //      pressure even when the branch is not taken. Height blend,
-            //      macro variation, distance fade, detail, gradient, mud,
-            //      wetness, AO and emission are all uniform branches instead:
-            //      arithmetic-only or a single fetch, and each keyword added
-            //      here would double the variant count for the whole shader. ----
-            #pragma multi_compile_local_fragment __ _UC_SLOPEBLEND_ON
-            #pragma multi_compile_local_fragment __ _UC_SNOW_ON
+            //      These were previously two multi_compile keywords (slope, snow)
+            //      plus seven uniform branches, on the reasoning that a keyword
+            //      "would double the variant count for the whole shader" and that
+            //      a one-fetch feature is not worth one. That reasoning was sound
+            //      but incomplete: a uniform branch still BINDS its texture, so
+            //      the five optional maps below counted against the per-pass
+            //      texture-unit limit even when switched off. The shader reported
+            //      "19 texture parameters, more than the 16 supported", which on a
+            //      device that really exposes 16 fragment units is a hard failure,
+            //      not a slow path. Gating them takes this pass to 14.
+            //
+            //      shader_feature, not multi_compile, is what makes that free:
+            //      multi_compile ships every combination (7 keywords = 128
+            //      variants), while shader_feature ships only the combinations
+            //      actually present on material assets at build time - normally a
+            //      handful. So the variant-doubling objection does not apply, and
+            //      it is also why slope and snow moved onto it: one mechanism for
+            //      one job, matching the _ALPHATEST_ON policy documented above.
+            //
+            //      This is safe here only because UC terrain materials are real
+            //      saved assets - UCTextureGraphApplier calls AssetDatabase
+            //      .CreateAsset and then UCTerrainShaderGUI.SyncAllKeywords, so
+            //      the enabled keywords are serialised into the .mat for Unity's
+            //      build-time scan to find. No runtime code enables these. A
+            //      material built at run time with one of these features on would
+            //      need its variant kept alive by a ShaderVariantCollection. ----
+            #pragma shader_feature_local_fragment __ _UC_SLOPEBLEND_ON
+            #pragma shader_feature_local_fragment __ _UC_SNOW_ON
+            #pragma shader_feature_local_fragment __ _UC_GRADIENT_ON
+            #pragma shader_feature_local_fragment __ _UC_MUD_ON
+            #pragma shader_feature_local_fragment __ _UC_DETAIL_ON
+            #pragma shader_feature_local_fragment __ _UC_AOMAP_ON
+            #pragma shader_feature_local_fragment __ _UC_EMISSION_ON
 
             #include "UC_TerrainLitInput.hlsl"
             #include "UC_TerrainLitPasses.hlsl"

@@ -209,6 +209,12 @@ namespace UniverseCreator.TerrainSystem
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
 
+        // Cells whose stitch weld has already reported a neighbour resolution mismatch.
+        // The weld re-runs on every pump, so an unguarded log would repeat the same
+        // mismatch dozens of times before the cell reclassifies; keying the warning to
+        // the offending cell coordinate states it exactly once.
+        private readonly HashSet<Coord> stitchMismatchWarned = new HashSet<Coord>();
+
         // Set whenever something invalidates the welded state - a queued bake, a
         // resolution change, a world-size change - and cleared by the settle stitch
         // PumpCompleted runs once the queue drains. Without it a run whose last cell
@@ -222,7 +228,43 @@ namespace UniverseCreator.TerrainSystem
         // can only find the real low ground, once the heights actually exist.
         private System.Action pendingAfterSettle;
 
-        public bool IsGenerating 
+        // The per-cell hysteresis gate on the heightmap pixel error (L-49/L-50). Owns
+        // the decision of WHEN to write Terrain.heightmapPixelError - the maths of the
+        // value itself lives in Geometry.AngularError. Assigning that property rebuilds
+        // the patch LOD tree, so the gate skips writes that have not crossed the
+        // hysteresis band, which is what lets a still view settle to zero writes.
+        private readonly Geometry.TerrainDensityController _density = new Geometry.TerrainDensityController();
+
+        // ---- ECOLOGY SNAPSHOT -------------------------------------------------
+        //
+        //  The species tables and sample settings every cell of the current rebuild
+        //  scores its vegetation against. Resolved once and then shared, for two
+        //  separate reasons.
+        //
+        //  Cost is the lesser one: BuildFor walks the hierarchy for the vegetation
+        //  manager and asks it to resolve its settings, and a 15x15 world would pay
+        //  that 225 times over for an answer that cannot differ between cells.
+        //
+        //  Agreement is the real one. ResolveSettings reads the season phase live, so
+        //  resolving per cell would let the tables shift mid-bake if the clock moved
+        //  between two dispatches - the far side of the world scored against a later
+        //  season than the near side, with a species boundary running down the middle.
+        //  Species identity is not a seasonal property: a spruce does not become a
+        //  birch in autumn. One snapshot per rebuild is what makes the whole world
+        //  agree about what grows where.
+        //
+        //  Null after resolution is the ordinary answer - the world has not switched
+        //  ecology on - which is why the flag is separate: without it that null would
+        //  be re-derived for every cell.
+        //
+        //  Dropped when the world is rebuilt or rebound, and at no other time. A
+        //  streaming cell that arrives later is deliberately scored against the same
+        //  snapshot its neighbours were, because that is what stops a cell loaded at
+        //  dusk from growing a different forest than the one beside it.
+        private Ecology.EcoScatterContext bakeEcology;
+        private bool bakeEcologyResolved;
+
+        public bool IsGenerating
         { 
             get 
             { 
@@ -236,6 +278,16 @@ namespace UniverseCreator.TerrainSystem
             } 
         }
         public bool IsRebuildingAll { get; private set; }
+
+        /// <summary>
+        /// Terrain pixel-error writes performed in the last density pass (G-04 done-when):
+        /// a camera holding still crosses no hysteresis band and so reads zero here. Exposed
+        /// for the debug HUD to prove the still-camera guarantee rather than assert it.
+        /// </summary>
+        public int DensityWritesThisFrame => _density.WritesThisFrame;
+
+        /// <summary>Terrain pixel-error writes over this manager's lifetime.</summary>
+        public int DensityWritesTotal => _density.WritesTotal;
 
         /// <summary>
         /// Whether this world owes the main thread anything at all. False means the pump
@@ -372,6 +424,11 @@ namespace UniverseCreator.TerrainSystem
         public void Initialize(UniverseCreatorObject owner)
         {
             this.owner = owner;
+
+            // A different world means different species, so the snapshot taken for the
+            // previous one is not merely stale - it belongs to another terrain.
+            bakeEcology = null;
+            bakeEcologyResolved = false;
         }
 
         private UniverseCreatorObject Owner
@@ -435,6 +492,25 @@ namespace UniverseCreator.TerrainSystem
             nextStreamTime = Time.unscaledTime + interval;
 
             HandleStreaming();
+
+            // Per-view density maintenance (L-49/L-50). HandleStreaming re-runs the LOD
+            // pass only when the focus cell moves, so on its own a still player who zooms,
+            // resizes the window or changes field of view would keep a stale pixel error.
+            // This tick re-derives every resident cell's acuity budget against the LIVE
+            // view at the stream cadence and lets the hysteresis gate absorb the churn: a
+            // genuinely still view crosses no band and writes nothing, so it stays free.
+            //
+            // Play-mode only by construction - it sits past the isPlaying guard at the top
+            // of Update, so the editor never runs whole-world per-frame density math on top
+            // of the full edit-mode render. The one-shot writes at the apply/classify sites
+            // keep the value fresh the instant a cell changes; this only catches view
+            // changes that move no cell.
+            if (owner != null)
+            {
+                _density.BeginFrame();
+                foreach (Chunk c in byCell.Values)
+                    ApplyDensity(owner, c);
+            }
         }
 
         private void OnDisable()
@@ -463,6 +539,23 @@ namespace UniverseCreator.TerrainSystem
 
             IsRebuildingAll = true;
             settleStitchPending = true;
+
+            // A rebuild is the moment the world is allowed to change its mind about
+            // ecology: a committed inspector edit, a new preset, useEcology being
+            // switched on. Dropped rather than re-resolved here, so a world with no
+            // ecology never pays for a lookup and the first cell to dispatch is what
+            // decides whether one happens at all.
+            bakeEcology = null;
+            bakeEcologyResolved = false;
+
+            // The vegetation registry goes with it (V-58). Every cell that survives this
+            // rebuild re-registers as its scatter lands, so emptying the registry here
+            // costs nothing and closes the one case per-chunk release cannot: a cell
+            // whose apply is cancelled mid-rebuild would otherwise keep reporting the
+            // counts it had before the graph changed. The panel reads zero and climbs
+            // back, which is what a rebuild actually looks like.
+            UCVegetationSystemManager rebuildVeg = EnsureVegetationManager();
+            if (rebuildVeg != null) rebuildVeg.ClearRegistry();
 
             // Held across the awaits below. The pump ticks inside them, and without this
             // it would see an empty queue, call the world settled, and close the progress
@@ -679,7 +772,7 @@ namespace UniverseCreator.TerrainSystem
                 c.applied = true;
                 c.workerDone = false;
 
-                c.terrain.heightmapPixelError = DualLODSystem.PixelErrorFor(c.lod, o.pixelError);
+                ApplyDensity(o, c);
             }
 
             // After the window, so every cell that should be up is up: SetNeighbors is
@@ -872,8 +965,10 @@ namespace UniverseCreator.TerrainSystem
 
                 if (c.terrain != null && o.ShouldRenderWholeWorld())
                 {
-                    // This is to explicitly make all chunks render at High Fidelity in Edit Mode.
-                    c.terrain.heightmapPixelError = DualLODSystem.PixelErrorFor(LODLevel.High, o.pixelError);
+                    // Explicitly render every chunk at full fidelity in edit mode:
+                    // ApplyDensity resolves the whole-world preview at zero distance, so the
+                    // acuity budget collapses to its finest uniform value for every cell.
+                    ApplyDensity(o, c);
                 }
 
                 if (i > 0 && i % 4 == 0) await Task.Yield();
@@ -962,18 +1057,44 @@ namespace UniverseCreator.TerrainSystem
 
                 int res = chunk.terrain.terrainData.heightmapResolution;
 
-                Chunk lc, rc, tc, bc;
-                Terrain left   = null, right  = null, top    = null, bottom = null;
-
-                if (byCell.TryGetValue(new Coord(c.x - 1, c.z), out lc) && HasSurface(lc) && lc.terrain.terrainData.heightmapResolution == res) left   = lc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x + 1, c.z), out rc) && HasSurface(rc) && rc.terrain.terrainData.heightmapResolution == res) right  = rc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z + 1), out tc) && HasSurface(tc) && tc.terrain.terrainData.heightmapResolution == res) top    = tc.terrain;
-                if (byCell.TryGetValue(new Coord(c.x, c.z - 1), out bc) && HasSurface(bc) && bc.terrain.terrainData.heightmapResolution == res) bottom = bc.terrain;
+                Terrain left   = ResolveStitchNeighbour(c, new Coord(c.x - 1, c.z), res);
+                Terrain right  = ResolveStitchNeighbour(c, new Coord(c.x + 1, c.z), res);
+                Terrain top    = ResolveStitchNeighbour(c, new Coord(c.x, c.z + 1), res);
+                Terrain bottom = ResolveStitchNeighbour(c, new Coord(c.x, c.z - 1), res);
 
                 chunk.terrain.SetNeighbors(left, top, right, bottom);
                 chunk.terrain.terrainData.SyncHeightmap();
                 chunk.terrain.Flush();
             }
+        }
+
+        /// <summary>
+        /// Resolves one neighbour for the SetNeighbors weld. Returns the neighbour terrain
+        /// only when it holds a real bake at the SAME heightmap resolution; an absent,
+        /// inactive, still-generating or placeholder cell simply yields null and is not
+        /// welded against. A neighbour that HAS a surface but a DIFFERENT resolution is a
+        /// genuine misconfiguration - mixed-resolution cells cannot share an edge - so it
+        /// is reported once per offending cell coordinate. The weld re-runs on every pump,
+        /// so an unguarded log here would repeat the same mismatch dozens of times before
+        /// the cell reclassifies; <see cref="stitchMismatchWarned"/> keys the warning to
+        /// the cell that owns the seam so it is stated exactly once.
+        /// </summary>
+        private Terrain ResolveStitchNeighbour(Coord owner, Coord neighbour, int resolution)
+        {
+            if (!byCell.TryGetValue(neighbour, out Chunk nc) || !HasSurface(nc)) return null;
+
+            int nres = nc.terrain.terrainData.heightmapResolution;
+            if (nres == resolution) return nc.terrain;
+
+            if (stitchMismatchWarned.Add(owner))
+            {
+                Debug.LogWarning(
+                    $"[UniverseCreator] Terrain stitch skipped at cell ({owner.x},{owner.z}): "
+                    + $"neighbour ({neighbour.x},{neighbour.z}) has heightmap resolution {nres} "
+                    + $"but this cell is {resolution}. Mixed-resolution cells cannot share an "
+                    + "edge, so the seam is left unwelded until both settle on the same tier.");
+            }
+            return null;
         }
 
         /// <summary>
@@ -1191,7 +1312,7 @@ namespace UniverseCreator.TerrainSystem
 
             // Park surplus (world shrank) without destroying - recycling contract.
             for (int i = needed; i < pool.Count; i++)
-                if (pool[i].go != null) pool[i].go.SetActive(false);
+                SetChunkLive(pool[i], false);
 
             float cellSize = o.GetChunkSize();
             Vector3 worldMin = WorldMinCorner(o);
@@ -1205,7 +1326,7 @@ namespace UniverseCreator.TerrainSystem
 
                 if (c.go != null)
                 {
-                    c.go.SetActive(true);
+                    SetChunkLive(c, true);
                     c.go.name = "Terrain_" + cx + "_" + cz;
                     c.go.transform.position = worldMin + new Vector3(cx * cellSize, 0f, cz * cellSize);
                 }
@@ -1414,7 +1535,7 @@ namespace UniverseCreator.TerrainSystem
                 bool shouldBeLive = ring <= keepRadius;
                 if (c.go.activeSelf != shouldBeLive)
                 {
-                    c.go.SetActive(shouldBeLive);
+                    SetChunkLive(c, shouldBeLive);
 
                     // Re-linking is only meaningful once the set of live cells settles,
                     // and SetNeighbors on a disabled terrain is rejected.
@@ -1434,7 +1555,7 @@ namespace UniverseCreator.TerrainSystem
                     // crossed a fidelity band never queues a worker at all; only a cell
                     // that has no heights yet does.
                     if (c.terrain != null)
-                        c.terrain.heightmapPixelError = DualLODSystem.PixelErrorFor(next, o.pixelError);
+                        ApplyDensity(o, c);
 
                     if (c.terrain != null)
                     {
@@ -1487,7 +1608,7 @@ namespace UniverseCreator.TerrainSystem
                 // Surplus cells from a shrunk grid stay parked whatever the mode.
                 if (!IsLiveCell(o, c))
                 {
-                    if (c.go.activeSelf) c.go.SetActive(false);
+                    SetChunkLive(c, false);
                     continue;
                 }
 
@@ -1499,7 +1620,7 @@ namespace UniverseCreator.TerrainSystem
                     live = ring <= keepRadius;
                 }
 
-                if (c.go.activeSelf != live) c.go.SetActive(live);
+                SetChunkLive(c, live);
             }
         }
 
@@ -1683,6 +1804,20 @@ namespace UniverseCreator.TerrainSystem
             CoordRect rect = new CoordRect(new Coord(0, 0), new Coord(resolution, resolution));
             Coord cell = c.cell;
 
+            // Resolved here on the main thread for the same reason the nodes are primed
+            // above: it reads the vegetation manager, and through it the lighting and
+            // weather managers, none of which a worker may touch. The cell gets its own
+            // sampler out of it, so two cells baking at once cannot bind each other's
+            // height field. Null when the world runs without ecology, which every
+            // scatter node reads as "place exactly what Modules 1 and 2 placed".
+            //
+            // W-05: measured at the cell's centre, not its south corner, so a cell has
+            // one latitude and the trees inside it do not each get their own - and so
+            // that two neighbouring cells differ by exactly one cell's worth of
+            // latitude rather than sharing an edge value.
+            Ecology.EcoScatterContext ecology = EcologyForCell(
+                o, NorthFractionOf(cellPos.z + cellSize * 0.5f, worldMin.z, fullWorldSize.z));
+
             // Stand-in goes up before the worker starts, so there is never a frame where
             // the chunk is neither previewed nor finished.
             ShowWireframe(o, c);
@@ -1694,6 +1829,7 @@ namespace UniverseCreator.TerrainSystem
                 {
                     TileData tile = new TileData(cell, rect, cellPos, cellSize3, o.maxHeightMeters);
                     tile.SetFullWorld(worldMin, fullWorldSize);
+                    tile.ecology = ecology;
 
                     GraphEvaluator evaluator = new GraphEvaluator(g);
                     evaluator.Evaluate(tile, stop);
@@ -1710,6 +1846,46 @@ namespace UniverseCreator.TerrainSystem
                     c.workerDone = true;
                 }
             });
+        }
+
+        /// <summary>
+        /// This cell's view of the current rebuild's ecology, resolving the rebuild-level
+        /// snapshot on first use. Main thread only.
+        /// </summary>
+        /// <remarks>
+        /// The tables inside the returned context are the shared ones - they are written
+        /// once and read for the rest of the bake - while the sampler is this cell's
+        /// alone. That split is the whole point of ForChunk: sharing the expensive part
+        /// costs nothing, and sharing the sampler would score one cell's forest against
+        /// another cell's mountains.
+        ///
+        /// The rebuild-level snapshot is resolved once and carries the world's authored
+        /// latitude; northFraction01 is what turns it into this cell's latitude, in a
+        /// world that spans latitude. (W-05)
+        /// </remarks>
+        private Ecology.EcoScatterContext EcologyForCell(UniverseCreatorObject o,
+                                                         float northFraction01)
+        {
+            if (!bakeEcologyResolved)
+            {
+                bakeEcology = EcoScatterContextBuilder.BuildFor(o);
+                bakeEcologyResolved = true;
+            }
+
+            return bakeEcology != null ? bakeEcology.ForChunk(northFraction01) : null;
+        }
+
+        /// <summary>
+        /// Where a world Z sits between the world's south edge (0) and north edge (1).
+        ///
+        /// A degenerate world size returns the centre rather than dividing by zero: a
+        /// zero-extent world has no north and no south, and 0.5 leaves it on its
+        /// authored latitude, which is the only defensible answer. (W-05)
+        /// </summary>
+        private static float NorthFractionOf(float worldZ, float worldMinZ, float worldSizeZ)
+        {
+            if (worldSizeZ <= 0f) return 0.5f;
+            return Mathf.Clamp01((worldZ - worldMinZ) / worldSizeZ);
         }
 
         // =====================================================================
@@ -2012,12 +2188,13 @@ namespace UniverseCreator.TerrainSystem
             // streaming LOD cell is constantly.
             TerrainBuilder.EnsureRenderable(c.terrain, o);
 
-            // Fidelity for this cell's ring. This is the whole LOD mechanism now:
-            // every cell keeps the same heightmapResolution (SetNeighbors rejects any
-            // pair that does not) and distance is expressed as tolerated screen-space
-            // error instead. Changing it is free - no re-bake, no reallocation, and no
-            // seam to repair - so a cell can change ring every frame without cost.
-            c.terrain.heightmapPixelError = DualLODSystem.PixelErrorFor(c.lod, o.pixelError);
+            // Fidelity for this cell. The LOD mechanism is now the acuity pixel-error
+            // budget (L-49/L-50), not resolution: every cell keeps the same
+            // heightmapResolution (SetNeighbors rejects any mismatch) and distance is
+            // expressed as tolerated screen-space error instead. Changing it is free - no
+            // re-bake, no reallocation, and no seam to repair - so a cell can change ring
+            // every frame without cost.
+            ApplyDensity(o, c);
 
             // Remember what we just wrote, so a later sculpt can be diffed against it.
             c.appliedHeights = c.tile.outputs.heightmap;
@@ -2025,12 +2202,66 @@ namespace UniverseCreator.TerrainSystem
             // Scatter. Released first: this cell may be a recycled pool object that
             // was standing somewhere else a moment ago, and its old props are still
             // parented to it at their old world positions.
-            ScatterApplier.Release(c.scatterObjects);
+            //
+            // The owner id is derived once and used for three things that must agree:
+            // the GPU instancing owner, the registry entry released here, and the
+            // registry entry opened by Apply below. ScatterOwnerOf is the one place
+            // it is derived, so a release and an apply cannot disagree about which
+            // chunk they mean.
+            int scatterOwner = ScatterOwnerOf(c);
+            UCVegetationSystemManager veg = EnsureVegetationManager();
+
+            ScatterApplier.Release(c.scatterObjects, veg, scatterOwner);
+
+            // Time the apply so the diagnostics panel can show what a rescatter costs
+            // (V-52). Wall clock around the actual main-thread work is the only honest
+            // figure - the registry times nothing itself, on purpose. Reported per
+            // apply and replaced each time, the same grain as the missing-channel
+            // report below.
+            // Where spawned props hang in the hierarchy. Per cell by default, which is
+            // what lets a cell parking itself take its props with it (V-56). The opt-in
+            // escape hatch parents them under the vegetation manager instead - honoured
+            // here, at the one place the parent is chosen, so the default path passes the
+            // exact same Transform it always did and Apply's signature does not move. The
+            // trade is on the field's tooltip: manager-parented props do not park with
+            // the cell, so per-chunk recycling no longer hides them.
+            Transform scatterParent = c.go != null ? c.go.transform : null;
+            if (veg != null && veg.parentUnderVegetationSystem) scatterParent = veg.transform;
+
+            double scatterT0 = Time.realtimeSinceStartupAsDouble;
             ScatterApplier.Apply(c.terrain, c.data, c.tile.outputs, o.scatterLibrary,
-                                 c.go != null ? c.go.transform : null,
+                                 scatterParent,
                                  o.enableGPUInstancing ? Instancing() : null,
-                                 c.go != null ? c.go.GetEntityId().GetHashCode() : 0,
+                                 scatterOwner, veg,
                                  c.scatterObjects);
+            if (veg != null)
+                veg.ReportBuildMilliseconds(
+                    (float)((Time.realtimeSinceStartupAsDouble - scatterT0) * 1000.0));
+
+            // Reconcile the registry's live flag against what the cell actually is.
+            // A cell can be parked by the streaming pass between the moment its heights
+            // were dispatched to a worker and the moment they land here, and Apply above
+            // does not know that - it opens a registry entry either way. Without this,
+            // an out-of-window cell would report its instances as drawing. SetChunkLive
+            // owns the flag, so the reconciliation goes through it rather than calling
+            // Suspend directly, and it is idempotent when nothing changed. (V-58)
+            if (veg != null) SetChunkLive(c, c.go != null && c.go.activeSelf);
+
+            // Hand the registry what this cell's graph failed to supply, so the
+            // inspector's validation panel can name it (V-51). Read here rather than
+            // inside the bake because this is the first main-thread moment the mask
+            // exists, and a serialized field would outlive the graph that produced it.
+            //
+            // The sampler is per chunk and the mask is a property of the graph, so any
+            // landed cell answers the question. Gated on IsBound: an unbound sampler
+            // has an empty mask that means "never asked", not "nothing missing", and
+            // reporting it would show a clean bill of health for a graph with no
+            // ecology wired at all.
+            if (veg != null && c.tile != null && c.tile.ecology != null &&
+                c.tile.ecology.sampler != null && c.tile.ecology.sampler.IsBound)
+            {
+                veg.ReportMissingChannels(c.tile.ecology.sampler.MissingOutputs);
+            }
 
             // No water step here. Water is not per-chunk any more: a lake that
             // straddles four cells is one UCWaterBody with one surface and one volume,
@@ -2145,6 +2376,105 @@ namespace UniverseCreator.TerrainSystem
 
             windManager = o.gameObject.AddComponent<UCWindManager>();
             return windManager;
+        }
+
+
+        // =====================================================================
+        //  VEGETATION
+        // =====================================================================
+
+        // The world's vegetation manager, found once and cached. Null is a legitimate
+        // state and stays one: a world with no vegetation manager scatters with
+        // pre-Module-3 behaviour.
+        private UCVegetationSystemManager vegetationManager;
+
+        /// <summary>
+        /// Finds the world's vegetation manager, or returns null. (V-54)
+        ///
+        /// Cached exactly like the wind manager above, and for the same reason: the
+        /// lookup walks the hierarchy, the answer is a world fact that cannot differ
+        /// from one cell to the next, and this is called every time a cell lands. The
+        /// applier used to do this walk itself once per chunk; it now takes the result
+        /// as a parameter, so there is one lookup per world instead of one per cell and
+        /// exactly one place that knows where the manager lives.
+        ///
+        /// UNLIKE EnsureWindManager, THIS CREATES NOTHING. Wind has to exist for a
+        /// shader to sample, so that one adds a component as a last resort. Vegetation
+        /// does not: a world built before Module 3 has no vegetation manager and must
+        /// keep scattering exactly as it did, and silently adding a component on the
+        /// first regeneration would change every one of those worlds without asking.
+        /// The manager is added by the user, or by the setup that builds the hierarchy.
+        ///
+        /// A null cache keeps searching rather than latching, so a manager added after
+        /// the first cell has landed is picked up on the next one. A destroyed manager
+        /// compares equal to null and is re-resolved the same way.
+        /// </summary>
+        private UCVegetationSystemManager EnsureVegetationManager()
+        {
+            if (vegetationManager != null) return vegetationManager;
+
+            UniverseCreatorObject o = Owner;
+            if (o == null) return null;
+
+            vegetationManager = o.GetComponentInChildren<UCVegetationSystemManager>(true);
+            return vegetationManager;
+        }
+
+        /// <summary>
+        /// The identity a chunk is known by outside this manager: its GPU instancing
+        /// owner and its vegetation registry key, which are deliberately the same
+        /// number. Derived in one place so a release and an apply cannot disagree
+        /// about which chunk they mean. (V-58)
+        ///
+        /// GetEntityId is stable for the lifetime of the GameObject, and this manager
+        /// never destroys one, so the id survives the cell being recycled onto other
+        /// coordinates - which is exactly what makes it a chunk id rather than a cell
+        /// id. Zero for a chunk with no object; nothing registers against it.
+        /// </summary>
+        private static int ScatterOwnerOf(Chunk c)
+        {
+            if (c == null || c.go == null) return 0;
+            return c.go.GetEntityId().GetHashCode();
+        }
+
+        /// <summary>
+        /// Activates or parks a cell, and tells the vegetation registry which it was.
+        /// THE ONLY PLACE A CHUNK'S OBJECT IS ACTIVATED OR DEACTIVATED. (V-58)
+        ///
+        /// WHY THIS IS A CHOKE POINT AND NOT A CALL BESIDE EACH SetActive
+        /// -------------------------------------------------------------
+        /// Six places used to flip a cell: two in EnsurePool as a shrunk grid parks its
+        /// surplus, one in HandleStreaming as the window moves, two in ApplyStreamWindow
+        /// as the mode decides what is resident, and the mode switch itself. A registry
+        /// call written next to each of them would be correct on the day it was written
+        /// and wrong the first time a seventh appeared, and the symptom would be a
+        /// diagnostics panel that slowly disagrees with the world - the least debuggable
+        /// kind of wrong. With one door, the invariant is structural: a cell cannot
+        /// change liveness without the registry hearing about it.
+        ///
+        /// The registry is SUSPENDED rather than released, because this manager destroys
+        /// nothing. A parked cell keeps its TerrainData, its trees and its props; what
+        /// it stops doing is drawing, colliding and batching. See SuspendChunk.
+        ///
+        /// The registry is told even when activeSelf already matches, and that is not
+        /// waste: EnsurePool activates every live index unconditionally on a rebuild,
+        /// and a cell that was parked by a previous smaller grid needs its tallies back
+        /// whether or not its object needed touching. Suspend and Resume are both
+        /// idempotent, so the redundant calls cost a dictionary lookup and a branch.
+        /// </summary>
+        private void SetChunkLive(Chunk c, bool live)
+        {
+            if (c == null || c.go == null) return;
+
+            if (c.go.activeSelf != live) c.go.SetActive(live);
+
+            UCVegetationSystemManager veg = EnsureVegetationManager();
+            if (veg == null) return;
+
+            int owner = ScatterOwnerOf(c);
+
+            if (live) veg.ResumeChunk(owner);
+            else veg.SuspendChunk(owner);
         }
 
 
@@ -3020,6 +3350,61 @@ namespace UniverseCreator.TerrainSystem
             GameObject host = new GameObject("Terrain");
             host.transform.SetParent(o.transform, false);
             return host.transform;
+        }
+
+        /// <summary>
+        /// The single place a cell's heightmap pixel error is decided (L-49/L-50). Replaces
+        /// the old authored x1/2/4 LOD ladder: the tolerated screen error is derived from the
+        /// live view distance, camera field of view and render-target height, floored at the
+        /// source field's Nyquist limit and the world's hard pixel-error floor, then written
+        /// only when it crosses the per-cell hysteresis band. Whole-world render (the
+        /// edit-mode preview) resolves at zero distance, which collapses the budget to its
+        /// finest uniform value so every cell shows full fidelity.
+        /// </summary>
+        private void ApplyDensity(UniverseCreatorObject o, Chunk c)
+        {
+            if (o == null || c == null || c.terrain == null || c.data == null) return;
+
+            ResolveView(out Vector3 viewPos, out float fovDeg, out int screenHeight);
+
+            // Zero distance in whole-world preview => Max(acuity, floor), the finest uniform
+            // budget; otherwise the straight-line range from the view to the cell centre.
+            float distance = o.ShouldRenderWholeWorld()
+                ? 0f
+                : Vector3.Distance(viewPos, CellCentreWorld(o, c));
+
+            float texel = Geometry.AngularError.TexelMetres(o.GetChunkSize(), c.data.heightmapResolution);
+
+            if (_density.TryResolve(c.cell.x, c.cell.z, o.acuityPixels, texel,
+                                    distance, fovDeg, screenHeight, o.pixelErrorFloor,
+                                    o.densityHysteresis, out float pixelError))
+            {
+                c.terrain.heightmapPixelError = pixelError;
+            }
+        }
+
+        /// <summary>
+        /// Resolves the live view the density budget is computed against: the focus (or main
+        /// camera) position, the main camera's vertical field of view, and the render-target
+        /// pixel height. Falls back to sane defaults (60 deg, 1080 px, origin) so a scene with
+        /// no camera resolves the finest budget rather than a NaN.
+        /// </summary>
+        private void ResolveView(out Vector3 position, out float fovDeg, out int screenHeightPixels)
+        {
+            Transform view = ResolveFocus();
+            position = view != null ? view.position : Vector3.zero;
+
+            Camera cam = Camera.main;
+            fovDeg = cam != null ? cam.fieldOfView : 60f;
+            screenHeightPixels = Screen.height > 0 ? Screen.height : 1080;
+        }
+
+        /// <summary>World-space centre of a cell, for the view-to-cell distance.</summary>
+        private Vector3 CellCentreWorld(UniverseCreatorObject o, Chunk c)
+        {
+            float cellSize = o.GetChunkSize();
+            Vector3 worldMin = WorldMinCorner(o);
+            return worldMin + new Vector3((c.cell.x + 0.5f) * cellSize, 0f, (c.cell.z + 0.5f) * cellSize);
         }
 
         // World-space min corner (the (0,0) cell's corner) of the whole continent.

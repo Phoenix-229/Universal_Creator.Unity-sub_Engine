@@ -41,6 +41,7 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Ecology;
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -79,6 +80,17 @@ namespace UniverseCreator.TerrainSystem
 
         [Tooltip("Trunk height multiplier range.")]
         public Vector2 heightScale = new Vector2(0.8f, 1.25f);
+
+        [Tooltip("Relative selection weight when a node picks between prototypes.")]
+        public float weight = 1f;
+
+        // The altitude band and maxSlope above are the author's hard override and
+        // they stay: existing worlds have them authored, and an author is entitled
+        // to say "not here" regardless of what the ecology concludes. This is the
+        // separate question of where the species can actually live, in real units.
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     /// <summary>
@@ -116,11 +128,9 @@ namespace UniverseCreator.TerrainSystem
         public float meshHeight = 1.2f;
 
         // ---- being walked through -------------------------------------------
-
-        [Tooltip("Give this shrub a trigger collider so a character can walk into it. "
-               + "A trigger and not a solid collider on purpose: the player passes "
-               + "through and the plant squeezes aside, rather than being stopped by a bush.")]
-        public bool spawnCollider = true;
+        //
+        // Whether a trigger is built at all is eco.colliderPolicy (V-27). These three
+        // stay because they are the trigger's geometry, which the policy does not carry.
 
         [Tooltip("Radius of the trigger, in metres. Roughly the visual footprint.")]
         [Range(0.05f, 5f)]
@@ -157,10 +167,11 @@ namespace UniverseCreator.TerrainSystem
         public float minAltitude;
         public float maxAltitude = 1f;
 
-        [Tooltip("Draw through the GPU instancing manager past the chunk threshold. "
-               + "Instanced shrubs keep their wind but lose the trigger collider, which "
-               + "is the right trade for distant fill you will never walk into.")]
-        public bool gpuInstanceWhenDense = true;
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top. "
+               + "Instancing and collider routing live here too, on instancingPolicy and "
+               + "colliderPolicy (V-27).")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     [System.Serializable]
@@ -210,6 +221,13 @@ namespace UniverseCreator.TerrainSystem
                + "collider - the parting is entirely visual, which is why it costs nothing.")]
         [Range(0f, 2f)]
         public float squeeze = 1f;
+
+        [Tooltip("Relative selection weight when a node picks between prototypes.")]
+        public float weight = 1f;
+
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     [System.Serializable]
@@ -226,12 +244,16 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Tilts the object toward the surface normal, 0-1.")]
         public float normalAlignment = 1f;
 
-        [Tooltip("Draw through the GPU instancing manager instead of spawning a GameObject. "
-               + "No collider, no transform, far cheaper past a few thousand.")]
-        public bool gpuInstanced;
-
         [Tooltip("Marks the spawned object static. Only meaningful for GameObject spawns.")]
         public bool markStatic = true;
+
+        // Stones and deadfall are not alive, but they are still placed by process
+        // (V-19): a talus block belongs below a slope past its angle of repose, and
+        // river cobble belongs where water runs. The same envelope answers both
+        // questions, which is why the non-living scatter carries one too.
+        [Tooltip("Where this deposit forms: the slope, flow, salt and altitude conditions "
+               + "that put loose material here rather than somewhere else.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     /// <summary>

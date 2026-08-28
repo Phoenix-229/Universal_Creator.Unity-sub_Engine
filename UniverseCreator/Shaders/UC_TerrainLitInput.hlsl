@@ -193,6 +193,11 @@ CBUFFER_START(UCTerrain)
     half4  _TintColor;
 CBUFFER_END
 
+// The world's live wetness, published by the single WetnessCoupling uploader on the
+// CPU (x = wetness). A global, not a material property, so the whole world wets from
+// one number; the per-material _WetnessAmount above still acts as an authored floor.
+float4 _UCWetParams;
+
 // -----------------------------------------------------------------------------
 //  Textures
 // -----------------------------------------------------------------------------

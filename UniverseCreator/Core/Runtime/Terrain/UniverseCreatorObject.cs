@@ -106,10 +106,62 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Material applied to every generated terrain chunk. Leave null for Unity's default.")]
         public Material terrainMaterial;
 
-        [Tooltip("Allowed screen-space error in pixels. Higher = fewer triangles, more popping.")]
-        public float pixelError = 5f;
+        // ---------------------------------------------------------------
+        //  ANGULAR-ERROR DENSITY (visual acuity, L-49 / Nyquist, L-50)
+        //
+        //  These replace an authored LOD curve. The terrain's heightmap pixel error
+        //  is derived from the live camera and screen through Geometry/AngularError
+        //  rather than read off a hand-tuned ramp, so the on-screen silhouette error
+        //  it permits is the same on a phone and a monitor. See Geometry/AngularError
+        //  and Geometry/TerrainDensityController.
+        // ---------------------------------------------------------------
 
-        [Tooltip("Distance beyond which terrain uses the low-res basemap instead of splat layers.")]
+        [Tooltip("How many pixels of terrain silhouette error is acceptable. This is the one honest " +
+                 "density dial: resolution- and FOV-independent. Lower = more triangles.")]
+        [Range(0.25f, 8f)]
+        public float acuityPixels = 1f;
+
+        [Tooltip("Hard floor on the derived pixel error, in pixels. The derived value is never allowed " +
+                 "below this even when the source heightmap could carry finer detail.")]
+        [Range(0.25f, 20f)]
+        public float pixelErrorFloor = 1f;
+
+        [Tooltip("Only re-write the terrain pixel error when it moves more than this many pixels. " +
+                 "Writing it rebuilds the patch LOD tree, so a still camera should write it zero times.")]
+        [Range(0f, 4f)]
+        public float densityHysteresis = 0.75f;
+
+        [Tooltip("Metres from the world origin past which the world root is clamped back. A root far " +
+                 "from the origin degrades float precision into jitter, z-fighting and cracks.")]
+        public float maxWorldOriginDistance = 20000f;
+
+        // ---------------------------------------------------------------
+        //  DERIVED DRAW DISTANCES
+        //
+        //  basemapDistance, detailObjectDistance, treeDistance and treeBillboardDistance
+        //  are NOT authored. Each is the range at which its own real-world feature drops
+        //  below the shared acuityPixels budget, resolved once against the reference view
+        //  in Geometry/AngularError. One dial - acuityPixels - therefore moves the whole
+        //  level-of-detail envelope together, instead of four hand-tuned magic numbers
+        //  drifting apart. RecomputeDerivedDistances() applies the model and
+        //  ValidateSettings() calls it on every change. The sizes below are the finest
+        //  detail each system is responsible for keeping resolvable; calibrated so the
+        //  desktop default (acuityPixels = 1) reproduces the long-standing distances.
+        // ---------------------------------------------------------------
+
+        // ~1 m of ground-texture detail: past where a metre of splat detail falls under the
+        // pixel budget, the composited layers are indistinguishable from the baked basemap.
+        private const float BasemapDetailMetres = 1.07f;
+        // A grass clump, ~8.5 cm across.
+        private const float DetailFeatureMetres = 0.085f;
+        // ~1 m of tree silhouette: below the budget the whole tree reads as a smudge, so cull it.
+        private const float TreeSilhouetteMetres = 0.96f;
+        // ~5 cm of tree depth relief - the parallax that separates a 3D mesh from a flat card.
+        private const float TreeReliefMetres = 0.053f;
+
+
+        [Tooltip("Derived (read-only): range past which the composited splat layers fall below the " +
+                 "acuity budget and the low-res basemap takes over. Moves with Acuity Budget.")]
         public float basemapDistance = 1000f;
 
         [Tooltip("Terrain casts shadows. Disable on mobile for a large fill-rate win.")]
@@ -140,8 +192,8 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Draw terrain detail meshes and trees. Off strips all foliage.")]
         public bool drawTreesAndFoliage = true;
 
-        [Tooltip("Distance in metres beyond which grass and detail meshes stop drawing.")]
-        [Range(0f, 250f)]
+        [Tooltip("Derived (read-only): range past which a grass clump falls below the acuity budget " +
+                 "and detail meshes stop drawing. Moves with Acuity Budget.")]
         public float detailObjectDistance = 80f;
 
         [Tooltip("Fraction of authored detail density actually drawn. Lower is the single " +
@@ -149,10 +201,12 @@ namespace UniverseCreator.TerrainSystem
         [Range(0f, 1f)]
         public float detailObjectDensity = 1f;
 
-        [Tooltip("Distance beyond which trees stop drawing entirely.")]
+        [Tooltip("Derived (read-only): range past which a tree's silhouette falls below the acuity " +
+                 "budget and it stops drawing entirely. Moves with Acuity Budget.")]
         public float treeDistance = 900f;
 
-        [Tooltip("Distance beyond which trees switch from mesh to billboard.")]
+        [Tooltip("Derived (read-only): range past which a tree's depth relief falls below the acuity " +
+                 "budget and the mesh is swapped for a billboard. Moves with Acuity Budget.")]
         public float treeBillboardDistance = 50f;
 
         [Tooltip("Metres over which the mesh-to-billboard swap is blended. 0 pops visibly.")]
@@ -502,6 +556,12 @@ namespace UniverseCreator.TerrainSystem
 
             GenerationSettings settings = BuildSettings();
 
+            // Resolved here, on the main thread, for the same reason PrepareMainThread
+            // ran above: it reads the lighting and weather managers live and the worker
+            // may not. Null when ecology is switched off, which every scatter node
+            // reads as "place exactly what Modules 1 and 2 placed".
+            Ecology.EcoScatterContext ecology = EcoScatterContextBuilder.BuildFor(this);
+
             // Local copies so the closure captures values, not fields that the next
             // RegenerateAsync call is about to overwrite.
             Graph localGraph = graph;
@@ -509,7 +569,7 @@ namespace UniverseCreator.TerrainSystem
             currentStopToken = stop;
             isGenerating = true;
 
-            currentTask = Task.Run(() => GenerateOnWorkerThread(localGraph, settings, stop));
+            currentTask = Task.Run(() => GenerateOnWorkerThread(localGraph, settings, stop, ecology));
             return true;
         }
 
@@ -547,14 +607,33 @@ namespace UniverseCreator.TerrainSystem
         //  WORKER THREAD
         // =====================================================================
 
+        /// <summary>
+        /// The north fraction of a bake that covers the whole world in one tile: its
+        /// centre, because a single tile spanning every latitude has no one edge to
+        /// belong to. Named rather than written as a bare 0.5 so the reason travels
+        /// with it. (W-05)
+        /// </summary>
+        private const float WholeWorldNorthFraction = 0.5f;
+
         // Static-in-spirit: takes everything by parameter and touches no Unity API
         // beyond Debug.Log, which is thread-safe.
-        private void GenerateOnWorkerThread(Graph g, GenerationSettings s, StopToken stop)
+        private void GenerateOnWorkerThread(Graph g, GenerationSettings s, StopToken stop,
+                                            Ecology.EcoScatterContext ecology)
         {
             try
             {
                 CoordRect rect = new CoordRect(new Coord(0, 0), new Coord(s.resolution, s.resolution));
                 TileData tile = new TileData(s.chunkCoord, rect, s.worldPos, s.worldSize, s.maxHeightMeters);
+
+                // ForChunk rather than the context itself, so this tile gets its own
+                // sampler. There is only one tile on this path today, and taking the
+                // shortcut is what would break the day there are two.
+                //
+                // W-05: 0.5 because this path bakes the world as a single tile, so it
+                // spans the whole latitude range and its one latitude can only be the
+                // centre one. Chunked bakes go through ChunkManager, which knows where
+                // each cell sits and passes its real fraction.
+                tile.ecology = ecology != null ? ecology.ForChunk(WholeWorldNorthFraction) : null;
 
                 GraphEvaluator evaluator = new GraphEvaluator(g);
                 evaluator.Evaluate(tile, stop);
@@ -829,8 +908,16 @@ namespace UniverseCreator.TerrainSystem
             bufferRingWidth = Mathf.Clamp(bufferRingWidth, 0, 3);
             recenterThreshold = Mathf.Clamp01(recenterThreshold);
 
-            pixelError = Mathf.Clamp(pixelError, 1f, 200f);
-            basemapDistance = Mathf.Clamp(basemapDistance, 0f, 20000f);
+            acuityPixels = Mathf.Clamp(acuityPixels, 0.25f, 8f);
+            pixelErrorFloor = Mathf.Clamp(pixelErrorFloor, 0.25f, 20f);
+            densityHysteresis = Mathf.Clamp(densityHysteresis, 0f, 4f);
+            maxWorldOriginDistance = Mathf.Clamp(maxWorldOriginDistance, 1000f, 1000000f);
+
+            // basemap/detail/tree/billboard distances are not clamped here: they are not
+            // authored. RecomputeDerivedDistances resolves all four from the (now clamped)
+            // acuity budget, so a change to acuityPixels moves the whole LOD envelope.
+            RecomputeDerivedDistances();
+
             drawDistance = Mathf.Clamp(drawDistance, 50f, 20000f);
             lodBias = Mathf.Clamp(lodBias, 0.5f, 2f);
             maxConcurrentChunks = Mathf.Clamp(maxConcurrentChunks, 1, 16);
@@ -842,6 +929,59 @@ namespace UniverseCreator.TerrainSystem
             // it was not asked to make.
             int budgeted = GetBudgetedResolution();
             if (budgeted < resolution) resolution = budgeted;
+        }
+
+        /// <summary>
+        /// Resolves the four native draw distances from the shared acuity budget. Each
+        /// feature (a metre of splat detail, a grass clump, a tree silhouette, a tree's
+        /// depth relief) drops below <see cref="acuityPixels"/> pixels at its own range,
+        /// computed against the reference view in Geometry/AngularError - so raising the
+        /// one budget pulls all four distances in together. This is the whole point: one
+        /// dial for the level-of-detail envelope, not four numbers that drift apart.
+        /// </summary>
+        public void RecomputeDerivedDistances()
+        {
+            basemapDistance       = Geometry.AngularError.FeatureCullDistanceReference(BasemapDetailMetres, acuityPixels);
+            detailObjectDistance  = Geometry.AngularError.FeatureCullDistanceReference(DetailFeatureMetres, acuityPixels);
+            treeDistance          = Geometry.AngularError.FeatureCullDistanceReference(TreeSilhouetteMetres, acuityPixels);
+            treeBillboardDistance = Geometry.AngularError.FeatureCullDistanceReference(TreeReliefMetres, acuityPixels);
+        }
+
+        /// <summary>
+        /// Sets the acuity budget from the product quality tier (Mobile Low 4, Mobile
+        /// High 2, Desktop 1, flagship 1) and re-derives the four draw distances, so
+        /// choosing a device class moves the whole level-of-detail envelope through the
+        /// one dial rather than through a second, per-class distance ladder. A one-shot
+        /// author or boot action - never per-frame, so it is safe in edit mode.
+        /// </summary>
+        public void ApplyAcuityTier(UniverseCreator.Optimization.AdaptiveQuality.QualityTier tier)
+        {
+            acuityPixels = Geometry.AcuityTier.Resolve(tier);
+            RecomputeDerivedDistances();
+        }
+
+        /// <summary>
+        /// Horizontal distance in metres from the world origin to this root. Height is
+        /// deliberately ignored: lifting a world on the Y axis keeps full float precision,
+        /// because it is the horizontal spread of the heightfield samples that pushes them
+        /// into the coarse part of the float range where the surface jitters, z-fights and
+        /// cracks between cells. This is the one number the origin clamp compares and the
+        /// inspector reports, so both read the same value instead of each rolling its own.
+        /// </summary>
+        public float OriginDistanceMetres()
+        {
+            Vector3 p = transform.position;
+            return new Vector2(p.x, p.z).magnitude;
+        }
+
+        /// <summary>
+        /// True when the root sits farther from the origin than <see cref="maxWorldOriginDistance"/>,
+        /// i.e. far enough that float precision visibly degrades across the terrain. Pure and
+        /// side-effect-free so the self-test and the inspector agree on the threshold.
+        /// </summary>
+        public bool IsFarFromOrigin()
+        {
+            return OriginDistanceMetres() > Mathf.Max(0f, maxWorldOriginDistance);
         }
 
         /// <summary>

@@ -325,6 +325,21 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// The one rule pairing <c>Terrain.drawInstanced</c> to the material's
+        /// instancing support, kept as a pure truth table so a self-test can pin it
+        /// without a live Terrain. Instanced terrain feeds every patch transform
+        /// through the shader's <c>unity_ObjectToWorldArray</c>; a material that does
+        /// not declare that array leaves the matrices undefined and the whole surface
+        /// draws at a garbage transform - it vanishes. So the flag may go true ONLY
+        /// when the material actually supports instancing, whatever the author toggled.
+        /// Visible ground beats the draw-call saving.
+        /// </summary>
+        public static bool ResolveDrawInstanced(bool wantInstanced, bool materialSupportsInstancing)
+        {
+            return wantInstanced && materialSupportsInstancing;
+        }
+
+        /// <summary>
         /// The invariants that decide whether the chunk draws at all. Safe to re-assert
         /// on every pass, and separate from ConfigureTerrain because these are not
         /// values a user tunes - they are the difference between ground and nothing.
@@ -373,7 +388,7 @@ namespace UniverseCreator.TerrainSystem
             bool wantInstanced = settings != null && settings.drawInstanced;
             bool materialHandlesIt = terrain.materialTemplate != null &&
                                      terrain.materialTemplate.enableInstancing;
-            terrain.drawInstanced = wantInstanced && materialHandlesIt;
+            terrain.drawInstanced = ResolveDrawInstanced(wantInstanced, materialHandlesIt);
 
             // Unity's own auto-connect is switched off, deliberately.
             //
@@ -403,7 +418,6 @@ namespace UniverseCreator.TerrainSystem
             unchecked
             {
                 int h = 17;
-                h = h * 31 + settings.pixelError.GetHashCode();
                 h = h * 31 + settings.basemapDistance.GetHashCode();
                 h = h * 31 + (settings.castShadows ? 1 : 0);
                 h = h * 31 + (settings.drawInstanced ? 1 : 0);
@@ -440,7 +454,12 @@ namespace UniverseCreator.TerrainSystem
 
             EnsureRenderable(terrain, settings);
 
-            terrain.heightmapPixelError = settings.pixelError;
+            // heightmapPixelError is deliberately NOT pushed here. It is owned per cell by
+            // ChunkManager.ApplyDensity / Geometry.TerrainDensityController, which derives it
+            // from the live view against the visual-acuity budget (L-49) and the source
+            // field's Nyquist floor (L-50). Writing a single authored value here would fight
+            // that controller: every settings change would slam every cell back to one static
+            // error and force a redundant patch LOD-tree rebuild on the next density tick.
             terrain.basemapDistance = settings.basemapDistance;
             terrain.shadowCastingMode = settings.castShadows
                 ? UnityEngine.Rendering.ShadowCastingMode.On

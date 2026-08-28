@@ -73,5 +73,9 @@ namespace UniverseCreator.Nodes
         // -- interactive ripples ---------------------------------------------
         public const string RippleStrength = "_RippleStrength";
         public const string RippleFoam = "_RippleFoam";
+
+        // -- weather ---------------------------------------------------------
+        /// <summary>Frozen fraction of a still body, 0 open to 1 fully iced over.</summary>
+        public const string Ice = "_UCIce";
     }
 }

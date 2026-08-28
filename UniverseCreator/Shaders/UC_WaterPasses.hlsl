@@ -33,6 +33,7 @@
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareOpaqueTexture.hlsl"
 #include "UC_Underwater.hlsl"
+#include "UC_Lighting.hlsl"
 
 struct UCWaterAttributes
 {
@@ -351,6 +352,9 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
 
     inputData.fogCoord = InitializeInputDataFog(float4(input.positionWS, 1.0), input.fogCoord);
     inputData.bakedGI = SampleSH(normalWS);
+    // Water's ambient term reads the same grid the shore and its bed do, so a lake in a
+    // gorge is lit by the gorge, not by a flat sky it cannot see. No grid bound, no change.
+    inputData.bakedGI = UCGridAmbientOr(inputData.bakedGI, input.positionWS, normalWS);
     inputData.normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
     inputData.shadowMask = half4(1, 1, 1, 1);
 
@@ -367,6 +371,23 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
     surfaceData.alpha = 1.0h;
     surfaceData.clearCoatMask = 0.0h;
     surfaceData.clearCoatSmoothness = 0.0h;
+
+    // ---- 8c. ice ----
+    //
+    // Still water freezes from the surface down. The weather layer sets this per
+    // body and only ever on still water, so a lake whitens over while the river and
+    // the surf beside it keep running. Fresh cover is a matte white sheet: it lays
+    // the wave normal flat so the surface stops moving, whitens the albedo, and
+    // dulls the gloss to a wind-scoured snow-ice rather than a mirror. Melting it
+    // back to zero returns the open surface exactly.
+    half ice = saturate(_UCIce);
+    if (ice > 0.001h)
+    {
+        inputData.normalWS = SafeNormalize(lerp(inputData.normalWS, (half3)geomNormalWS, ice));
+        surfaceData.normalTS = lerp(surfaceData.normalTS, half3(0, 0, 1), ice);
+        surfaceData.albedo = lerp(surfaceData.albedo, half3(0.86h, 0.90h, 0.94h), ice);
+        surfaceData.smoothness = lerp(surfaceData.smoothness, 0.12h, ice);
+    }
 
     half4 color = UniversalFragmentPBR(inputData, surfaceData);
 
@@ -401,6 +422,10 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
         alpha = max(alpha, foam);
         alpha *= weight;
     }
+
+    // A frozen surface is a solid sheet, not a film: it hides the bed whatever the
+    // depth or view angle worked out above.
+    alpha = max(alpha, ice);
 
     color.rgb = MixFog(color.rgb, inputData.fogCoord);
 

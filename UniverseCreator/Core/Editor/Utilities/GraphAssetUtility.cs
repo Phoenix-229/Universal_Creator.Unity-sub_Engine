@@ -275,8 +275,12 @@ namespace UniverseCreator.Editor.Utilities
                 if (found != null && seen.Add(found)) targets.Add(found);
             }
 
-            UniverseCreatorObject[] worlds = UnityEngine.Object.FindObjectsByType<UniverseCreatorObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
+            // No sort mode: Unity 6.5 deprecated that overload because instance ids are
+            // being replaced by EntityId and the old ordering can no longer be promised.
+            // Nothing here depends on order anyway - the results go through a HashSet and
+            // the outcome is a count, not a sequence.
+            UniverseCreatorObject[] worlds =
+                UnityEngine.Object.FindObjectsByType<UniverseCreatorObject>(FindObjectsInactive.Include);
             for (int i = 0; i < worlds.Length; i++)
             {
                 Graph inScene = worlds[i].graph;

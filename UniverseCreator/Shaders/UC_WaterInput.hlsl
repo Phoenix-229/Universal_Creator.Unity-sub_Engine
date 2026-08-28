@@ -75,6 +75,8 @@ CBUFFER_START(UnityPerMaterial)
     float  _WindRipple;
     float  _WindChopLength;
     float  _WindFoam;
+
+    float  _UCIce;
 CBUFFER_END
 
 TEXTURE2D(_WaveNormalMap);      SAMPLER(sampler_WaveNormalMap);

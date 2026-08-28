@@ -1,0 +1,240 @@
+// -----------------------------------------------------------------------------
+//  Universe Creator - Procedural Content Generation Toolkit
+//
+//  File:    UCGroupedInspector.cs
+//  Purpose: Shared drawing for the world system managers, whose inspectors are
+//           part live and part declared.
+//
+//  THE PROBLEM THIS SOLVES
+//  -----------------------
+//  These managers are large on purpose: they are where a world's physics is
+//  authored, so the author needs every dial. But they are also being built in
+//  passes, so at any moment some groups are read and some are not.
+//
+//  Drawing the whole component disabled - which is what the inspector this
+//  replaces did - takes the author's control away the moment any part of the
+//  component goes live. Drawing it all editable claims placeholders work. Neither
+//  is honest, so groups carry their own status: a live group is editable, a
+//  declared group is disabled and says so, and the two sit in one inspector.
+//
+//  THE UNLISTED-FIELD RULE
+//  -----------------------
+//  Anything not named in a group is drawn at the bottom under "Unlisted", not
+//  dropped. That is deliberate: fields get appended to these managers often, and
+//  the failure mode of a hand-written group list is a field the author can no
+//  longer see and no error anywhere. Degrading to "shown in the wrong place" is
+//  recoverable; degrading to invisible is not.
+//
+//  A name in a group that no longer matches a field draws a warning where the
+//  field would have been, for the same reason: a renamed field must be loud.
+//
+//  NO DIALOGS.
+// -----------------------------------------------------------------------------
+
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEditor;
+
+namespace UniverseCreator.Editor.Inspectors
+{
+    /// <summary>
+    /// One collapsible group of fields in a system manager inspector, and whether
+    /// anything reads them yet.
+    /// </summary>
+    public struct UCFieldGroup
+    {
+        public string title;
+
+        /// <summary>Something reads these fields. False draws them disabled.</summary>
+        public bool live;
+
+        /// <summary>One line under the group title. Empty draws nothing.</summary>
+        public string note;
+
+        public string[] fields;
+
+        public UCFieldGroup(string title, bool live, string note, params string[] fields)
+        {
+            this.title = title;
+            this.live = live;
+            this.note = note;
+            this.fields = fields;
+        }
+    }
+
+    /// <summary>
+    /// Draws a system manager as a stack of live and declared groups.
+    /// </summary>
+    public static class UCGroupedInspector
+    {
+        private const string PrefsRoot = "UniverseCreator.Inspector.";
+
+        /// <summary>deg. Left indent for the fields inside a group.</summary>
+        private const float GroupIndent = 6f;
+
+        /// <summary>
+        /// Header bar, optional notice, then every group. Applies changes, so the
+        /// live groups are genuinely editable; the disabled scope is what keeps
+        /// the declared ones from being written.
+        /// </summary>
+        public static void Draw(SerializedObject serialized, string prefsKey,
+                                string title, string icon, Color accent, string status,
+                                string notice, UCFieldGroup[] groups)
+        {
+            UCInspectorUI.HeaderBar(title, icon, accent, status);
+
+            if (!string.IsNullOrEmpty(notice))
+            {
+                EditorGUILayout.Space(3);
+                EditorGUILayout.HelpBox(notice, MessageType.Info);
+            }
+
+            EditorGUILayout.Space(3);
+
+            serialized.Update();
+
+            HashSet<string> listed = new HashSet<string>();
+
+            for (int g = 0; g < groups.Length; g++)
+            {
+                DrawGroup(serialized, prefsKey, accent, groups[g], listed);
+            }
+
+            DrawUnlisted(serialized, prefsKey, listed);
+
+            serialized.ApplyModifiedProperties();
+        }
+
+        private static void DrawGroup(SerializedObject serialized, string prefsKey,
+                                      Color accent, UCFieldGroup group,
+                                      HashSet<string> listed)
+        {
+            // A declared group reads grey rather than the component's accent, so
+            // the eye can sort live from not-live without reading a word of it.
+            Color groupAccent = group.live ? accent : UCInspectorUI.HeaderGrey;
+            string heading = group.live ? group.title : group.title + "   (declared)";
+
+            string key = PrefsRoot + prefsKey + "." + group.title;
+
+            // Live groups start open and declared ones closed: the author came here
+            // to edit what works, not to scroll past what does not.
+            bool open = EditorPrefs.GetBool(key, group.live);
+            bool next = UCInspectorUI.Section(open, heading, groupAccent);
+            if (next != open) EditorPrefs.SetBool(key, next);
+
+            if (!next)
+            {
+                // Still claim the names, or a collapsed group would push every one
+                // of its fields into Unlisted.
+                for (int i = 0; i < group.fields.Length; i++) listed.Add(group.fields[i]);
+                return;
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(GroupIndent);
+            EditorGUILayout.BeginVertical();
+
+            if (!group.live)
+            {
+                EditorGUILayout.LabelField(
+                    "Saved on this component and read by nothing yet.",
+                    EditorStyles.miniLabel);
+            }
+            else if (!string.IsNullOrEmpty(group.note))
+            {
+                EditorGUILayout.LabelField(group.note, EditorStyles.miniLabel);
+            }
+
+            using (new EditorGUI.DisabledScope(!group.live))
+            {
+                for (int i = 0; i < group.fields.Length; i++)
+                {
+                    string name = group.fields[i];
+                    listed.Add(name);
+
+                    SerializedProperty p = serialized.FindProperty(name);
+                    if (p == null)
+                    {
+                        // Loud on purpose. A silent skip here is how a renamed
+                        // field disappears from the inspector for a whole release.
+                        EditorGUILayout.HelpBox(
+                            "No serialized field named \"" + name + "\". The inspector's " +
+                            "group list is out of date with the component.",
+                            MessageType.Error);
+                        continue;
+                    }
+
+                    EditorGUILayout.PropertyField(p, true);
+                }
+            }
+
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(2);
+        }
+
+        /// <summary>
+        /// Everything the group lists did not account for. Editable, because an
+        /// unlisted field is a field whose status this inspector does not know,
+        /// and guessing "disabled" would silently lock out a working dial.
+        /// </summary>
+        private static void DrawUnlisted(SerializedObject serialized, string prefsKey,
+                                         HashSet<string> listed)
+        {
+            List<SerializedProperty> extras = null;
+
+            SerializedProperty p = serialized.GetIterator();
+            bool enterChildren = true;
+            while (p.NextVisible(enterChildren))
+            {
+                enterChildren = false;
+                if (p.name == "m_Script") continue;
+                if (listed.Contains(p.name)) continue;
+
+                if (extras == null) extras = new List<SerializedProperty>();
+                extras.Add(p.Copy());
+            }
+
+            if (extras == null) return;
+
+            string key = PrefsRoot + prefsKey + ".Unlisted";
+            bool open = EditorPrefs.GetBool(key, true);
+            bool next = UCInspectorUI.Section(open, "Unlisted   (" + extras.Count + ")",
+                                              UCInspectorUI.HeaderAmber);
+            if (next != open) EditorPrefs.SetBool(key, next);
+            if (!next) return;
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(GroupIndent);
+            EditorGUILayout.BeginVertical();
+
+            EditorGUILayout.LabelField(
+                "Fields this inspector has no group for. Shown so nothing is hidden.",
+                EditorStyles.miniLabel);
+
+            for (int i = 0; i < extras.Count; i++)
+            {
+                EditorGUILayout.PropertyField(extras[i], true);
+            }
+
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.EndHorizontal();
+        }
+
+        /// <summary>
+        /// A read-only computed line: label on the left, derived value on the
+        /// right. What turns these inspectors from a field dump into something
+        /// that shows the author what their numbers actually mean.
+        /// </summary>
+        public static void Readout(string label, string value)
+        {
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(label, EditorStyles.miniLabel);
+            GUIStyle right = new GUIStyle(EditorStyles.miniLabel);
+            right.alignment = TextAnchor.MiddleRight;
+            EditorGUILayout.LabelField(value, right);
+            EditorGUILayout.EndHorizontal();
+        }
+    }
+}

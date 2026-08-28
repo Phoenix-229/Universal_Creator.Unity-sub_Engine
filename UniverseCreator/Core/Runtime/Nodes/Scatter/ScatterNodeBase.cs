@@ -39,7 +39,11 @@ namespace UniverseCreator.Nodes.Scatter
         /// </summary>
         public abstract string Channel { get; }
 
-        /// <summary>Instances per square kilometre before mask weighting.</summary>
+        /// <summary>
+        /// Instances per square kilometre before mask weighting. The no-manager
+        /// figure: once a UCVegetationSystemManager is present, tree and grass
+        /// density come from its shipped per-hectare fields instead (V-13).
+        /// </summary>
         public float density = 100f;
 
         /// <summary>Minimum spacing between instances, in world metres.</summary>
@@ -167,7 +171,7 @@ namespace UniverseCreator.Nodes.Scatter
             // or the spacing implied by the requested density. Ignoring the second
             // would let a low density still emit a dense field that is then thinned
             // probabilistically - far more darts thrown for the same result.
-            float densitySpacing = PoissonDisc.SpacingForDensity(density);
+            float densitySpacing = PoissonDisc.SpacingForDensity(CeilingDensityPerSqKm(tile));
             settings.minSpacing = Mathf.Max(Mathf.Max(0.01f, minSpacing), densitySpacing);
 
             // Chunk coordinate does NOT enter the seed. The world cell hash already
@@ -259,11 +263,44 @@ namespace UniverseCreator.Nodes.Scatter
         }
 
         /// <summary>
+        /// Instances per square kilometre the densest site may carry (V-13). With a
+        /// vegetation manager present this is the manager's figure, converted from
+        /// the per-square-metre ceiling it resolves; without one it is this node's
+        /// own density field, unchanged from Modules 1 and 2.
+        /// </summary>
+        /// <remarks>
+        /// This is a CEILING. The solve throws darts at the spacing it implies and
+        /// the ecology pass then removes the surplus per site, so an ideal hectare
+        /// reaches the authored figure and nothing exceeds it. Solving at an average
+        /// density instead would need a second, finer solve on good ground, and two
+        /// solves do not agree about the same position.
+        ///
+        /// Why the manager wins for trees: treesPerHectare and globalDensityScale
+        /// are shipped inspector fields that until now nothing read (B-1). A world
+        /// whose tree count is set on one component and overridden per node is a
+        /// world an author cannot reason about, so the component is authoritative
+        /// and the node's density is the no-manager fallback.
+        /// </remarks>
+        protected float CeilingDensityPerSqKm(TileData tile)
+        {
+            Ecology.EcoScatterContext ctx = tile != null ? tile.ecology : null;
+            if (ctx == null) return density;
+
+            float perM2 = Ecology.EcoDensity.CeilingPerSquareMetre(Channel, in ctx.settings, density);
+            return perM2 * 1e6f;
+        }
+
+        /// <summary>
         /// Surface normal at a world position, by central difference on the height
         /// field. Per-instance rather than a whole-field Sobel pass, because only
         /// the accepted candidates need it.
         /// </summary>
-        protected static Vector3 SampleNormal(Matrix height, float worldX, float worldZ)
+        /// <remarks>
+        /// Internal rather than protected so DebrisShaping can reuse it. It is the
+        /// only normal implementation in the scatter path and must stay that way -
+        /// a second copy would drift from this one silently.
+        /// </remarks>
+        internal static Vector3 SampleNormal(Matrix height, float worldX, float worldZ)
         {
             if (height == null) return Vector3.up;
 

@@ -2,34 +2,48 @@
 //  Universe Creator - Procedural Content Generation Toolkit
 //
 //  File:    UCVegetationSystemManager.cs
-//  Purpose: The VegetationSystem child's control surface. DECLARED ONLY - no
-//           field here is read by anything yet.
+//  Purpose: The VegetationSystem child's control surface. Field declarations only;
+//           the read path that turns these into placement numbers lives beside it
+//           in UCVegetationSystemManager.Resolve.cs.
 //
-//  WHY A FILE THAT DOES NOTHING
-//  ----------------------------
-//  The vegetation module is not written. This component exists so that when it is
-//  written it has an agreed shape to fill: which settings live at world level,
-//  what they are called, what units they are in, and which of them the terrain
-//  side already constrains.
+//  WHAT CHANGED
+//  ------------
+//  This component used to be declaration-only. It is now live: every field below
+//  is read, either by the resolve path in the partial file or by the ecology
+//  sampler it feeds. The word PLACEHOLDER has been removed from the tooltips
+//  because the tooltips are now true.
 //
-//  That last part is the real reason. Vegetation cannot be designed in isolation
-//  from the terrain it stands on, and the constraints are already fixed:
+//  The original twenty-four fields keep their exact names, order, types and
+//  defaults. Unity serialises by field name and by nothing else, so renaming one
+//  would silently discard every value an author has already entered for it.
+//  Everything ecological is appended below them.
 //
-//   - Placement must be a pure function of absolute world position and seed.
-//     A cell that streams out and back must return the same trees in the same
-//     places. Anything seeded from spawn order or frame time breaks that.
-//   - Density and mask sampling read from the graph's surface outputs, which are
-//     already produced per cell. Vegetation reads them; it does not re-run noise.
+//  THE CONSTRAINTS THAT SHAPED THIS
+//  --------------------------------
+//   - Placement is a pure function of absolute world position and seed. A cell
+//     that streams out and back returns the same trees in the same places.
+//     Nothing here may be seeded from spawn order or frame time.
+//   - Density and mask sampling read the graph's surface outputs, already produced
+//     per cell. Vegetation reads them; it does not re-run noise.
 //   - Detail and tree instances belong to the native TerrainData of each cell, so
 //     they are placed per cell and rebuilt when that cell rebuilds.
 //   - Wind comes from the weather system's single wind manager. Vegetation reads
-//     it. It must not add a second wind source.
+//     it and never adds a second wind source.
 //
-//  A later pass that starts from a blank file will invent its own answers to all
-//  four and end up with a parallel system. The fields below are the answers.
+//  WHAT THIS COMPONENT DELIBERATELY DOES NOT OWN
+//  ---------------------------------------------
+//  Latitude and sea level are world facts, and each already has exactly one
+//  owner: latitude on the lighting manager, sea level on the ocean water volume.
+//  Climate - the temperature and precipitation fields - belongs to the weather
+//  manager. This component resolves all three by reading their owners, because a
+//  second copy of a world fact is a second answer to the same question, and the
+//  two will disagree the first time an author changes one of them.
 //
-//  Nothing acts on them. A stub that half-worked would be worse than one that
-//  does nothing: it would look implemented.
+//  ECOLOGY IS OPT-IN
+//  -----------------
+//  useEcology defaults off. An existing world keeps the shipped placement path,
+//  byte for byte, and opts in when its author is ready. A default that silently
+//  rearranged every tree in every saved world would not be an improvement.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
@@ -37,30 +51,43 @@ using UnityEngine;
 namespace UniverseCreator.TerrainSystem
 {
     /// <summary>
-    /// World-level vegetation control. Declared for a later module; no field here
-    /// is read by anything yet.
+    /// Which class of device this world's vegetation budget is aimed at. Three and
+    /// not five: the two mobile tiers differ by roughly a factor of two in fill
+    /// rate and memory, desktop differs from both by an order of magnitude, and a
+    /// tier nobody can describe in one sentence is a tier nobody tunes. (V-33)
+    /// </summary>
+    public enum VegetationQuality
+    {
+        MidRangeMobile = 0,
+        FlagshipMobile = 1,
+        Desktop = 2
+    }
+
+    /// <summary>
+    /// World-level vegetation control. Partial: the resolve path is in
+    /// UCVegetationSystemManager.Resolve.cs.
     /// </summary>
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Vegetation System Manager")]
     [DisallowMultipleComponent]
-    public class UCVegetationSystemManager : MonoBehaviour
+    public partial class UCVegetationSystemManager : MonoBehaviour
     {
         // =====================================================================
         //  GLOBAL
         // =====================================================================
 
-        [Header("Global  (declared, not implemented)")]
+        [Header("Global")]
 
-        [Tooltip("PLACEHOLDER. Master switch for every vegetation pass.")]
+        [Tooltip("Master switch for every vegetation pass.")]
         public bool vegetationEnabled = true;
 
-        [Tooltip("PLACEHOLDER. Offset from the world seed. Placement stays a pure " +
-                 "function of world position and this value, so a cell that streams " +
-                 "out and back returns identical vegetation.")]
+        [Tooltip("Offset from the world seed. Placement stays a pure function of " +
+                 "world position and this value, so a cell that streams out and " +
+                 "back returns identical vegetation.")]
         public int seedOffset;
 
-        [Tooltip("PLACEHOLDER. Scales every density below at once, for quickly " +
-                 "trading fidelity for frame rate without retuning each layer.")]
+        [Tooltip("Scales every density below at once, for quickly trading fidelity " +
+                 "for frame rate without retuning each layer.")]
         [Range(0f, 2f)]
         public float globalDensityScale = 1f;
 
@@ -68,113 +95,417 @@ namespace UniverseCreator.TerrainSystem
         //  GRASS AND DETAIL
         // =====================================================================
 
-        [Header("Grass and Detail  (declared, not implemented)")]
+        [Header("Grass and Detail")]
 
-        [Tooltip("PLACEHOLDER. Grass instances per square metre at full density.")]
+        [Tooltip("Grass instances per square metre at full density.")]
         public float grassPerSquareMetre = 4f;
 
-        [Tooltip("PLACEHOLDER. Metres from the camera at which detail stops drawing. " +
-                 "This is the single largest vegetation cost.")]
-        public float detailDrawDistanceMetres = 120f;
-
-        [Tooltip("PLACEHOLDER. Detail resolution per cell. Higher places grass more " +
-                 "precisely and costs more memory per terrain cell.")]
+        // Detail draw distance is not authored here. The acuity budget on
+        // UniverseCreatorObject derives detailObjectDistance (and the other three
+        // native distances) from one dial; a field here would be a second answer.
+        [Tooltip("Detail resolution per cell. Higher places grass more precisely and " +
+                 "costs more memory per terrain cell.")]
         public int detailResolution = 512;
 
-        [Tooltip("PLACEHOLDER. Samples per detail patch. Unity's own patch size " +
-                 "control; 8 or 16 are the usual answers.")]
+        [Tooltip("Samples per detail patch. Unity's own patch size control; 8 or 16 " +
+                 "are the usual answers.")]
         public int detailResolutionPerPatch = 16;
 
-        [Tooltip("PLACEHOLDER. Detail sways with the weather system's wind rather " +
-                 "than with its own oscillator, so grass and trees agree.")]
+        // Detail layers are the one vegetation cost paid in RAM before a single
+        // frame is drawn, and it is paid per resident chunk whether or not the
+        // grass is on screen: TerrainData keeps an int per detail cell per layer.
+        // The arithmetic is in the resolve path and the figure is in the
+        // inspector, because 512 with eight species reads as a harmless default
+        // right up to the point the build dies on device. (V-29)
+        [Tooltip("MB. Warn above this much memory held in terrain detail layers. " +
+                 "The figure is res squared x 4 B x layers x resident chunks, and " +
+                 "the inspector shows it before you build.")]
+        [Min(1f)]
+        public float detailMemoryCeilingMB = 96f;
+
+        [Tooltip("Detail sways with the weather system's wind rather than with its own " +
+                 "oscillator, so grass and trees agree.")]
         public bool detailUsesWorldWind = true;
 
         // =====================================================================
         //  TREES
         // =====================================================================
 
-        [Header("Trees  (declared, not implemented)")]
+        [Header("Trees")]
 
-        [Tooltip("PLACEHOLDER. Trees per hectare at full density.")]
+        [Tooltip("Trees per hectare at full density. With ecology on this becomes a " +
+                 "ceiling rather than a target: Reineke's self-thinning law can only " +
+                 "lower it, because a stand denser than the law allows does not exist.")]
         public float treesPerHectare = 60f;
 
-        [Tooltip("PLACEHOLDER. Metres from the camera at which trees stop drawing.")]
-        public float treeDrawDistanceMetres = 1500f;
-
-        [Tooltip("PLACEHOLDER. Metres over which a tree crossfades to its billboard.")]
-        public float billboardStartMetres = 90f;
-
-        [Tooltip("PLACEHOLDER. Metres over which the billboard crossfade happens. " +
-                 "Zero pops.")]
+        // Tree draw distance and the billboard swap distance are not authored here.
+        // Both come off UniverseCreatorObject's acuity budget (treeDistance and
+        // treeBillboardDistance); this manager only pushes the billboard swap OUTWARD
+        // for a species that must stay a mesh longer (see ResolvedBillboardStartM).
+        [Tooltip("Metres over which the billboard crossfade happens. Zero pops.")]
         public float billboardFadeLengthMetres = 20f;
 
-        [Tooltip("PLACEHOLDER. Minimum metres between two tree instances. Stops the " +
-                 "clumping that a pure density figure produces on its own.")]
+        [Tooltip("Minimum metres between two tree instances. Stops the clumping that " +
+                 "a pure density figure produces on its own. With ecology on, crown " +
+                 "geometry may widen this but never narrows it.")]
         public float treeSpacingMetres = 3.5f;
 
         // =====================================================================
         //  PLACEMENT RULES
         // =====================================================================
 
-        [Header("Placement Rules  (declared, not implemented)")]
+        [Header("Placement Rules")]
 
-        [Tooltip("PLACEHOLDER. Steepest ground, in degrees, that vegetation will " +
-                 "stand on. Past this the slope reads as rock.")]
+        [Tooltip("Steepest ground, in degrees, that vegetation will stand on. Past " +
+                 "this the slope reads as rock.")]
         [Range(0f, 90f)]
         public float maxSlopeDegrees = 38f;
 
-        [Tooltip("PLACEHOLDER. Metres above sea level below which nothing grows.")]
+        [Tooltip("Metres above sea level below which nothing grows.")]
         public float minAltitudeMetres;
 
-        [Tooltip("PLACEHOLDER. Metres above sea level above which nothing grows - " +
-                 "the tree line.")]
+        [Tooltip("Metres above sea level above which nothing grows. With ecology on " +
+                 "this is a backstop only: the real treeline comes from the warmest " +
+                 "month temperature, so it follows latitude and aspect instead of " +
+                 "sitting at one altitude everywhere.")]
         public float maxAltitudeMetres = 1800f;
 
-        [Tooltip("PLACEHOLDER. Metres of clearance kept around water edges, roads " +
-                 "and other cut regions.")]
+        [Tooltip("Metres of clearance kept around water edges, roads and other cut " +
+                 "regions.")]
         public float clearanceMetres = 1.5f;
 
-        [Tooltip("PLACEHOLDER. Vegetation is kept out of water bodies rather than " +
-                 "drowned in them.")]
+        [Tooltip("Vegetation is kept out of water bodies rather than drowned in them.")]
         public bool avoidWater = true;
 
-        [Tooltip("PLACEHOLDER. Vegetation is kept out of regions the road bridge has " +
-                 "cut.")]
+        [Tooltip("Vegetation is kept out of regions the road bridge has cut.")]
         public bool avoidCutRegions = true;
 
         // =====================================================================
         //  BIOME AND MASKING
         // =====================================================================
 
-        [Header("Biome and Masking  (declared, not implemented)")]
+        [Header("Biome and Masking")]
 
-        [Tooltip("PLACEHOLDER. Density is read from the graph's surface output masks " +
-                 "rather than from a single global figure - which is what makes a " +
-                 "forest follow the terrain instead of covering it uniformly.")]
+        [Tooltip("Density is read from the graph's surface output masks rather than " +
+                 "from a single global figure, which is what makes a forest follow " +
+                 "the terrain instead of covering it uniformly.")]
         public bool useGraphMasks = true;
 
-        [Tooltip("PLACEHOLDER. Mask value below which nothing is placed. Stops a " +
-                 "faint mask edge from scattering isolated instances.")]
+        [Tooltip("Mask value below which nothing is placed. Stops a faint mask edge " +
+                 "from scattering isolated instances.")]
         [Range(0f, 1f)]
         public float maskThreshold = 0.15f;
 
-        [Tooltip("PLACEHOLDER. Metres over which a biome boundary blends rather than " +
-                 "switching in one step.")]
+        [Tooltip("Metres over which a biome boundary blends rather than switching in " +
+                 "one step.")]
         public float biomeBlendMetres = 12f;
 
         // =====================================================================
         //  BUILD
         // =====================================================================
 
-        [Header("Build  (declared, not implemented)")]
+        [Header("Build")]
 
-        [Tooltip("PLACEHOLDER. Vegetation rebuilds with the terrain cell it stands " +
-                 "on. Off means it is only built when asked for.")]
+        [Tooltip("Vegetation rebuilds with the terrain cell it stands on. Off means " +
+                 "it is only built when asked for.")]
         public bool rebuildWithChunks = true;
 
-        [Tooltip("PLACEHOLDER. Cells whose vegetation may be built at once. Matches " +
-                 "the terrain side's concurrency so the two do not compete.")]
+        [Tooltip("Cells whose vegetation may be built at once. Matches the terrain " +
+                 "side's concurrency so the two do not compete.")]
         public int maxConcurrentCells = 2;
+
+        // =====================================================================
+        //  ECOLOGY
+        //
+        //  Everything below this line is appended. Off by default, so an existing
+        //  world is untouched until its author asks for it.
+        // =====================================================================
+
+        [Header("Ecology")]
+
+        [Tooltip("On, placement is decided by the environment: temperature, water " +
+                 "balance, soil, light and disturbance, combined by Liebig's law of " +
+                 "the minimum. Off keeps the shipped mask-and-density path exactly, " +
+                 "so a saved world does not change appearance on upgrade.")]
+        public bool useEcology = false;
+
+        [Tooltip("Suitability below which a species is absent from a site rather than " +
+                 "merely sparse. Raise it for sharper biome edges, lower it to let " +
+                 "species trail off gradually.")]
+        [Range(0f, 1f)]
+        public float suitabilityThreshold = 0.25f;
+
+        [Tooltip("Exponent applied to the combined suitability. Above 1 crisps up " +
+                 "boundaries by punishing mediocre sites; below 1 softens them. 1 is " +
+                 "the unmodified law.")]
+        [Range(0.25f, 4f)]
+        public float suitabilitySharpness = 1f;
+
+        [Tooltip("On, a site's second and third best species can also appear there, " +
+                 "in proportion to their suitability. Off places only the winner, " +
+                 "which reads as monoculture blocks.")]
+        public bool allowMixedStands = true;
+
+        [Tooltip("How many species may share one site when mixed stands are on. Real " +
+                 "temperate forests are two to four species deep.")]
+        [Range(1, 8)]
+        public int maxSpeciesPerSite = 3;
+
+        // =====================================================================
+        //  ENVIRONMENT SAMPLING
+        // =====================================================================
+
+        [Header("Environment Sampling")]
+
+        [Tooltip("Metres out to which the sampler looks for a water body. Beyond this " +
+                 "a site simply reports no water, so a riparian species fails its " +
+                 "distance band rather than needing a special case. Larger costs " +
+                 "search time on every candidate.")]
+        public float waterSearchRadiusMetres = 300f;
+
+        [Tooltip("Metres of soil on level ground. Soil depth is derived from slope and " +
+                 "curvature, never authored per cell: material creeps downhill, so " +
+                 "ridges are thin and hollows are deep.")]
+        public float soilDepthMaxMetres = 2.5f;
+
+        [Tooltip("Degrees. The angle of repose: the slope at which loose material can " +
+                 "no longer rest, so soil depth reaches zero and the site is bare " +
+                 "rock. 35 for angular scree, 30 for rounded gravel, 45 for wet sand.")]
+        [Range(0f, 90f)]
+        public float soilAngleOfReposeDegrees = 35f;
+
+        [Tooltip("How strongly curvature enriches soil. 0 makes fertility flat; 1 " +
+                 "makes hollows markedly richer than ridges, which is what puts the " +
+                 "big trees in the valleys.")]
+        [Range(0f, 1f)]
+        public float fertilityFromCurvature = 0.5f;
+
+        [Tooltip("Metres of upslope radius used to estimate contributing area for the " +
+                 "topographic wetness index. Larger finds broader drainage lines and " +
+                 "costs more per sample.")]
+        public float wetnessCatchmentRadiusMetres = 48f;
+
+        [Tooltip("Metres of e-folding distance for salt spray inland from a shore. " +
+                 "The measured figure is about 120 m, and it is what produces the real " +
+                 "coastal banding of salt scrub, then pine, then inland forest.")]
+        public float saltSprayDecayMetres = 120f;
+
+        // =====================================================================
+        //  COMPETITION AND CANOPY
+        // =====================================================================
+
+        [Header("Competition and Canopy")]
+
+        [Tooltip("On, taller species shade shorter ones through Beer-Lambert " +
+                 "extinction, so a forest gains an understory instead of being one " +
+                 "species repeated. Off gives every layer full sun.")]
+        public bool enableCanopyCompetition = true;
+
+        [Tooltip("Vertical layers resolved per site, tallest first: emergent, canopy, " +
+                 "understory, ground cover. Fewer layers is cheaper and flatter.")]
+        [Range(1, 4)]
+        public int canopyLayerPasses = 4;
+
+        [Tooltip("Light fraction the ground layer is guaranteed regardless of canopy " +
+                 "above it. Zero is physically honest but leaves bare dirt under dense " +
+                 "forest; a small floor keeps a sparse floor alive.")]
+        [Range(0f, 1f)]
+        public float understoryLightFloor = 0.05f;
+
+        [Tooltip("On, stand density is capped by Reineke's self-thinning law from mean " +
+                 "trunk diameter, so a mature forest cannot read as a plantation. This " +
+                 "can only reduce the trees-per-hectare figure above.")]
+        public bool enableSelfThinning = true;
+
+        [Tooltip("On, spacing follows crown radius from trunk diameter, so large trees " +
+                 "stand apart and saplings stand close without either being tuned.")]
+        public bool enableCrownSpacing = true;
+
+        // =====================================================================
+        //  DISPERSAL AND CLUSTERING
+        // =====================================================================
+
+        [Header("Dispersal and Clustering")]
+
+        [Tooltip("On, sites near an existing stand of the same species are favoured " +
+                 "through an exponential seed-dispersal kernel. This is the single " +
+                 "switch that makes a forest read as grown rather than sprinkled.")]
+        public bool enableDispersalClustering = true;
+
+        [Tooltip("Parent sites per hectare that seed the dispersal field. Few gives " +
+                 "large distinct groves; many approaches an even scatter.")]
+        public float dispersalSeedsPerHectare = 8f;
+
+        [Tooltip("How strongly dispersal biases placement. 0 ignores it; 1 lets it " +
+                 "dominate, producing tight groves with genuinely open gaps between.")]
+        [Range(0f, 1f)]
+        public float clusterContrast = 0.6f;
+
+        // =====================================================================
+        //  DISTURBANCE
+        // =====================================================================
+
+        [Header("Disturbance")]
+
+        [Tooltip("On, fire history shapes the stand: species killed by fire are absent " +
+                 "from recently burnt ground, and serotinous species need fire to be " +
+                 "present at all.")]
+        public bool enableFire = false;
+
+        [Tooltip("Years between fires on typical ground. Mediterranean and boreal " +
+                 "systems run 20 to 60; temperate rainforest runs into the thousands. " +
+                 "Aridity shortens it locally.")]
+        public float fireReturnBaseYears = 120f;
+
+        [Tooltip("On, grazing pressure keeps meadows open by suppressing the species " +
+                 "that cannot tolerate being browsed.")]
+        public bool enableBrowse = false;
+
+        [Tooltip("Baseline grazing and browsing pressure. Productive lowland carries " +
+                 "more herbivores than bare high ground, and the sampler varies this " +
+                 "with productivity.")]
+        [Range(0f, 1f)]
+        public float browsePressureBase = 0.25f;
+
+        [Tooltip("On, snow load limits which crowns survive. This is why conifers " +
+                 "dominate snow country: a broad crown breaks under a load a narrow " +
+                 "one sheds.")]
+        public bool enableSnowLoad = true;
+
+        [Tooltip("Kilograms per square metre of peak snow load at the treeline, " +
+                 "scaled down to zero at the altitude where snow no longer settles.")]
+        public float snowLoadAtTreelineKgPerM2 = 250f;
+
+        [Tooltip("On, steep chutes are scoured clear of anything that cannot tolerate " +
+                 "avalanche, which is what makes a chute read as a chute rather than " +
+                 "as an ordinary steep slope.")]
+        public bool enableAvalanche = true;
+
+        [Tooltip("Degrees. Slope above which avalanche scour is possible. Below about " +
+                 "25 the snowpack holds; above about 50 it sheds before it can build.")]
+        [Range(0f, 90f)]
+        public float avalancheMinSlopeDegrees = 28f;
+
+        [Tooltip("On, exposure past a species' wind limit dwarfs it rather than " +
+                 "removing it, giving the wind-flagged krummholz scrub of a real " +
+                 "treeline instead of a hard line with nothing above it.")]
+        public bool enableKrummholz = true;
+
+        // =====================================================================
+        //  SEASON
+        // =====================================================================
+
+        [Header("Season")]
+
+        [Tooltip("On, foliage colour, leaf cover and grass height follow the season. " +
+                 "Budburst fires on accumulated warmth and autumn on day length, " +
+                 "which is why a cold spring is genuinely late while autumn is not.")]
+        public bool enableSeasonalPhenology = false;
+
+        [Tooltip("On, the season is read from the weather manager's clock, so the whole " +
+                 "world agrees on what month it is. Off uses the day of year below, " +
+                 "for authoring a fixed season.")]
+        public bool seasonFollowsWeather = true;
+
+        [Tooltip("Day of year used when the season does not follow the weather clock. " +
+                 "1 is January 1st in the northern hemisphere, and the southern " +
+                 "hemisphere is handled from latitude rather than authored separately.")]
+        [Range(1, 366)]
+        public int manualDayOfYear = 172;
+
+        [Tooltip("Seconds between ecology evaluations. Phenology and climate are far too " +
+                 "slow to be worth solving every frame, so they run on this tick and " +
+                 "interpolate between ticks. 4 s is the shipped default.")]
+        [Min(0.1f)]
+        public float ecologyTickSeconds = 4f;
+
+        [Tooltip("Simulated days the season must move before the standing vegetation is " +
+                 "rebuilt to match it. In days rather than ticks, so the same value " +
+                 "behaves the same way at any year length.")]
+        [Min(0.5f)]
+        public float seasonRefreshDays = 5f;
+
+        // =====================================================================
+        //  BUDGET
+        // =====================================================================
+
+        [Header("Budget")]
+
+        [Tooltip("Hard ceiling on instances placed in one cell, across every species " +
+                 "and layer. The backstop that keeps a rich envelope from becoming a " +
+                 "frame-time cliff on a mid-range phone. -1 removes the ceiling.")]
+        public int maxInstancesPerCell = 20000;
+
+        [Tooltip("Metres beyond which vegetation stops casting shadows. The highest " +
+                 "value dial on this component for mobile: a shadow caster is drawn " +
+                 "again per cascade, and distant casters cost most to keep.")]
+        public float shadowCasterDistanceMetres = 60f;
+
+        [Tooltip("Candidate sites evaluated per square metre before suitability " +
+                 "rejects any of them. Higher finds better sites and costs linearly " +
+                 "more; this is the sampler's cost dial.")]
+        [Range(0.01f, 4f)]
+        public float candidatesPerSquareMetre = 0.25f;
+
+        // =====================================================================
+        //  DEVICE PRESET (V-33)
+        // =====================================================================
+
+        [Header("Device Preset")]
+
+        // A preset is a starting point, not a lock. It writes the dials once and
+        // then gets out of the way: every field it touched stays editable, and the
+        // inspector says "(modified)" once one of them diverges. The alternative -
+        // a preset that keeps reasserting itself - is the thing authors hate,
+        // because it silently undoes the tuning they just did.
+        [Tooltip("Which device this world's vegetation budget is aimed at. Choose one " +
+                 "and press Apply; the numbers become ordinary editable fields.")]
+        public VegetationQuality qualityPreset = VegetationQuality.Desktop;
+
+        [Tooltip("Checksum of the dials as the preset last wrote them. Divergence is " +
+                 "what makes the inspector say (modified). Not authored by hand.")]
+        [HideInInspector]
+        public int appliedPresetChecksum;
+
+        [Tooltip("Whether a preset has ever been applied. Without this a fresh " +
+                 "component would read as (modified) against a preset nobody chose.")]
+        [HideInInspector]
+        public bool hasAppliedPreset;
+
+        // =====================================================================
+        //  HIERARCHY
+        // =====================================================================
+
+        [Header("Hierarchy")]
+
+        [Tooltip("On, scattered props are parented under this component instead of the " +
+                 "terrain cell they stand on. THIS DISABLES PER-CHUNK RECYCLING: a cell " +
+                 "that streams out parks by deactivating itself, and props parented to " +
+                 "the cell go quiet with it - props parented here do not, so they keep " +
+                 "drawing and colliding while their ground is unloaded. Off is the " +
+                 "shipped behaviour and the right answer for a streaming world; turn " +
+                 "this on only for a small fixed world where every cell is always live.")]
+        public bool parentUnderVegetationSystem = false;
+
+        // =====================================================================
+        //  DEBUG
+        // =====================================================================
+
+        [Header("Debug")]
+
+        [Tooltip("On, the scene view shades the ground by the suitability of the " +
+                 "species selected below, which is how an author sees why a species " +
+                 "is absent rather than guessing at it.")]
+        public bool debugDrawSuitability = false;
+
+        [Tooltip("Index into the species library of the species the suitability " +
+                 "overlay draws. -1 draws the winning species at each site instead.")]
+        public int debugSpeciesIndex = -1;
+
+        [Tooltip("On, the overlay reports which single factor is limiting each site " +
+                 "rather than the combined score. This answers the only question an " +
+                 "author actually has, which is what is stopping it growing here.")]
+        public bool debugShowLimitingFactor = false;
 
         /// <summary>The world this vegetation belongs to, or null when loose in a scene.</summary>
         public UniverseCreatorObject World
@@ -186,7 +517,6 @@ namespace UniverseCreator.TerrainSystem
         {
             globalDensityScale = Mathf.Clamp(globalDensityScale, 0f, 2f);
             grassPerSquareMetre = Mathf.Max(0f, grassPerSquareMetre);
-            detailDrawDistanceMetres = Mathf.Max(0f, detailDrawDistanceMetres);
 
             // Unity requires the detail resolution to divide evenly into patches, so
             // the two are clamped together rather than independently.
@@ -194,8 +524,6 @@ namespace UniverseCreator.TerrainSystem
             detailResolution = Mathf.Clamp(detailResolution, 0, 4096);
 
             treesPerHectare = Mathf.Max(0f, treesPerHectare);
-            treeDrawDistanceMetres = Mathf.Max(0f, treeDrawDistanceMetres);
-            billboardStartMetres = Mathf.Max(0f, billboardStartMetres);
             billboardFadeLengthMetres = Mathf.Max(0f, billboardFadeLengthMetres);
             treeSpacingMetres = Mathf.Max(0f, treeSpacingMetres);
 
@@ -203,6 +531,60 @@ namespace UniverseCreator.TerrainSystem
             clearanceMetres = Mathf.Max(0f, clearanceMetres);
             biomeBlendMetres = Mathf.Max(0f, biomeBlendMetres);
             maxConcurrentCells = Mathf.Clamp(maxConcurrentCells, 1, 16);
+
+            // ---- Ecology ----------------------------------------------------
+
+            suitabilityThreshold = Mathf.Clamp01(suitabilityThreshold);
+            suitabilitySharpness = Mathf.Clamp(suitabilitySharpness, 0.25f, 4f);
+            maxSpeciesPerSite = Mathf.Clamp(maxSpeciesPerSite, 1, 8);
+
+            // A search radius of zero would report every site as coastal, because
+            // "no body found" reports the radius itself as the distance.
+            waterSearchRadiusMetres = Mathf.Max(1f, waterSearchRadiusMetres);
+
+            soilDepthMaxMetres = Mathf.Max(0f, soilDepthMaxMetres);
+            soilAngleOfReposeDegrees = Mathf.Clamp(soilAngleOfReposeDegrees, 1f, 89f);
+            fertilityFromCurvature = Mathf.Clamp01(fertilityFromCurvature);
+            wetnessCatchmentRadiusMetres = Mathf.Max(1f, wetnessCatchmentRadiusMetres);
+            saltSprayDecayMetres = Mathf.Max(1f, saltSprayDecayMetres);
+
+            canopyLayerPasses = Mathf.Clamp(canopyLayerPasses, 1, 4);
+            understoryLightFloor = Mathf.Clamp01(understoryLightFloor);
+
+            dispersalSeedsPerHectare = Mathf.Max(0f, dispersalSeedsPerHectare);
+            clusterContrast = Mathf.Clamp01(clusterContrast);
+
+            // One year is the shortest interval that still means "a fire history"
+            // rather than permanent burning.
+            fireReturnBaseYears = Mathf.Max(1f, fireReturnBaseYears);
+            browsePressureBase = Mathf.Clamp01(browsePressureBase);
+            snowLoadAtTreelineKgPerM2 = Mathf.Max(0f, snowLoadAtTreelineKgPerM2);
+            avalancheMinSlopeDegrees = Mathf.Clamp(avalancheMinSlopeDegrees, 0f, 90f);
+
+            manualDayOfYear = Mathf.Clamp(manualDayOfYear, 1, 366);
+            ecologyTickSeconds = Mathf.Max(0.1f, ecologyTickSeconds);
+            seasonRefreshDays = Mathf.Max(0.5f, seasonRefreshDays);
+
+            // -1 is the documented "no ceiling" sentinel, so it must survive the
+            // clamp that otherwise forces a positive count.
+            if (maxInstancesPerCell != -1)
+                maxInstancesPerCell = Mathf.Max(0, maxInstancesPerCell);
+
+            shadowCasterDistanceMetres = Mathf.Max(0f, shadowCasterDistanceMetres);
+            candidatesPerSquareMetre = Mathf.Clamp(candidatesPerSquareMetre, 0.01f, 4f);
+            detailMemoryCeilingMB = Mathf.Max(1f, detailMemoryCeilingMB);
+
+            // Every field above feeds the resolved snapshot, which is computed once
+            // and reused per cell. Clamping a value without dropping that snapshot
+            // would leave the scatter pass building from the number the author just
+            // corrected.
+            MarkSettingsDirty();
+
+            // The four LOD figures are only inert until something writes them
+            // through to the one place the Terrain reads. Doing it here means an
+            // edit reaches the terrain on the next rebuild rather than needing a
+            // second action nobody would guess at. (V-31)
+            ApplyLodToWorld();
         }
     }
 }

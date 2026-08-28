@@ -78,6 +78,53 @@ namespace UniverseCreator.Nodes.Scatter
             int cap = Mathf.Max(1, maxDensityPerCell);
             int[,] grid = new int[resZ, resX];
 
+            // ---- V-13: the ceiling, and whether ecology has a say ---------------
+            //
+            // With a vegetation manager present the per-cell ceiling is its shipped
+            // blades-per-square-metre figure times this cell's own ground area, so the
+            // authored number is a density rather than a per-cell integer whose meaning
+            // changes with grid resolution. ScatterApplier preserves that density when
+            // it resamples to the terrain's own detail grid.
+            Ecology.EcoScatterContext ctx = tile != null ? tile.ecology : null;
+            bool ecoActive = false;
+
+            if (ctx != null)
+            {
+                float cellArea = Mathf.Max(1e-4f, mppX * mppZ);
+                float perCell = Ecology.EcoDensity.CeilingPerSquareMetre(
+                    Channel, in ctx.settings, density) * cellArea;
+
+                cap = Mathf.Max(0, Mathf.RoundToInt(perCell));
+
+                // A manager asking for no grass gets none, and gets the empty grid
+                // written anyway so a previous build's blades are cleared rather than
+                // left standing.
+                if (cap <= 0)
+                {
+                    tile.outputs.detailLayers[detailLayerIndex] = grid;
+                    return;
+                }
+
+                ctx.EnsureBound(height);
+                ecoActive = ctx.CanSelect() && ctx.details != null && ctx.details.IsUsable();
+            }
+
+            // Scratch for the per-cell suitability, allocated once for the tile. The
+            // detail table is reached through density rather than through selection -
+            // there is no instance here to name a species on - so only the best factor
+            // any of its species achieves is read.
+            float[] ecoWeights = null;
+            float[] ecoSuitabilities = null;
+            float ecoFloor = 0f;
+
+            if (ecoActive)
+            {
+                int speciesCount = Mathf.Max(1, ctx.details.count);
+                ecoWeights = new float[speciesCount];
+                ecoSuitabilities = new float[speciesCount];
+                ecoFloor = ctx.SuitabilityFloor;
+            }
+
             for (int z = 0; z < resZ; z++)
             {
                 if (stop != null && (z & 31) == 0 && stop.StopRequested) return;
@@ -88,6 +135,7 @@ namespace UniverseCreator.Nodes.Scatter
                 for (int x = 0; x < resX; x++)
                 {
                     int i = row + x;
+                    float wx = originX + x * mppX;
 
                     float weight = mask != null ? Mathf.Clamp01(mask.arr[i]) : 1f;
                     if (weight <= 0.001f) continue;
@@ -112,9 +160,20 @@ namespace UniverseCreator.Nodes.Scatter
 
                     if (patchAmount > 0.001f)
                     {
-                        float wx = originX + x * mppX;
                         float p = patchNoise.Perlin(wx / safePatch, wz / safePatch);
                         weight *= Mathf.Lerp(1f, Mathf.Clamp01(p * 1.6f), patchAmount);
+                    }
+
+                    // Sampled after the cheap filters, never before: a cell already
+                    // rejected on slope or mask must not pay for an environment sample.
+                    if (ecoActive)
+                    {
+                        Ecology.EnvironmentSample site = ctx.sampler.Sample(wx, wz);
+
+                        weight *= Ecology.EcoDensity.BestSiteFactor(
+                            ctx.details, in site, ecoFloor, ecoWeights, ecoSuitabilities);
+
+                        if (weight <= 0.001f) continue;
                     }
 
                     int count = Mathf.RoundToInt(weight * cap);
