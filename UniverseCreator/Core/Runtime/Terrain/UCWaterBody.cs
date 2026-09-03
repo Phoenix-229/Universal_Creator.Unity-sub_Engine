@@ -3220,7 +3220,7 @@ namespace UniverseCreator.TerrainSystem
         // =====================================================================
         //  PER-NODE READOUTS  (T23)
         //
-        //  A road node in RoadArchitect tells you its grade to the node either
+        //  A road node in Road & City Master tells you its grade to the node either
         //  side of it, and that one number is what a designer actually steers a
         //  course with: not "the river drops 240 m overall" but "this reach is at
         //  9%, which is a rapid, and the one before it is at 0.3%, which is a

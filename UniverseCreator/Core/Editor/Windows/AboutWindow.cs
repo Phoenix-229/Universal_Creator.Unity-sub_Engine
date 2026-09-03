@@ -69,7 +69,7 @@ namespace UniverseCreator.Editor.Windows
                 DrawModule("Weather & Atmosphere", true);
                 DrawModule("Lighting", true);
                 DrawModule("Geometry & Streaming", true);
-                DrawModule("RoadMaster Bridge", false);
+                DrawModule("Road & City Master Bridge", false);
             }
 
             EditorGUILayout.Space(14);

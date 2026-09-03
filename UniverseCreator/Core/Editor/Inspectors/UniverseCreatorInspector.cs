@@ -235,7 +235,12 @@ namespace UniverseCreator.Editor.Inspectors
 
             GUILayout.Space(4);
 
-            Texture2D logo = UCIcons.Builtin("d_Terrain Icon");
+            // The product's own mark, not Unity's built-in terrain glyph. This bar is the first thing an author
+            // sees on selecting the world object, and a built-in glyph makes the tool look like a part of the
+            // editor rather than like something with an author. The built-in stays as a fallback so the bar still
+            // reads if the brand image has not been split into its Resources folder yet.
+            Texture2D logo = UCIcons.Brand();
+            if (logo == null) logo = UCIcons.Builtin("d_Terrain Icon");
             if (logo != null) GUILayout.Label(logo, GUILayout.Width(22), GUILayout.Height(22));
 
             GUIStyle titleStyle = new GUIStyle(EditorStyles.boldLabel);

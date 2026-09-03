@@ -1,0 +1,35 @@
+# Road & City Master is a separate product with its own repository.
+# It must never enter this history. See § 10.39.
+RoadCityMaster/
+RoadCityMaster.meta
+RoadArchitect-master/
+
+# The art library is deliberately not in this history.
+#
+# 610 MB across 449 binary files -- 36 MB for a single tree LOD0 -- which every
+# clone of a source repository would have to fetch in full, forever, because git
+# stores each re-export of a mesh as a new blob rather than a delta. The models
+# are also the one part of this folder whose redistribution terms are not this
+# project's to assert, and a source history is the wrong place to make that
+# assertion by accident.
+#
+# The scripts here reference the models by GUID, so the .meta files ARE tracked
+# and the wiring survives; a checkout without Content/ opens with the prefabs
+# unresolved and is repaired by restoring the folder, not by re-importing.
+#
+# The folder's OWN .meta is not tracked, for the same reason as the folder: a
+# meta with no folder beside it is deleted by Unity on the next import, so
+# tracking it only produces churn in every clone that does not have the art.
+UniverseCreator/Content/
+UniverseCreator/Content.meta
+
+# Unity's own per-machine leftovers, in case the working copy is ever opened
+# with the project root as the repository root rather than this folder.
+*.csproj
+*.sln
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.suo
+*.unityproj

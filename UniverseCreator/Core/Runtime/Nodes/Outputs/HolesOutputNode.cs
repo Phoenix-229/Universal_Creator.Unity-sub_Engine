@@ -21,8 +21,8 @@
 //  ------------
 //  A terrain hole removes surface; it does not create wall geometry. The tunnel
 //  shell that closes the opening is supplied by the road system (Module 7) through
-//  RoadMasterLinker, which reads this same mask so its mesh lands exactly on the
-//  cut edge. Module 1's job is to make the cut authoritative and reproducible.
+//  RoadCityMasterLinker, which reads this same mask so its mesh lands exactly on
+//  the cut edge. Module 1's job is to make the cut authoritative and reproducible.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;

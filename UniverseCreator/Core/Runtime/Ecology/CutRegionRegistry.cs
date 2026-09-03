@@ -2,7 +2,7 @@
 //  Universe Creator - Module 3: The Living World
 //  File:    CutRegionRegistry.cs
 //  Purpose: Records the volumes the road system has cut, so vegetation can be kept
-//           out of them (V-23). RoadMasterLinker.NotifyCutRegion shipped as a
+//           out of them (V-23). RoadCityMasterLinker.NotifyCutRegion shipped as a
 //           deliberate no-op; this is what it now notifies.
 //
 //  WHY A SHARED REGISTRY AND NOT A REFERENCE. The road bridge calls

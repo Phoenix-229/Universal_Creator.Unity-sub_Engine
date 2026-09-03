@@ -1,17 +1,23 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
 //  File:    TerrainHealer.cs
-//  Purpose: STUB. Reads RoadMaster's cut zones and heals seams where the road
-//           mesh meets the terrain. The interface is real and final; the
+//  Purpose: STUB. Reads Road & City Master's cut zones and heals seams where
+//           the road mesh meets the terrain. The interface is real and final; the
 //           healing solver lands in Module 7.
 //
-//  CRITICAL FRAMING: RoadMaster cuts the terrain mesh to embed the road, which
+//  CRITICAL FRAMING: the path tool cuts the terrain mesh to embed the road, which
 //  leaves a gap unless the terrain heights along the cut boundary are adjusted
 //  to match the road surface. That adjustment is "healing." TerrainHealer is
-//  the "consumer" side of the PCG bridge — it reads RoadMaster's spline data
+//  the "consumer" side of the PCG bridge — it reads the tool's spline data
 //  and modifies Universe Creator's terrain to close the seam.
 //
-//  PDF REFERENCE: Section 8.3 "Terrain Healing Pipeline".
+//  NAMING: prose in this file names Road & City Master, the path tool that ships
+//  with the toolkit, because that is the tool this stub was written against and a
+//  reader deserves to know which one. The symbols do not: IPCGDataConsumer and
+//  every signature below stay product-neutral, so a different path tool can drive
+//  the same healing pass without a rename. See Module 6 § 10.0b.
+//
+//  PDF REFERENCE: Section 8.3 (terrain healing pipeline).
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
@@ -21,13 +27,15 @@ using UniverseCreator.TerrainSystem;
 namespace UniverseCreator.Integration
 {
     /// <summary>
-    /// Contract: RoadMaster publishes cut splines and their surface elevations;
-    /// Universe Creator reads them and adjusts terrain heights to match.
+    /// Contract: the path tool publishes cut splines and their surface elevations;
+    /// Universe Creator reads them and adjusts terrain heights to match. Worded
+    /// without a product name on purpose — Road & City Master is the implementation
+    /// that drives it today, not a requirement of the contract.
     /// </summary>
     public interface IPCGDataConsumer
     {
         /// <summary>
-        /// Called by RoadMaster after a spline is placed or edited. The consumer
+        /// Called by the path tool after a spline is placed or edited. The consumer
         /// should read the spline's control points, sample its surface elevation,
         /// and blend the terrain heights within blendDistance of the spline to
         /// match that elevation.
@@ -35,7 +43,7 @@ namespace UniverseCreator.Integration
         void ConsumeSpline(GameObject splineObject, float blendDistance);
 
         /// <summary>
-        /// Batch variant: RoadMaster passes a list of all active splines in one
+        /// Batch variant: the path tool passes a list of all active splines in one
         /// chunk, so the consumer can heal them in a single pass rather than
         /// triggering a terrain update per spline.
         /// </summary>
@@ -63,13 +71,13 @@ namespace UniverseCreator.Integration
 
         // =====================================================================
         //  MODULE 1 SCOPE: interface signatures are real and final. The
-        //  healing solver is TODO for Module 7, after RoadMaster exists.
+        //  healing solver is TODO for Module 7, after the path tool exists.
         // =====================================================================
 
         public void ConsumeSpline(GameObject splineObject, float blendDistance)
         {
             // TODO [Module 7]: read the spline's control points and their Y
-            // coordinates from RoadMaster's spline component. For each point,
+            // coordinates from the path tool's spline component. For each point,
             // find the terrain chunk that contains it, and blend heights within
             // blendDistance using a smooth falloff so the road surface and the
             // terrain read as one continuous surface.

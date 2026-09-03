@@ -48,7 +48,7 @@ namespace UniverseCreator.Nodes.Scatter
         /// </summary>
         public int prototypeIndex;
 
-        /// <summary>Trees closer than this to a road are removed by RoadMaster.</summary>
+        /// <summary>Trees closer than this to a road are removed by Road &amp; City Master.</summary>
         public float roadClearance = 4f;
 
         protected override void PlaceInstances(Matrix height, Matrix mask, TileData tile,

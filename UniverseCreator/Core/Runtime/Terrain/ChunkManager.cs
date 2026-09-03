@@ -2479,7 +2479,7 @@ namespace UniverseCreator.TerrainSystem
 
 
         // =====================================================================
-        //  TUNNEL CARVING  (called by RoadMasterLinker, Module 7)
+        //  TUNNEL CARVING  (called by RoadCityMasterLinker, Module 7)
         // =====================================================================
 
         /// <summary>

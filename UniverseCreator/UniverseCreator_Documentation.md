@@ -93,13 +93,19 @@ absent, this manual says so rather than leaving you to discover it.
 40. [Dynamic lighting — capabilities and honest limits](#40-dynamic-lighting--capabilities-and-honest-limits)
 41. [Geometric density — capabilities and honest limits](#41-geometric-density--capabilities-and-honest-limits)
 42. [Weather and climate](#42-weather-and-climate)
+43. [Integrating an external path-authoring tool](#43-integrating-an-external-path-authoring-tool)
+    - [The two components](#the-two-components) — the provider, and the socket you enter a tool into
+    - [The provider surface](#the-provider-surface) — all six members, with their failure returns
+    - [The lifecycle](#the-lifecycle-acquire-request-release) — acquire, verify, request, release
+    - [What Universe Creator guarantees](#what-universe-creator-guarantees) — and [what it does not](#what-universe-creator-does-not-guarantee)
+    - [Implementing a different path tool](#implementing-a-different-path-tool) — the seven-point checklist
 
 **Appendices**
 
-43. [Appendix A — Mathematical reference](#appendix-a--mathematical-reference)
-44. [Appendix B — Enumeration reference](#appendix-b--enumeration-reference)
-45. [Appendix C — Diagnostics and self test](#appendix-c--diagnostics-and-self-test)
-46. [Appendix D — Glossary](#appendix-d--glossary)
+44. [Appendix A — Mathematical reference](#appendix-a--mathematical-reference)
+45. [Appendix B — Enumeration reference](#appendix-b--enumeration-reference)
+46. [Appendix C — Diagnostics and self test](#appendix-c--diagnostics-and-self-test)
+47. [Appendix D — Glossary](#appendix-d--glossary)
 
 ---
 
@@ -176,7 +182,7 @@ Stated plainly so you do not go looking:
   than implying parity.
 - **No road or river spline mesh generator** beyond the water surfaces described in
   [chapter 33](#33-water-authoring-physics-and-dynamics). Road integration is via
-  `RoadMasterLinker` and `TerrainHealer`, which cooperate with a third-party road tool.
+  `RoadCityMasterLinker` and `TerrainHealer`, which cooperate with a separate road tool.
 - **No ECS, no Burst, no jobs, no `NativeArray`.** The entire system is standard
   managed C# over flat `float[]` arrays with `System.Threading.Tasks` for parallelism.
   This is deliberate: it keeps the code portable, debuggable with a normal debugger, and
@@ -285,7 +291,7 @@ UniverseCreator                     ← UniverseCreatorObject
 │       │   └── UC_Tunnel_Shell     ← only where the graph cuts holes
 │       ├── Chunk_0_1
 │       └── …
-└── RoadMasterLinker                ← RoadMasterLinker, the Module 7 bridge
+└── RoadCityMasterLinker            ← the Module 7 bridge to Road &amp; City Master
 ```
 
 `Terrain` carries no component of its own and its inspector is empty. That is deliberate:
@@ -4399,11 +4405,16 @@ not cost a full regeneration.
 `Default Blend Distance` (4 m) — how far modifications are blended into surrounding terrain.
 Used when external tools modify the terrain, so an edit does not leave a step.
 
-### RoadMasterLinker
+### RoadCityMasterLinker
 
-Optional integration point for third-party road tools. Exposes road masks to the graph so
-scatter can be excluded from roads and terrain can be flattened along them. Inert if no road
-tool is present.
+The integration point for a road tool — Road &amp; City Master in this toolkit, though the
+contract it implements (`IPCGDataProvider`) names no product, so another path tool can
+register against it unchanged. Exposes road masks to the graph so scatter can be excluded
+from roads and terrain can be flattened along them. Inert if no road tool is present.
+
+Worlds authored before this component was renamed carry a child called `RoadMasterLinker`.
+Rebuilding the hierarchy renames that object in place rather than adding a second one, so
+the reference survives; you do not need to fix it by hand.
 
 ### ScatterPrototypeLibrary
 
@@ -6932,6 +6943,271 @@ presentation smoothers that ease a transition over `transitionSeconds`, and each
 to the closed-form value so a scrub or a reload lands on the true weather. Freezing `timeScale`
 to 0 freezes the sun, sky, weather and phenology together; setting the same day, hour and
 latitude twice from different frame counts produces identical state.
+
+## 43. Integrating an external path-authoring tool
+
+Universe Creator owns the terrain. An external tool that lays roads, rails, canals or paths across that
+terrain therefore cannot simply write to it — two systems writing the same heightfield produce a scene
+where the last one to run wins and neither can be undone. Instead Universe Creator publishes a contract,
+and an external tool asks.
+
+This chapter is the contract, written for whoever is implementing the asking side. It documents the
+socket you enter your tool into, every member of the provider interface with its real behaviour, the
+lifecycle you must follow, and — the part that is usually left out and matters most — what Universe
+Creator guarantees in return and what it does not. Everything here is described from the shipped code;
+where a claim would be an intention rather than a behaviour, it says so.
+
+You do not need to have read any external tool's manual to implement against this chapter.
+
+### The two components
+
+Integration is two components on the world side, both additive. A project with neither behaves exactly as
+it always did.
+
+`Road City Master Linker` is the provider. Add it to the object that generates your terrain — the same
+object that owns the chunk manager, or a child of it — and it resolves terrain queries against the live
+chunk grid. It implements `IPCGDataProvider`, and it is the object your tool holds a reference to. The
+class is named for the first tool that consumed it; the interface it implements is product-neutral, so a
+second tool registers against it without any rename.
+
+`Path Provider Socket` is the reporting slot, under **Add Component ▸ Universe Creator ▸ Integration ▸
+Path Provider Socket**. It holds a reference to the external tool's own link component and reports back
+what that tool says about itself: whether the socket accepted it, the name the tool gives itself, which
+version of the provider surface it was written against, whether it is currently routing work, and how many
+regions of provider-owned ground it is holding right now. The socket never calls the tool to do work — the
+direction of control runs the other way — with one exception, *Clear the socket*, which asks the tool to
+give every held region back and only then empties the field.
+
+Nothing in generation consults the socket. It reports; the entered tool acts.
+
+### What the tool must publish back
+
+The socket reads six members from an `IPathToolLink` implemented by the external tool. This is the smaller
+half of the integration and it exists so the world side can report on the connection without knowing
+anything about the tool.
+
+| Member | Type | What it must return |
+| --- | --- | --- |
+| `PathToolName` | `string` | The tool's own display name, shown in the socket's status line. Supplied as data so Universe Creator never hard-codes another product's name. |
+| `UnderstoodProviderMemberCount` | `int` | How many members of `IPCGDataProvider` the tool was written against. Compared against the surface actually published here. |
+| `IsConnectedToProvider` | `bool` | Whether the tool has verified a provider and is routing work through it. Being entered in the socket and being connected are two different facts. |
+| `HeldRegionCount` | `int` | How many provider-owned regions the tool is holding right now — pads, cut regions and tunnel openings together. Zero after a clean release. |
+| `StatusSentence` | `string` | One sentence, authored by the tool, describing what it is doing. Shown verbatim: the tool knows why it is in the state it is in. |
+| `ReleaseAllHeldRegions()` | `int` | Give every held region back and return how many were released, so the socket can report that the release ran rather than assuming it. |
+
+### What the socket reports back
+
+Five states, and the reason there are five rather than two is that a broken integration and an absent one
+need different sentences.
+
+| State | Headline | Meaning |
+| --- | --- | --- |
+| `Empty` | no tool connected | Nothing entered. Universe Creator behaves exactly as it does with no socket component in the scene at all. |
+| `Accepted` | connected | Entered, understood, and reporting. The status line quotes the tool's own sentence. |
+| `NotALink` | not a link | Something was entered that does not implement `IPathToolLink`. Reported rather than ignored, because an ignored mistake looks identical to an empty socket. |
+| `Vanished` | link missing | A link was accepted here and is no longer in the scene. Anything it was holding open could not be released by it, so the sentence names the tool and tells you to look for what it left behind. |
+| `SurfaceMismatch` | version drift | The tool was written against a different number of provider members than this version publishes. Both counts are shown; until they agree, treat what the tool reports as unreliable. |
+
+The socket saves the accepted tool's name with the scene. Without that, a link that has since been deleted
+would be indistinguishable from a field nobody ever filled in — which is exactly the case where a silent
+"nothing connected" costs an afternoon.
+
+There is no version number on the provider interface, and adding one would only move the problem: a number
+that a person maintains by hand drifts from the thing it describes. Instead both sides count the interface's
+members off the type itself — `typeof(IPCGDataProvider).GetMethods().Length`, six as of this version — and
+compare. Adding a member to the contract therefore reports as drift on the next scene open instead of being
+silently half-used by a tool that predates it.
+
+### The provider surface
+
+`IPCGDataProvider` has six members. What follows is what each one actually does, including its failure
+return, because a failure return that an integrator discovers by experiment becomes an assumption that
+breaks on the next change to either product.
+
+#### `float SampleHeight(float worldX, float worldZ)`
+
+The terrain height at that world XZ, in world space and in metres — the terrain's own sampled height plus
+the owning chunk's Y position, so the value is directly comparable with a transform's `position.y`.
+
+Returns **0** when the point lies outside the world, or inside it but on a chunk that has not generated
+yet. Zero is a legitimate height, so a caller that needs to tell "ground at sea level" from "no answer"
+must check the point against `GetActiveChunkBounds()` first. Sampling is bilinear against the heightfield,
+not against the rendered mesh, so it does not change with LOD.
+
+#### `Vector3 SampleNormal(float worldX, float worldZ)`
+
+The interpolated surface normal at that world XZ, normalised, in world space. Use it for banking and for
+slope analysis; the slope as a fraction is `sqrt(1 - n.y²) / n.y`, or simply `1 - n.y` for a small-angle
+approximation.
+
+Returns **`Vector3.up`** when the point is outside the world or its chunk has not generated. Like the height
+case, that is a legitimate value — perfectly flat ground — so the bounds check comes first.
+
+#### `List<Bounds> GetActiveChunkBounds()`
+
+The world-space bounds of every chunk that is live right now: pooled, active in the hierarchy, and holding
+generated data. A freshly allocated list each call, safe for the caller to keep or mutate.
+
+This is the answer to "may I trust a sample here". It behaves the same way in the editor and in play mode —
+there is no separate editor path — but *what it contains* differs, and that difference is the one integrators
+trip over. In the editor, the chunks that exist are the ones the world has been asked to build, so a large
+world commonly reports a subset and everything beyond it samples as zero. In play mode the set changes as the
+camera moves and a chunk that answered a moment ago may be gone. Treat the list as a snapshot for the current
+frame, never as world extents cached at startup.
+
+An empty list is a valid answer meaning nothing is generated yet, and it is what you get before the world has
+been built at all.
+
+#### `void NotifyCutRegion(Bounds worldBounds)`
+
+Your statement that you intend to cut, or have cut, terrain inside that box. It obliges you to nothing beyond
+making the call, and it obliges Universe Creator to nothing about the heightfield: **this call does not flatten,
+lower or heal anything**, and it is not how you request a change to the ground.
+
+What it does do is record the box as a fact about the world that only the path tool knows. Vegetation is the
+consumer: a recorded cut region keeps the next scatter bake from putting trees and detail back on the
+carriageway. There is no terrain pre-loading to do, because the world is resident and only its level of detail
+varies with distance.
+
+Call it once per region you affect, in world space, sized to the ground you actually disturb rather than to the
+road's bounding box — an over-sized region clears vegetation you wanted to keep. The registry accumulates, so
+calling twice for the same ground is harmless but pointless.
+
+#### `int RequestTunnelOpening(Bounds worldBounds)`
+
+Opens the terrain surface inside the box and keeps it open. Three things happen, and all three are required for
+an opening to be usable rather than merely visible: the surface inside the footprint is removed from the holes
+map; a wall skirt is generated around the cut edge, hanging down to the tunnel floor, so a bored hill reads as
+bored rather than sliced open; and a floor with a collider is laid across the footprint so the road and
+anything on it has ground to rest on instead of falling through.
+
+Returns a **stable handle**, counting from 1, to hand back to `ReleaseTunnelOpening`. Handles are ids, not list
+indices, so releasing one opening never repoints another caller's handle at someone else's tunnel.
+
+Returns **−1** on failure — the provider is present but has no chunk manager to carve — and logs a warning
+naming the provider. −1 is never a valid handle, so a caller that stores it and releases it later is safe; a
+caller that treats it as success is not.
+
+The carve is remembered, so a later regeneration re-applies it and rebuilds the shell against the new surface
+rather than filling the tunnel back in. The opening is a *provider-owned resource* from the moment this returns.
+
+#### `void ReleaseTunnelOpening(int handle)`
+
+Fills a previously opened cavity back in, drops its shell and floor, and forgets the carve. Unknown handles,
+already-released handles and −1 are all ignored without error, so a release path that runs twice is safe.
+
+Not calling it is the failure mode this whole contract exists to prevent. An opening you never release stays
+open for the rest of the session, survives every regeneration by design, and is not attributable to anything —
+the provider knows a hole is held and no longer knows who asked for it. The visible result is a hole in a
+hillside with no tunnel in it, or a tunnel deleted from the road network whose mouth is still cut. Release on
+delete, release on disconnect, and release when your tool is unloaded.
+
+### The lifecycle: acquire, request, release
+
+Four steps, and the fourth is the one implementations omit.
+
+**Acquire.** Hold a reference to the provider component that an author entered by hand, and cast it to
+`IPCGDataProvider`. Do not search the scene for one. A scene with two candidate providers has no correct guess,
+and a scene with a leftover test object has a confidently wrong one; an entered reference is the author's
+statement of which object owns the terrain. Verify once, on enable, and record what you concluded — including
+the member count comparison above — rather than re-verifying on every call.
+
+**Verify before you use.** A provider reference that resolves is not the same as a provider that can answer.
+`GetActiveChunkBounds()` returning an empty list during scene load is normal, not broken. One retry a tick later
+is the cheapest way to tell "not ready yet" from "not working", and it should be bounded: a provider that is
+genuinely dead must be reported, not retried forever.
+
+**Request.** Read with `SampleHeight` / `SampleNormal` freely — they are queries and own nothing. Announce ground
+you disturb with `NotifyCutRegion`. Take openings with `RequestTunnelOpening` and keep the handle. Every handle is
+a debt.
+
+**Release.** Give every handle back — on delete, on disconnect, when your tool is disabled, and before the
+reference is dropped. Order matters only in that release must come *before* you forget who you were talking to: a
+reference dropped first leaves a hold nobody can find. The socket's *Clear the socket* button exists precisely to
+run your release path and report the count it returned, so that "the release happened" is something an author can
+see rather than assume.
+
+Failing to release does not throw and does not log. That is why the socket displays the held count: a non-zero
+count with your tool disconnected is the visible form of the bug.
+
+### What Universe Creator guarantees
+
+- **Samples inside `GetActiveChunkBounds()` are real.** Height and normal are read from the live heightfield of a
+  generated chunk. They do not vary with LOD, camera position or frame rate.
+- **Samples outside it are not.** Height is 0 and the normal is up. Both are legitimate values, neither is an
+  error, and nothing tells you which you got. Check the bounds; do not infer from the value.
+- **Openings survive regeneration.** A held opening is re-applied and its shell rebuilt against the new surface
+  for as long as the handle is outstanding. This is the one thing the provider does that you cannot do yourself.
+- **Handles are stable and non-reused within a session.** They count from 1, they are ids rather than indices, and
+  releasing one never invalidates another.
+- **The same world settings produce the same terrain.** Sampling twice from different frame counts, or after a
+  reload with the same settings, gives the same heights.
+- **Everything is main-thread only.** The implementation touches Unity `Terrain` and `TerrainData` and creates
+  GameObjects for tunnel shells. No member of the provider interface may be called from a job or a background
+  thread, and none of them is written to be safe there.
+
+### What Universe Creator does not guarantee
+
+- **Terrain may move under you between requests.** A regeneration changes heights inside the ground it rebuilds.
+  A height you sampled and cached is a value from a moment, not a subscription. Held openings and pads are
+  re-applied; a cached number is not.
+- **You are not told when that happens.** There is no callback, event or dirty flag on the provider surface. If
+  your tool needs to react to regenerated ground, it must re-sample; if it needs the ground to stay put, it must
+  hold it rather than remember it.
+- **Handles do not survive a scene reload.** The carve list is runtime state and starts empty, so after a load
+  every opening you rely on must be requested again. A tunnel shell whose opening was never re-requested sits
+  over solid ground.
+- **Requests are not queued.** Calling `RequestTunnelOpening` before the world exists returns −1 rather than
+  deferring. Check the return; retry when the bounds list is non-empty.
+- **Nothing is undo-recorded on the provider's behalf.** An opening taken during an author action is not undone
+  by Ctrl-Z. Your tool owns the undo story for its own objects and should release explicitly rather than relying
+  on undo to unwind a request.
+
+### What changes when a tool is connected
+
+A connected tool is not a switch between a broken mode and a working one. Most of what a path tool does works
+either way, some of it works over more ground when connected, and a few things genuinely cannot be done without
+a provider — those refuse in words rather than pretending.
+
+The table below is **generated from the same source the connecting tool's own manual and its inspector read**, so
+the three cannot disagree. Do not edit it by hand; the same source drives a check that fails when the copy in a
+document drifts from the code.
+
+<!-- availability-table:begin — generated from the availability table in code; do not edit by hand -->
+
+| Feature | Availability | Standalone | Connected |
+| --- | --- | --- | --- |
+| Road cut into terrain | better connected | the terrain under the road is lowered or raised directly, on whichever terrain tiles are in the scene | the cut is requested from the provider, which shapes it into ground it owns and keeps it through regeneration |
+| Terrain restored when a road is deleted | better connected | the heightfield stored before the road was built is written back, so the restore is only as good as that stored copy | the provider is told which ground changed and regenerates its natural surface there, with no stored copy to go stale |
+| Grass and detail cleared along the road | both modes | detail layers under the road are cleared and restored on delete | the same clearing, announced to the provider so it does not repopulate the corridor |
+| Trees removed from the road corridor | both modes | trees standing in the corridor are removed and put back on delete | the same removal, announced with the corridor so the provider leaves it clear |
+| Terrain texture painted under the road | both modes | the splat map is painted under the road surface | the same painting, announced to the provider with the painted region |
+| Tunnel cavity kept open through terrain | needs a provider | the tunnel shell is placed and terrain holes are punched, but nothing holds them open if the terrain is regenerated -- to keep a cavity open, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the opening is held by the provider and survives regeneration; it is released when the tunnel is deleted |
+| Bridge deck carried over terrain | better connected | the deck spans the ground untouched and the abutments and pier footings are terraformed once; whether a pier lands in water can only be answered for terrain tiles in the scene | the footings are requested as held ground the provider keeps flat, and the provider answers what each support stands on, including ground no tile covers yet |
+| Building pads held against a shared heightfield | needs a provider | a pad is terraformed once and stays until something else changes that ground -- to hold a pad against regeneration, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the pad is a held request, so the provider keeps that ground flat and gives it back on delete |
+| Building and roads across streamed terrain chunks | needs a provider | only terrain tiles already loaded in the scene can be read or changed; a road leaving them stops affecting the ground -- for streamed terrain, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the provider reports which chunks are active, and ground outside them is requested rather than assumed absent |
+| Roads following the natural ground | better connected | height and slope are sampled from the terrain tiles in the scene | height and slope come from the provider, which knows ground that has not been built into a tile yet |
+| City blocks, lots and street furniture | both modes | generated from the road network; the terrain is only read, never owned | identical, and the ground it sits on is requested through the same gateway as everything else |
+
+<!-- availability-table:end -->
+
+### Implementing a different path tool
+
+If you are writing your own tool against this contract, the following is the whole of what you owe.
+
+1. Take a hand-entered reference to the provider component and cast it to `IPCGDataProvider`. Never search.
+2. Compare `typeof(IPCGDataProvider).GetMethods().Length` against the number your tool was written for, and report
+   a mismatch as drift instead of using the surface anyway.
+3. Check `GetActiveChunkBounds()` before trusting any sample, every time it matters, not once at startup.
+4. Announce disturbed ground with `NotifyCutRegion` in world space, sized to what you actually disturb.
+5. Keep every handle `RequestTunnelOpening` returns, treat −1 as failure, and release every one of them.
+6. Implement `IPathToolLink` — six members, listed at the top of this chapter — so an author can enter your tool
+   into the socket and read back what it is doing. `HeldRegionCount` must be the real outstanding count, and
+   `ReleaseAllHeldRegions()` must be the same release path your own disconnect runs, not a second copy of it.
+7. Do all of it on the main thread.
+
+Do that and the integration is debuggable from either end: your own status surface, and an author standing on the
+world side who can see the name, the state and the held count without opening your tool.
 
 ## Appendix A — Mathematical reference
 

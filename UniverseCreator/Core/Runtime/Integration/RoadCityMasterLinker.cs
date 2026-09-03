@@ -1,17 +1,22 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
-//  File:    RoadMasterLinker.cs
-//  Purpose: STUB. Exposes Universe Creator's terrain data to RoadMaster (Module 7)
-//           through the IPCGDataProvider contract. The interface is real and final;
-//           the implementation lands in Module 7.
+//  File:    RoadCityMasterLinker.cs
+//  Purpose: STUB. Exposes Universe Creator's terrain data to Road & City Master
+//           (Module 7) through the IPCGDataProvider contract. The interface is
+//           real and final; the implementation lands in Module 7.
 //
-//  CRITICAL FRAMING: Universe Creator is one engine subsystem; RoadMaster is
-//  another, owned by Module 7. They communicate through a formal contract, not
-//  by reaching into each other's internals. This class is the "provider" side
-//  of that contract — it publishes terrain surface data, chunk bounds, and
-//  heightfield queries that RoadMaster reads when laying splines.
+//  CRITICAL FRAMING: Universe Creator is one engine subsystem; Road & City Master
+//  is another, owned by Module 7. They communicate through a formal contract, not
+//  by reaching into each other's internals. This class is the "provider" side of
+//  that contract — it publishes terrain surface data, chunk bounds, and
+//  heightfield queries that the path tool reads when laying splines.
 //
-//  PDF REFERENCE: Section 8.2 "RoadMaster Integration".
+//  NAMING: this file is named for the path tool by the author's explicit ruling,
+//  which overrides C-05 for the linker pair specifically (see Module 6 § 10.0b).
+//  The interface it implements stays product-neutral, so a different path tool can
+//  register against it without any rename.
+//
+//  PDF REFERENCE: Section 8.2 (path tool integration).
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
@@ -21,12 +26,13 @@ using UniverseCreator.TerrainSystem;
 namespace UniverseCreator.Integration
 {
     /// <summary>
-    /// Contract: Universe Creator publishes terrain data; RoadMaster reads it.
+    /// Contract: Universe Creator publishes terrain data; Road & City Master
+    /// reads it.
     /// </summary>
     public interface IPCGDataProvider
     {
         /// <summary>
-        /// Returns the world-space height at (x, z). Called by RoadMaster when
+        /// Returns the world-space height at (x, z). Called by the path tool when
         /// snapping a spline control point to the surface.
         /// </summary>
         float SampleHeight(float worldX, float worldZ);
@@ -37,13 +43,13 @@ namespace UniverseCreator.Integration
         Vector3 SampleNormal(float worldX, float worldZ);
 
         /// <summary>
-        /// Returns the list of active chunk bounds, so RoadMaster knows which regions
-        /// are loaded and can defer spline operations on unloaded chunks.
+        /// Returns the list of active chunk bounds, so the path tool knows which
+        /// regions are loaded and can defer spline operations on unloaded chunks.
         /// </summary>
         List<Bounds> GetActiveChunkBounds();
 
         /// <summary>
-        /// Notifies the provider that RoadMaster intends to cut terrain in this
+        /// Notifies the provider that the path tool intends to cut terrain in this
         /// bounding box. Universe Creator may pre-load the affected chunks or mark
         /// them for healing after the cut.
         /// </summary>
@@ -51,8 +57,8 @@ namespace UniverseCreator.Integration
 
         /// <summary>
         /// Cuts a tunnel opening through the terrain surface inside the given
-        /// world-space box, and keeps it cut across regenerations. Called by
-        /// RoadMaster the moment a tunnel prefab is placed on a spline - the user
+        /// world-space box, and keeps it cut across regenerations. Called by the
+        /// path tool the moment a tunnel prefab is placed on a spline - the user
         /// never paints holes by hand.
         ///
         /// Returns a handle to pass back to ReleaseTunnelOpening.
@@ -71,7 +77,7 @@ namespace UniverseCreator.Integration
     /// Universe Creator's implementation of the provider side. Wired to the
     /// chunk manager and the terrain builder so queries resolve to real data.
     /// </summary>
-    public class RoadMasterLinker : MonoBehaviour, IPCGDataProvider
+    public class RoadCityMasterLinker : MonoBehaviour, IPCGDataProvider
     {
         /// <summary>
         /// Reference to the UniverseCreatorObject that owns the chunk manager and

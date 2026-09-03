@@ -1,7 +1,7 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Procedural Content Generation Toolkit
 //
-//  File:    RoadMasterLinkerInspector.cs
+//  File:    RoadCityMasterLinkerInspector.cs
 //  Purpose: Draws the road bridge, separating the half that already answers
 //           queries from the half that is only declared.
 //
@@ -23,18 +23,18 @@ using UniverseCreator.TerrainSystem;
 
 namespace UniverseCreator.Editor.Inspectors
 {
-    [CustomEditor(typeof(RoadMasterLinker))]
-    public class RoadMasterLinkerInspector : UnityEditor.Editor
+    [CustomEditor(typeof(RoadCityMasterLinker))]
+    public class RoadCityMasterLinkerInspector : UnityEditor.Editor
     {
         private static bool linkFoldout = true;
         private static bool probeFoldout = true;
         private static bool plannedFoldout;
 
-        private RoadMasterLinker Linker { get { return (RoadMasterLinker)target; } }
+        private RoadCityMasterLinker Linker { get { return (RoadCityMasterLinker)target; } }
 
         public override void OnInspectorGUI()
         {
-            RoadMasterLinker linker = Linker;
+            RoadCityMasterLinker linker = Linker;
             if (linker == null) return;
 
             UCInspectorUI.HeaderBar("Road Bridge", "d_NavMeshData Icon",
@@ -59,7 +59,7 @@ namespace UniverseCreator.Editor.Inspectors
             if (plannedFoldout) DrawPlanned();
         }
 
-        private void DrawLink(RoadMasterLinker linker)
+        private void DrawLink(RoadCityMasterLinker linker)
         {
             EditorGUILayout.PropertyField(serializedObject.FindProperty("universeCreator"));
 
@@ -93,7 +93,7 @@ namespace UniverseCreator.Editor.Inspectors
         /// contract in four numbers - if these are right, Module 7 gets right
         /// answers; if they are zeros, it will not.
         /// </summary>
-        private void DrawProbe(RoadMasterLinker linker)
+        private void DrawProbe(RoadCityMasterLinker linker)
         {
             Vector3 pivot = SceneView.lastActiveSceneView != null
                 ? SceneView.lastActiveSceneView.pivot
@@ -146,7 +146,7 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.EndHorizontal();
         }
 
-        private static string StatusText(RoadMasterLinker linker)
+        private static string StatusText(RoadCityMasterLinker linker)
         {
             UniverseCreatorObject world = linker.universeCreator != null
                 ? linker.universeCreator

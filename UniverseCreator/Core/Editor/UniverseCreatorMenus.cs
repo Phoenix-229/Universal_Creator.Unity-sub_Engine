@@ -377,10 +377,31 @@ namespace UniverseCreator.Editor
             public string name;
             public System.Type manager;
 
+            /// <summary>
+            /// A name this child used to be created under, or null. EnsureChild looks
+            /// for it when <see cref="name"/> is not found and renames the object it
+            /// finds instead of creating a second one.
+            ///
+            /// This exists because the child name is a lookup key: EnsureChild resolves
+            /// by Transform.Find, so changing a name without an alias would leave every
+            /// world authored before the change carrying an orphan under the old name
+            /// and a fresh, unwired object under the new one. RM-00 renamed the road
+            /// bridge, so it is the first entry that needs one.
+            /// </summary>
+            public string legacyName;
+
             public SystemChild(string name, System.Type manager)
             {
                 this.name = name;
                 this.manager = manager;
+                this.legacyName = null;
+            }
+
+            public SystemChild(string name, System.Type manager, string legacyName)
+            {
+                this.name = name;
+                this.manager = manager;
+                this.legacyName = legacyName;
             }
         }
 
@@ -422,7 +443,8 @@ namespace UniverseCreator.Editor
 
             new SystemChild("ChunkManager",     typeof(ChunkManager)),
 
-            new SystemChild("RoadMasterLinker", typeof(RoadMasterLinker)),   // Module 7 bridge
+            new SystemChild("RoadCityMasterLinker", typeof(RoadCityMasterLinker),
+                            "RoadMasterLinker"),   // Module 7 bridge; legacy alias per RM-00
         };
 
         /// <summary>
@@ -460,7 +482,8 @@ namespace UniverseCreator.Editor
             for (int i = 0; i < SystemChildren.Length; i++)
             {
                 child[i] = EnsureChild(root, SystemChildren[i].name,
-                                       SystemChildren[i].manager, out added[i]);
+                                       SystemChildren[i].manager,
+                                       SystemChildren[i].legacyName, out added[i]);
                 if (added[i]) attached++;
             }
 
@@ -490,8 +513,8 @@ namespace UniverseCreator.Editor
             // until it knows which world it answers height queries for, and there is
             // exactly one candidate at this point. Filling a null rather than
             // redirecting a linker that already points somewhere.
-            RoadMasterLinker linker =
-                child[IndexOf(typeof(RoadMasterLinker))].GetComponent<RoadMasterLinker>();
+            RoadCityMasterLinker linker =
+                child[IndexOf(typeof(RoadCityMasterLinker))].GetComponent<RoadCityMasterLinker>();
             if (linker.universeCreator == null) linker.universeCreator = creator;
 
             return attached;
@@ -511,7 +534,30 @@ namespace UniverseCreator.Editor
         private static GameObject EnsureChild(GameObject parent, string name,
                                               System.Type manager, out bool added)
         {
+            return EnsureChild(parent, name, manager, null, out added);
+        }
+
+        private static GameObject EnsureChild(GameObject parent, string name,
+                                              System.Type manager, string legacyName,
+                                              out bool added)
+        {
             Transform existing = parent.transform.Find(name);
+
+            // A renamed child is a migration, not a new child. Without this, a world
+            // authored before the rename keeps its old object - components, references
+            // and author edits included - while a second, empty one appears beside it.
+            if (existing == null && !string.IsNullOrEmpty(legacyName))
+            {
+                Transform legacy = parent.transform.Find(legacyName);
+                if (legacy != null)
+                {
+                    Undo.RecordObject(legacy.gameObject, "Rename " + legacyName);
+                    legacy.gameObject.name = name;
+                    existing = legacy;
+                    Debug.Log("Universe Creator: renamed child '" + legacyName + "' to '" +
+                              name + "' (RM-00 name sweep).", legacy.gameObject);
+                }
+            }
 
             GameObject child;
             if (existing != null)
@@ -598,8 +644,11 @@ namespace UniverseCreator.Editor
         [MenuItem("Tools/Universe Creator/Diagnostics/Repair World Hierarchy", false, 212)]
         private static void RepairHierarchyMenu()
         {
+            // Inactive included, and no sort mode: Unity 6 deprecated the sort-mode overload outright, and the
+            // instance-id order it used to promise is going away with it. Nothing here depends on the order -- the
+            // repair is per-world and the count is a total -- so asking for one only bought a warning.
             UniverseCreatorObject[] worlds = Object.FindObjectsByType<UniverseCreatorObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
+                FindObjectsInactive.Include);
 
             if (worlds.Length == 0)
             {
@@ -758,7 +807,7 @@ namespace UniverseCreator.Editor
                                "New worlds regenerate when a setting is committed.");
                     PrefToggle(PrefBuildHierarchy, "Build Full Hierarchy",
                                "Create the Terrain / Water / Vegetation / Weather / Lighting / " +
-                               "ChunkManager / RoadMasterLinker children. Off gives a bare root.");
+                               "ChunkManager / RoadCityMasterLinker children. Off gives a bare root.");
 
                     EditorGUILayout.Space(12);
 

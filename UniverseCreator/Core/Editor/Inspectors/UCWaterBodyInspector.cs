@@ -1257,11 +1257,12 @@ namespace UniverseCreator.Editor.Inspectors
         // =====================================================================
         //  NODE MARKERS
         //
-        //  Read against RoadArchitect, which solves the same authoring problem for
+        //  Read against Road & City Master, the road tool vendored beside this one,
+        //  which solves the same authoring problem for
         //  roads: a node there is a coloured cube post standing on the ground, and
         //  a node that carries a connection is drawn bigger and in a different
         //  colour so a junction is visible from across the map without selecting
-        //  anything. RoadArchitect gets that for free because its nodes are real
+        //  anything. That tool gets it for free because its nodes are real
         //  GameObjects with gizmos - it has no PositionHandle anywhere - and a
         //  water course is a list of points on one component, so the same read has
         //  to be built out of Handles here.
