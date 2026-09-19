@@ -1034,8 +1034,11 @@ namespace UniverseCreator.TerrainSystem
             for (int i = 0; i < pos.Count; i++) order.Add(i);
             order.Sort((a, b) => pos[a].y.CompareTo(pos[b].y));
 
-            const float MinRelief = 2f;      // metres the surroundings must rise
-            const float MinEnclosure = 0.6f; // fraction of bearings that must be higher
+            // Relaxed 2026-09-19: a hydraulically-eroded world has broad, gently-enclosed bowls, and the
+            // old 0.6 / 2 m gate rejected nearly all of them -- part of why no lakes appeared. A little
+            // over half the bearings rising, and a metre of relief, is still a basin and not a slope.
+            const float MinRelief = 1f;      // metres the surroundings must rise
+            const float MinEnclosure = 0.45f; // fraction of bearings that must be higher
 
             // How far inside its own chunk a basin centre must sit to be preferred. A lake
             // floods out from the centre to its spill point, so a centre hard against a
@@ -1144,11 +1147,15 @@ namespace UniverseCreator.TerrainSystem
         /// Above it no lake is given a size - each takes what its own basin holds.</summary>
         public const float MinLakeAreaSquareMetres = 60f;
 
-        /// <summary>Largest standing water that counts as a lake: 720 m^2, a patch about
-        /// thirty metres across. A basin that could hold more is filled to this and no
-        /// further - the water beyond it belongs to the ocean pass, not here. It also sets
-        /// how wide a neighbourhood the search looks at.</summary>
-        public const float MaxLakeAreaSquareMetres = 720f;
+        /// <summary>Largest standing water that counts as a lake: 90,000 m^2, about 340 m
+        /// across. The old 720 m^2 ceiling (~30 m across) made every real lake read as a
+        /// puddle or be rejected outright - at world scale that is why "no lakes" showed.
+        /// Raised to a proper lake, but NOT so far that a gently-sloping dish fills deep and
+        /// wide enough to become a shallow sheet the depth mask cannot back (the invariant
+        /// TestLakeDepthGateMatchesTheMask guards). A basin that could hold more than a proper
+        /// lake is filled to this and no further; water beyond it belongs to the ocean pass,
+        /// not here. It also sets how wide a neighbourhood the search looks at.</summary>
+        public const float MaxLakeAreaSquareMetres = 90000f;
 
         /// <summary>How much wider than the ceiling's own radius the searched
         /// neighbourhood is. 2.5 leaves room for a lake of the ceiling area that is long

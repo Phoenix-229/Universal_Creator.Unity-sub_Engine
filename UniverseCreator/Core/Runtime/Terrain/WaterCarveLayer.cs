@@ -207,8 +207,10 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>Local channel width, in metres, at which a river starts to cut a
         /// floodplain. Below it the reach keeps the plain bank it has - a stream in a
-        /// notch - and the sag is off entirely.</summary>
-        public const float ValleyOnsetWidthMetres = 8f;
+        /// notch - and the sag is off entirely. Lowered 2026-09-19 from 8 m: generated
+        /// rivers floor at 4 m wide, and at the old onset every one of them read as a slot
+        /// with no floodplain. From 3 m up a river now eases in a gentle plain.</summary>
+        public const float ValleyOnsetWidthMetres = 3f;
 
         /// <summary>Local width at which the floodplain is fully developed. Between the
         /// onset and here it eases in, so a river that widens downstream grows its

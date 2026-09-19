@@ -577,11 +577,15 @@ namespace UniverseCreator.Editor.Diagnostics
                   + ". Water this deep is marked wet by the Lake Mask, so refusing it here is "
                   + "the object side and the mask disagreeing about the same basin");
 
-            // A shallow dish - a one-in-fifty slope. It floods far wider than the area
-            // floor and stands about 30 cm deep, which the Lake Mask leaves dry.
+            // A shallow dish - a one-in-167 slope. It floods out to the area ceiling while
+            // standing about a metre deep, still under the depth gate, so the Lake Mask
+            // leaves it dry. (Slope re-calibrated to the raised MaxLakeAreaSquareMetres: at
+            // the 90,000 m^2 ceiling the flood reaches ~169 m radius, so the slope has to be
+            // gentle enough that a metre of rise is what fills it, which is the whole point of
+            // the gate - a wide sheet the mask marks dry must be refused an object.)
             RiverCourseSolver.GroundSampler shallow = delegate (float x, float z)
             {
-                return floorY + 0.02f * Mathf.Sqrt(x * x + z * z);
+                return floorY + 0.006f * Mathf.Sqrt(x * x + z * z);
             };
 
             float shallowLevel, shallowArea;
