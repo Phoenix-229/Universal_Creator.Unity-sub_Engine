@@ -131,6 +131,11 @@ namespace UniverseCreator.Editor.Diagnostics
             // Module 6 path-tool seam (TerrainShapeApplier), in UCSelfTest.PathSeam.cs.
             TestPathSeamShaping();
 
+            // Module 6 Road & City Master seam, UC side of B-27 (U-1, U-4, U-5), in UCSelfTest.RcmSeam.cs.
+            TestReservoirGovernance();
+            TestRiverProfilePublication();
+            TestProviderSurfaceStaysSixMembers();
+
             // Module 3, in UCSelfTest.Ecology.cs.
             TestEcologyConstants();
             TestEcologyMaths();

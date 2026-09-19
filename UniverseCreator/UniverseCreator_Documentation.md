@@ -7133,6 +7133,57 @@ the provider knows a hole is held and no longer knows who asked for it. The visi
 hillside with no tunnel in it, or a tunnel deleted from the road network whose mouth is still cut. Release on
 delete, release on disconnect, and release when your tool is unloaded.
 
+### The request channel — how a tool asks for terrain and water changes
+
+The provider surface above is how a tool READS the world. A tool also needs a way to ask Universe Creator to CHANGE
+the world — to flatten a corridor under a road, tie a dam into its abutments, hold a lake up behind that dam, or cut a
+portal through a hillside. Those requests do not travel as extra provider methods: the provider surface stays at six
+members so a tool built against it never reads as out of date. They travel as DATA, left in a serialised component on
+the world object and consumed by Universe Creator at its next regeneration — the same contract the provider uses, in
+the opposite direction.
+
+A request names one of four kinds:
+
+| Kind | What it asks for | How Universe Creator answers it |
+| --- | --- | --- |
+| Conform corridor | Flatten and blend a band of ground to a road's running surface | Cuts below and fills above the natural ground across the flattened width, then blends out to the natural profile over the batter |
+| Key abutments | Tie a structure's ends into the ground at a crest line | Fills the ground up to the crest at each end of the line, and never cuts ground that already stands above it |
+| Raise water body | Hold a lake up behind a dam to a stated level, clipped at the dam line | Governs the author-placed lake the dam impounds — see below |
+| Cut opening | Cut a portal or bore through the terrain at a stated mouth | Cuts the hole through the same terrain-hole mechanism a tunnel already uses, never a second one |
+
+Nothing here moves ground the tool did not ask about, and nothing is remembered: every request is re-read from the
+channel on each regeneration, so withdrawing a request and rebuilding restores the ground exactly as it was.
+
+### Answering a dam: the reservoir and its spillway
+
+A dam request states the levels and the dam line; Universe Creator owns the water. NOTHING HERE IS AUTOMATIC — the
+author drops a lake into the valley, and the dam then governs it. For each request, Universe Creator finds the
+author-placed water body the dam impounds (the flooded extent the tool reports is the hint for which one), raises that
+body's surface to the held level, and clips it at the dam line so the reservoir stands behind the structure and not
+through it. A request that impounds no placed body raises nothing, exactly as a real dam holding back no water would.
+
+The raise is transient GOVERNANCE, never a write to the body's own authored level or outline: withdraw the dam and
+rebuild, and the author's own lake returns at its own level and shape with no trace of the reservoir it briefly became.
+
+A spillway flow illusion rides the same governance. A governed body carries a surface effect driven by the dam's own
+figures — the outlet position, the crest width, and the head between the reservoir surface and the tailwater level — so
+the water reads as flowing over the wall. Release the dam and the effect goes with it. A natural waterfall on a river
+reach is the same idea, driven by the reach's own solved drops rather than by a dam.
+
+### What Universe Creator publishes back: the rivers it built
+
+A tool banking a river needs more than a height sample at the water's edge: it needs how deep the channel was cut below
+the surface and how wide it runs, and only Universe Creator — which solved the course, fitted it to the valley and dug
+it — knows those. So for every river it builds, Universe Creator PUBLISHES a reach: an ordered set of cross-sections,
+each carrying, in world metres, the channel centreline position, the wetted width, the water-surface level and the bed
+level. The design water depth at any station is the surface less the bed.
+
+Like a request, a reach is data left on the world object, not a seventh provider method — so a bank can be built in a
+session where the river was cut last time and has not been rebuilt since. A reader finds the nearest point on the reach
+and reads the width and levels there, easing between stations rather than stepping. Restating an unchanged river leaves
+its reach untouched; deleting the river withdraws its reach, and a bank built against a river that is gone falls away on
+the reader's next rebuild.
+
 ### The lifecycle: acquire, request, release
 
 Four steps, and the fourth is the one implementations omit.
