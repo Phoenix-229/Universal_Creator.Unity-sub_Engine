@@ -119,8 +119,12 @@ namespace UniverseCreator.Nodes.Creators
         /// where the water goes, not how sharp its banks are.
         /// </summary>
         [Header("Mask Solve")]
-        [Tooltip("Cells per side of the world drainage solve. Coarse on purpose.")]
-        public int drainageResolution = 256;
+        [Tooltip("Cells per side of the world drainage solve. Coarse on purpose. The settle-time solve runs "
+               + "this grid on the main thread, so a high value is what freezes the editor for tens of "
+               + "seconds after a build (the 'busy for 48s' dialog). 160 keeps the network faithful while "
+               + "cutting that solve to roughly a third. Both the River Mask and the river OBJECTS read this "
+               + "one field, so they always share a lattice and the water lands in its own trench.")]
+        public int drainageResolution = 160;
 
         /// <summary>
         /// Sea level, 0..1 of world height. Rivers end here, lakes do not form at or
