@@ -91,11 +91,16 @@ namespace UniverseCreator.TerrainSystem
         // a square kilometre, temperate hillslope runoff is sheet flow and gullies
         // that only run after rain - not a river. This is the value that decides where
         // a river's source is, so it is stated once, here, in real units.
-        private const float ChannelHeadAreaSquareMetres = 250000f;
+        //
+        // Public because it is no longer private arithmetic: the node defaults quote it,
+        // ResolveChannelHeadArea measures it against the world, and the self-test asserts
+        // both - and the self-test lives in the editor assembly, which cannot see
+        // internals. A figure three separate places depend on is part of the API.
+        public const float ChannelHeadAreaSquareMetres = 250000f;
 
         // A trunk river drains several channel-heads' worth of land. Used to reject
         // coastal trickles on the first pass, before the fallback relaxes it.
-        private const float TrunkCatchmentMultiple = 4f;
+        public const float TrunkCatchmentMultiple = 4f;
 
         // Two millimetres of residual fall per filled cell. Enough for D8 to have a
         // direction to pick across a flat the flood levelled off; far too small to
@@ -113,6 +118,80 @@ namespace UniverseCreator.TerrainSystem
         // Fewer nodes than this cannot describe a curve, and a two-point course is
         // the exact bug this file exists to remove.
         private const int MinCourseNodes = 3;
+
+        // =====================================================================
+        //  THE THRESHOLD, MEASURED AGAINST THE WORLD IT IS APPLIED TO
+        // =====================================================================
+
+        /// <summary>
+        /// The channel-head area to actually use on a world whose drainage is described
+        /// by <paramref name="accumCells"/>: the figure asked for when the world can
+        /// meet it, and otherwise the largest catchment the world really has, divided by
+        /// <see cref="TrunkCatchmentMultiple"/> so a trunk still drains several channel
+        /// heads. Only ever lowers the figure, never raises it.
+        /// </summary>
+        /// <remarks>
+        /// WHY A REAL-WORLD CONSTANT HAS TO BE MEASURED AGAINST THE WORLD
+        /// A quarter of a square kilometre is the right figure for real temperate
+        /// hillslope, and it is why <see cref="ChannelHeadAreaSquareMetres"/> is stated
+        /// in real units. But a test world of one 800 m chunk is 0.64 km^2 in total, and
+        /// no single catchment inside it comes near 0.25 km^2. Every channel test then
+        /// fails, TraceChannels returns an empty list, no mouth clears the floor, and
+        /// the whole water system reports success having produced nothing: no river
+        /// mask, no trench, no river object. The user sees a Hydrology Spawner with
+        /// every field filled in and a world with no water in it, which is
+        /// indistinguishable from a node that does nothing at all.
+        ///
+        /// Refusing to draw a river there is the literally correct answer about the real
+        /// world and a useless one about a scale model. What makes the rescale legitimate
+        /// rather than a fudge is that drainage networks have no characteristic scale:
+        /// Hack's law (channel length against basin area) and Horton's bifurcation and
+        /// length ratios are power laws, so a basin's branching structure is
+        /// statistically the same whatever its size. Only the calibration - how much land
+        /// a PERMANENT channel needs before it stops being a wet-weather gully - carries
+        /// real climate and soil in it, and that calibration is the one thing a
+        /// sub-kilometre world cannot host. Setting the threshold from the world's own
+        /// largest catchment keeps the whole hierarchy: the biggest drainage becomes the
+        /// trunk, a quarter of it is a channel head, and the network below that is the
+        /// same self-similar shape the real figure would have produced on real ground.
+        ///
+        /// It cannot invent water. The threshold is read off the accumulation field, so
+        /// a world that drains nowhere still yields nothing, and a world large enough to
+        /// meet the real figure is left on the real figure untouched.
+        /// </remarks>
+        /// <param name="accumCells">Flow accumulation per cell, in CELLS of upstream
+        /// area - the field D8 accumulation produces.</param>
+        /// <param name="cellAreaSquareMetres">Ground one cell covers.</param>
+        /// <param name="requestedSquareMetres">The figure the caller authored. Zero or
+        /// less means "use the real-world constant".</param>
+        public static float ResolveChannelHeadArea(float[] accumCells,
+                                                   float cellAreaSquareMetres,
+                                                   float requestedSquareMetres)
+        {
+            float requested = requestedSquareMetres > 0f
+                ? requestedSquareMetres
+                : ChannelHeadAreaSquareMetres;
+
+            if (accumCells == null || accumCells.Length == 0) return requested;
+            if (cellAreaSquareMetres <= 0f) return requested;
+
+            float largestCells = 0f;
+            for (int i = 0; i < accumCells.Length; i++)
+                if (accumCells[i] > largestCells) largestCells = accumCells[i];
+
+            float largestArea = largestCells * cellAreaSquareMetres;
+            if (largestArea <= 0f) return requested;
+
+            // The world's biggest drainage is its trunk, so a channel head is that
+            // divided by the trunk multiple. Above the requested figure this is no
+            // constraint at all and the authored value stands.
+            float affordable = largestArea / Mathf.Max(1f, TrunkCatchmentMultiple);
+            if (affordable >= requested) return requested;
+
+            // Never below one cell: a threshold finer than the lattice would mark every
+            // cell as a channel and paint the whole world wet.
+            return Mathf.Max(cellAreaSquareMetres, affordable);
+        }
 
         // =====================================================================
         //  RESULTS
@@ -338,16 +417,22 @@ namespace UniverseCreator.TerrainSystem
         /// for a world with no sea, and no course will be given an ocean mouth.</param>
         /// <param name="lakeCentres">Where lakes will be, so rivers can end in one.
         /// May be null.</param>
-        /// <param name="lakeJoinRadiusMetres">How far from a lake centre counts as
-        /// reaching it.</param>
+        /// <param name="lakeRadiiMetres">How far each lake in <paramref name="lakeCentres"/>
+        /// reaches from its own centre, index-aligned with it. One shared figure would
+        /// stamp every pond with the biggest lake's footprint.</param>
         /// <param name="seedSpacingMetres">Node spacing of the returned course. The
         /// spline resamples far finer than this; these are the editable nodes.</param>
+        /// <param name="channelHeadAreaSquareMetres">Land a channel must drain before it
+        /// counts as a river. Pass the figure the caller's River Mask was stamped at, so
+        /// the courses planned here are the courses that mask drew. Zero or less falls
+        /// back to <see cref="ChannelHeadAreaSquareMetres"/>.</param>
         public static List<PlannedRiver> PlanTrunkRivers(DrainageGrid g, int trunkCount,
                                                          int tributariesPerTrunk,
                                                          float seaLevelMetres,
                                                          IList<Vector3> lakeCentres,
-                                                         float lakeJoinRadiusMetres,
-                                                         float seedSpacingMetres)
+                                                         IList<float> lakeRadiiMetres,
+                                                         float seedSpacingMetres,
+                                                         float channelHeadAreaSquareMetres)
         {
             List<PlannedRiver> planned = new List<PlannedRiver>();
             if (g == null || trunkCount <= 0) return planned;
@@ -358,11 +443,29 @@ namespace UniverseCreator.TerrainSystem
             int count = g.Count;
 
             // Catchment thresholds converted from real areas into cells, once.
-            float headCells = Mathf.Max(4f, ChannelHeadAreaSquareMetres / cellArea);
+            //
+            // THE AREA COMES FROM THE CALLER, NOT FROM THE CONSTANT
+            // The same number decides where the Hydrology Spawner's River Mask stamps a
+            // channel. Read from the constant here, a user who lowered the spawner's
+            // channel-head area to suit a world smaller than a full catchment got the
+            // mask - and the trenches the height chain carved from it - at the new
+            // figure, while this still demanded a quarter of a square kilometre. No
+            // mouth qualified, no course was planned, and no river OBJECT was ever put
+            // in the trench that had just been dug for it. The constant stays as the
+            // real-world default for a caller with no figure of its own.
+            float headArea = channelHeadAreaSquareMetres > 0f
+                ? channelHeadAreaSquareMetres
+                : ChannelHeadAreaSquareMetres;
+
+            // And then measured against the world, because a figure no catchment here can
+            // reach rejects every mouth and plans nothing. See ResolveChannelHeadArea.
+            headArea = ResolveChannelHeadArea(g.accum, cellArea, headArea);
+
+            float headCells = Mathf.Max(4f, headArea / cellArea);
             float trunkCells = headCells * TrunkCatchmentMultiple;
 
             MouthKind[] waterKind = BuildWaterMask(g, seaLevelMetres, lakeCentres,
-                                                   lakeJoinRadiusMetres);
+                                                   lakeRadiiMetres);
 
             // For every cell, the upstream neighbour that brings it the most water.
             // Built in one pass over the D8 graph: walking this backwards from a mouth
@@ -439,8 +542,7 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Records the branches that join a main stem, walking outward from its
-        /// downstream end.
+        /// Records the branches that join a main stem, largest catchment first.
         ///
         /// A cell is upstream of the stem when its own flow direction points at the
         /// stem, so the branches are read off the flow graph rather than searched for,
@@ -451,43 +553,184 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         /// <remarks>
         /// Only one level is taken: branches of branches would multiply without bound on
-        /// a large world and each is a smaller feature than the one before. What the
-        /// count drops, therefore, is always the least visible water.
+        /// a large world and each is a smaller feature than the one before.
+        ///
+        /// WHICH BRANCHES, AND WHERE THEY MAY JOIN
+        /// Candidates are gathered before any is taken, then ranked by the land behind
+        /// them. Accepting them in D8 scan order instead ranked them by COMPASS BEARING:
+        /// whichever of a junction's branches happened to lie north-east won the slot, so
+        /// a headwater trickle could take the place of the confluence that actually
+        /// changes the river. Three rules then filter what is left, each of them a thing
+        /// real drainage does:
+        ///   smaller than its parent - a branch carrying more land than the stem it joins
+        ///     is the stem, and the trunk took the wrong fork;
+        ///   arriving downstream - a tributary points the way the parent is going. The
+        ///     opposite is a barbed junction, which follows a drainage reversal and not a
+        ///     hillside;
+        ///   spaced apart - two confluences closer than one sample cannot be drawn as
+        ///     two, and read as a single forked blob.
+        /// A branch rejected after tracing keeps its cells marked used. That is wanted:
+        /// they were shown to carry a channel, and another river re-tracing the same
+        /// water would draw it twice.
         /// </remarks>
         private static void AddTributaries(DrainageGrid g, int[] bestUp, bool[] used,
                                            List<PlannedRiver> planned, List<int> stem,
                                            int parentIndex, int maxTributaries,
                                            float headCells, float seedSpacingMetres)
         {
-            if (maxTributaries <= 0 || stem == null) return;
+            if (maxTributaries <= 0 || stem == null || stem.Count < 2) return;
 
-            int spawned = 0;
+            List<int> candUp = new List<int>();
+            List<int> candJunction = new List<int>();
 
-            // stem[0] is the mouth, so this runs upstream from the bottom. The largest
-            // tributaries join low down, so when the count runs out what is dropped is
-            // the small headwater branches rather than the ones that change the river.
-            for (int s = 0; s < stem.Count && spawned < maxTributaries; s++)
+            // stem[0] is the mouth, so s rises upstream and stem[s - 1] is the way out.
+            for (int s = 1; s < stem.Count; s++)
             {
                 int junction = stem[s];
+                Vector3 here = g.WorldOf(junction);
+                Vector3 downstream = g.WorldOf(stem[s - 1]) - here;
+                int stemNext = s + 1 < stem.Count ? stem[s + 1] : -1;
 
-                for (int d = 0; d < 8 && spawned < maxTributaries; d++)
+                for (int d = 0; d < 8; d++)
                 {
                     int up = NeighbourOf(g, junction, d);
-                    if (up < 0 || used[up]) continue;
-                    if (g.DownstreamOf(up) != junction) continue;   // not upstream of here
-                    if (g.accum[up] < headCells) continue;          // not a channel
+                    if (up < 0 || up == stemNext || used[up]) continue;
+                    if (g.DownstreamOf(up) != junction) continue;    // not upstream of here
+                    if (g.accum[up] < headCells) continue;           // not a channel
+                    if (g.accum[up] >= g.accum[junction]) continue;  // it is the stem, not a branch
+                    if (!ArrivesDownstream(here - g.WorldOf(up), downstream)) continue;
 
-                    List<int> branch;
-                    PlannedRiver trib = TraceStem(g, bestUp, used, up, junction,
-                                                  MouthKind.River, headCells,
-                                                  seedSpacingMetres, out branch);
-                    if (trib == null) continue;
-
-                    trib.joinsPlanIndex = parentIndex;
-                    planned.Add(trib);
-                    spawned++;
+                    candUp.Add(up);
+                    candJunction.Add(junction);
                 }
             }
+
+            if (candUp.Count == 0) return;
+
+            List<int> order = new List<int>(candUp.Count);
+            for (int i = 0; i < candUp.Count; i++) order.Add(i);
+            order.Sort((a, b) => g.accum[candUp[b]].CompareTo(g.accum[candUp[a]]));
+
+            float minSpacing = Mathf.Max(seedSpacingMetres, 3f * g.CellSizeMetres);
+            float parentLength = planned[parentIndex].lengthMetres;
+
+            List<Vector3> taken = new List<Vector3>();
+            int spawned = 0;
+
+            for (int r = 0; r < order.Count && spawned < maxTributaries; r++)
+            {
+                int c = order[r];
+                int up = candUp[c];
+                if (used[up]) continue;                  // claimed by a branch taken already
+
+                Vector3 at = g.WorldOf(candJunction[c]);
+                if (TooCloseToAny(taken, at, minSpacing)) continue;
+
+                List<int> branch;
+                PlannedRiver trib = TraceStem(g, bestUp, used, up, candJunction[c],
+                                              MouthKind.River, headCells,
+                                              seedSpacingMetres, out branch);
+                if (trib == null) continue;
+
+                // A tributary longer than the river it joins reads as the trunk with the
+                // stem as its branch - the wrong hierarchy. Rather than drop the branch
+                // (which loses a join the network wanted), trim it from its SOURCE end:
+                // the mouth is the confluence and must stay put, so the excess comes off
+                // the head. What remains is a real, shorter tributary meeting the parent
+                // at the same point, which is what "some rivers join to form a bigger
+                // river" needs - more joins, not fewer.
+                if (trib.lengthMetres > parentLength)
+                    TrimToLengthFromSource(trib, parentLength);
+                if (trib.course == null || trib.course.Count < 2) continue;
+
+                trib.joinsPlanIndex = parentIndex;
+                planned.Add(trib);
+                taken.Add(at);
+                spawned++;
+            }
+        }
+
+        /// <summary>
+        /// Trims a course from its SOURCE end (index 0) so its length does not exceed
+        /// <paramref name="maxLength"/> metres, leaving the mouth (last point) untouched.
+        /// The course is head-to-mouth, so it walks back from the mouth accumulating
+        /// length and keeps only the run within budget; the kept span's first point is
+        /// nudged onto the budget line so the trim is exact rather than to the nearest
+        /// node. Recomputes lengthMetres. Leaves at least two points.
+        /// </summary>
+        private static void TrimToLengthFromSource(PlannedRiver river, float maxLength)
+        {
+            List<Vector3> c = river.course;
+            if (c == null || c.Count < 2 || maxLength <= 0f) return;
+
+            // Walk from the mouth (last) upstream, summing segment lengths, until adding
+            // the next segment would exceed the budget. keepFrom is the first index kept.
+            float acc = 0f;
+            int keepFrom = 0;
+            Vector3 cut = c[0];
+            for (int i = c.Count - 1; i > 0; i--)
+            {
+                float seg = Vector3.Distance(c[i], c[i - 1]);
+                if (acc + seg >= maxLength)
+                {
+                    // Interpolate the exact point at the budget along this segment.
+                    float remain = maxLength - acc;
+                    float t = seg > 1e-4f ? Mathf.Clamp01(remain / seg) : 0f;
+                    cut = Vector3.Lerp(c[i], c[i - 1], t);
+                    keepFrom = i - 1;
+                    break;
+                }
+                acc += seg;
+            }
+
+            if (keepFrom <= 0) return;   // whole course already within budget
+
+            List<Vector3> trimmed = new List<Vector3>(c.Count - keepFrom + 1);
+            trimmed.Add(cut);                                   // new source, exactly on the budget line
+            for (int i = keepFrom + 1; i < c.Count; i++) trimmed.Add(c[i]);
+
+            if (trimmed.Count < 2) return;   // refuse to trim below a real course
+
+            float len = 0f;
+            for (int i = 1; i < trimmed.Count; i++) len += Vector3.Distance(trimmed[i], trimmed[i - 1]);
+
+            river.course = trimmed;
+            river.lengthMetres = len;
+        }
+
+        /// <summary>Cosine of the widest angle a tributary may arrive at - 105 degrees
+        /// from the parent's downstream direction. Wider than that is a barbed junction.
+        /// </summary>
+        private const float MaxConfluenceCos = -0.2588f;
+
+        /// <summary>True when a branch arriving along <paramref name="arrival"/> points
+        /// broadly the way the parent flows.</summary>
+        private static bool ArrivesDownstream(Vector3 arrival, Vector3 downstream)
+        {
+            float ax = arrival.x, az = arrival.z;
+            float bx = downstream.x, bz = downstream.z;
+
+            float la = Mathf.Sqrt(ax * ax + az * az);
+            float lb = Mathf.Sqrt(bx * bx + bz * bz);
+            if (la < 1e-4f || lb < 1e-4f) return true;   // no direction to judge it by
+
+            return (ax * bx + az * bz) / (la * lb) > MaxConfluenceCos;
+        }
+
+        /// <summary>True when a point is within <paramref name="minMetres"/> of any taken
+        /// confluence, measured in plan (XZ).</summary>
+        private static bool TooCloseToAny(List<Vector3> taken, Vector3 at, float minMetres)
+        {
+            float limitSq = minMetres * minMetres;
+
+            for (int i = 0; i < taken.Count; i++)
+            {
+                float dx = taken[i].x - at.x;
+                float dz = taken[i].z - at.z;
+                if (dx * dx + dz * dz < limitSq) return true;
+            }
+
+            return false;
         }
 
         /// <summary>Neighbour of a cell in D8 direction d, or -1 outside the grid.</summary>
@@ -598,6 +841,17 @@ namespace UniverseCreator.TerrainSystem
         // =====================================================================
 
         /// <summary>
+        /// One lake's reach, floored at a cell so a lake smaller than the lattice still
+        /// marks the cell it sits in. A missing or short list falls back to the cell size
+        /// rather than to another lake's figure.
+        /// </summary>
+        private static float LakeRadius(DrainageGrid g, IList<float> radii, int index)
+        {
+            float r = radii != null && index >= 0 && index < radii.Count ? radii[index] : 0f;
+            return Mathf.Max(g.CellSizeMetres, r);
+        }
+
+        /// <summary>
         /// Marks every cell that is standing water, and what kind. The ocean is simply
         /// ground at or below the sea surface - the same test the ocean body's own mesh
         /// uses to decide where it shows - so the coastline the rivers aim at is the
@@ -605,7 +859,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         private static MouthKind[] BuildWaterMask(DrainageGrid g, float seaLevelMetres,
                                                   IList<Vector3> lakeCentres,
-                                                  float lakeJoinRadiusMetres)
+                                                  IList<float> lakeRadiiMetres)
         {
             int count = g.Count;
 
@@ -623,14 +877,17 @@ namespace UniverseCreator.TerrainSystem
 
             if (lakeCentres == null || lakeCentres.Count == 0) return kind;
 
-            float radius = Mathf.Max(g.CellSizeMetres, lakeJoinRadiusMetres);
-            float radiusSq = radius * radius;
-
             // Stamped as discs around the chosen basins rather than tested per cell
-            // against every lake, so the cost is the lakes' own footprint.
+            // against every lake, so the cost is the lakes' own footprint. Each disc is
+            // that lake's own reach: one shared radius gave a hillside pond the span of
+            // the largest lake in the world, so rivers were told they had arrived at
+            // water hundreds of metres from any, and stopped in dry ground.
             for (int l = 0; l < lakeCentres.Count; l++)
             {
                 Vector3 c = lakeCentres[l];
+
+                float radius = LakeRadius(g, lakeRadiiMetres, l);
+                float radiusSq = radius * radius;
 
                 int spanX = Mathf.CeilToInt(radius / Mathf.Max(1e-3f, g.cellSizeX));
                 int spanZ = Mathf.CeilToInt(radius / Mathf.Max(1e-3f, g.cellSizeZ));
@@ -815,12 +1072,13 @@ namespace UniverseCreator.TerrainSystem
         /// float.NegativeInfinity for a world with no sea.</param>
         /// <param name="lakeCentres">Where the lakes are. Both the sources of these
         /// rivers and, for the others, something for one to end in.</param>
-        /// <param name="lakeJoinRadiusMetres">How far from a lake centre is still lake.</param>
+        /// <param name="lakeRadiiMetres">How far each lake reaches from its own centre,
+        /// index-aligned with <paramref name="lakeCentres"/>.</param>
         /// <param name="seedSpacingMetres">Node spacing of the returned course.</param>
         public static List<PlannedRiver> PlanLakeOutlets(DrainageGrid g, int outletCount,
                                                         float seaLevelMetres,
                                                         IList<Vector3> lakeCentres,
-                                                        float lakeJoinRadiusMetres,
+                                                        IList<float> lakeRadiiMetres,
                                                         float seedSpacingMetres)
         {
             List<PlannedRiver> planned = new List<PlannedRiver>();
@@ -834,9 +1092,7 @@ namespace UniverseCreator.TerrainSystem
             // the sea or lake a trunk river would have ended in - one definition of
             // "standing water" for the whole planner.
             MouthKind[] waterKind = BuildWaterMask(g, seaLevelMetres, lakeCentres,
-                                                   lakeJoinRadiusMetres);
-
-            float radius = Mathf.Max(g.CellSizeMetres, lakeJoinRadiusMetres);
+                                                   lakeRadiiMetres);
 
             int[] spill = new int[lakeCentres.Count];
             float[] score = new float[lakeCentres.Count];
@@ -844,7 +1100,7 @@ namespace UniverseCreator.TerrainSystem
 
             for (int l = 0; l < lakeCentres.Count; l++)
             {
-                spill[l] = FindLakeSpill(g, lakeCentres[l], radius);
+                spill[l] = FindLakeSpill(g, lakeCentres[l], LakeRadius(g, lakeRadiiMetres, l));
                 score[l] = spill[l] >= 0 ? g.accum[spill[l]] : -1f;
                 order[l] = l;
             }
@@ -968,7 +1224,7 @@ namespace UniverseCreator.TerrainSystem
 
             // Sea only. A delta arm splits off at the coast and its whole business is
             // reaching the sea, so no lakes are passed and none can stop it inland.
-            MouthKind[] waterKind = BuildWaterMask(g, seaLevelMetres, null, 0f);
+            MouthKind[] waterKind = BuildWaterMask(g, seaLevelMetres, null, null);
 
             int water;
             List<int> cells = WalkToWater(g, g.CellAt(fromWorld.x, fromWorld.z),

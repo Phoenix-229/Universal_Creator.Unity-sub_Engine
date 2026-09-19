@@ -218,9 +218,6 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Sag band beyond the bank, in local channel widths.</summary>
         public const float ValleyBandWidths = 1f;
 
-        /// <summary>Trough depth below the surrounding ground, in local channel depths.</summary>
-        public const float ValleySagDepths = 1f;
-
         /// <summary>Dry height held between the floodplain and the water, in local
         /// channel depths.</summary>
         public const float ValleyFreeboardDepths = 0.5f;
@@ -394,6 +391,28 @@ namespace UniverseCreator.TerrainSystem
 
             if (x1 < x0 || z1 < z0) return;
 
+            // ANTI-ALIASING FOR NARROW CHANNELS.
+            //
+            // A point sample per heightmap post cannot draw a channel narrower than the
+            // post spacing: the dig band falls between posts on some rows and squarely
+            // on a post on others, so the trench comes out as a row of disconnected pits
+            // - the reported serrated/zig-zag trench. A 4 m stream (half-width 2 m) on a
+            // 1 km / 256 = 3.9 m lattice is exactly this case.
+            //
+            // The honest fix is to sample each post's own footprint rather than its
+            // centre alone, and take the DEEPEST result. Deepest is correct because the
+            // dig is deepening-only (HeightAt ends in Min(existing, bed)): if the channel
+            // passes anywhere through a post's cell, that post is carved, so the trench
+            // is continuous and at least one post wide however narrow the channel. It
+            // does not widen the water mesh - that is built separately from the spline -
+            // only guarantees the terrain trench under it has no gaps.
+            //
+            // Paid only where it is needed. A body whose narrowest feature is already a
+            // couple of posts across cannot alias, so it keeps the single-sample path and
+            // its result is unchanged - lakes, oceans and wide rivers included.
+            float narrowest = NarrowestFeatureMetres();
+            int ss = Mathf.Clamp(Mathf.CeilToInt(2f * mps / Mathf.Max(0.5f, narrowest)), 1, 3);
+
             for (int lz = z0; lz <= z1; lz++)
             {
                 float wz = chunkWorldBounds.min.z + lz * mps;
@@ -403,7 +422,29 @@ namespace UniverseCreator.TerrainSystem
                     float wx = chunkWorldBounds.min.x + lx * mps;
 
                     float existing = heights[lz, lx] * maxHeightMetres;
-                    float dug = HeightAt(wx, wz, existing);
+
+                    float dug;
+                    if (ss <= 1)
+                    {
+                        dug = HeightAt(wx, wz, existing);
+                    }
+                    else
+                    {
+                        // Deepest sub-sample across the post's cell (span +/- half a
+                        // post), so a channel threading between post centres still cuts
+                        // the post whose cell it crosses.
+                        dug = existing;
+                        for (int sz = 0; sz < ss; sz++)
+                        {
+                            float oz = ((sz + 0.5f) / ss - 0.5f) * mps;
+                            for (int sx = 0; sx < ss; sx++)
+                            {
+                                float ox = ((sx + 0.5f) / ss - 0.5f) * mps;
+                                float d = HeightAt(wx + ox, wz + oz, existing);
+                                if (d < dug) dug = d;
+                            }
+                        }
+                    }
 
                     // Only ever assigned, never accumulated. Two applications of the
                     // same dig to the same terrain give the same answer, which is
@@ -411,6 +452,24 @@ namespace UniverseCreator.TerrainSystem
                     heights[lz, lx] = Mathf.Clamp01(dug * invMax);
                 }
             }
+        }
+
+        /// <summary>
+        /// The narrowest thing this dig has to draw, in metres, used to decide whether a
+        /// point sample per post can resolve it. For a course it is the slimmest channel
+        /// width along the run; a ring body (lake, pool, ocean) has no feature finer than
+        /// its own footprint, so it never needs sub-sampling and reports a large value.
+        /// </summary>
+        private float NarrowestFeatureMetres()
+        {
+            if (!isCourse || courseWidths == null || courseWidths.Count == 0)
+                return float.MaxValue;
+
+            float min = float.MaxValue;
+            for (int i = 0; i < courseWidths.Count; i++)
+                if (courseWidths[i] > 0.05f && courseWidths[i] < min) min = courseWidths[i];
+
+            return min == float.MaxValue ? maxDepthMetres * 2f : min;
         }
 
         /// <summary>
@@ -663,12 +722,29 @@ namespace UniverseCreator.TerrainSystem
             shape = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(shape));
 
             float depth = Mathf.Max(0f, localDepth);
-            float sag = depth * ValleySagDepths * size * strength * shape;
 
+            // The valley floor: the floodplain, held a fraction of the channel's depth
+            // above the water so it is dry land at normal flow. rampIn keeps it at
+            // exactly the waterline where the bank meets the water - no lip - and lifts
+            // it to the floodplain over the width of the bevel.
             float rampIn = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(signed / bevel));
             float floor = localSurfaceY + depth * ValleyFreeboardDepths * size * rampIn;
 
-            return Mathf.Min(current, Mathf.Max(current - sag, floor));
+            // Pull the ground TOWARD that floor - do not subtract a fixed trough from it.
+            // The old code lowered the band by one channel depth, which for an alluvial
+            // river is only a metre or two: where the surrounding ground stood higher
+            // than that, the scrape could not reach the floodplain and the rise was left
+            // reading as two hills with the river slotted between them (the reported
+            // fault). Targeting the floor elevation and easing toward it by strength x
+            // shape excavates a real valley however high the ground stands, and still
+            // fades to nothing at both ends of the band (shape) and at the waterline
+            // (the bank blend above), so there is no crease and no lip. Lower only:
+            // ground already at or below the floodplain is a backwater the generator
+            // made, not ours to fill.
+            float pull = Mathf.Clamp01(size * strength * shape);
+            float target = Mathf.Lerp(current, floor, pull);
+
+            return Mathf.Min(current, target);
         }
 
         /// <summary>

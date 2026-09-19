@@ -92,13 +92,37 @@ namespace UniverseCreator.TerrainSystem
 
             int riversToSpawn = node.targetRiverCount - currentRivers;
             int totalChunks = Mathf.Max(0, uc.chunkCountPerSide * uc.chunkCountPerSide);
+
             // "24% of chunks" is a proportion, so round to nearest - not ceil. Ceil
             // on 0.24f*chunks can tip 24.0 up to 25 from float error (the spec's
-            // "100 -> 24, NOT 25"), and rounds a bare 1-chunk fraction up to a lake.
-            int maxLakes = Mathf.Clamp(Mathf.RoundToInt(totalChunks * Mathf.Clamp01(node.lakeChunkPercentage)), 0, totalChunks);
-            int desiredLakes = node.targetLakeCount > 0
-                ? Mathf.Min(node.targetLakeCount, maxLakes)
-                : maxLakes;
+            // "100 -> 24, NOT 25").
+            //
+            // FLOORED AT ONE WHEN A DENSITY IS ASKED FOR AT ALL
+            // Rounding to nearest sends any world under about two chunks a side to zero:
+            // 1 chunk x 0.24 is 0.24, which rounds to none. The percentage is a DENSITY -
+            // "about one lake every four chunks" - and a world smaller than that spacing
+            // is not a world with no lakes in it, it is a world with one. Left rounding
+            // to zero, a user on a small test world filled in the lake fields, pressed
+            // Generate and got nothing, with no way to tell a working field from a dead
+            // one. This cannot invent a lake: the count is only permission to look, and
+            // every candidate still has to be a real basin that holds
+            // MinLakeAreaSquareMetres of water at more than the minimum depth, or it is
+            // passed over below.
+            int maxLakes = Mathf.Clamp(
+                Mathf.RoundToInt(totalChunks * Mathf.Clamp01(node.lakeChunkPercentage)),
+                0, totalChunks);
+            if (maxLakes == 0 && node.lakeChunkPercentage > 0f && totalChunks > 0) maxLakes = 1;
+
+            // AN EXPLICIT COUNT IS AN INSTRUCTION, NOT A CEILING TO BE CLAMPED
+            // This used to be Min(targetLakeCount, maxLakes), and on any world where the
+            // percentage rounded low that silently overrode the number the user typed -
+            // "Target Lake Count 5" on a small world came out as zero lakes, the field
+            // inert no matter what was put in it. The user's rule is that when the
+            // spawner is connected the lake number comes from the spawner. The
+            // percentage is the density used INSTEAD of a count, not a cap on one, so a
+            // stated count now stands on its own; the world's supply of real basins is
+            // what limits it, which is a limit of the terrain rather than of arithmetic.
+            int desiredLakes = node.targetLakeCount > 0 ? node.targetLakeCount : maxLakes;
 
             // Drain-out rivers, on the same "fraction of the world's chunks" basis as the
             // lakes and rounded the same way. There can never be more outlets than lakes,
@@ -165,10 +189,48 @@ namespace UniverseCreator.TerrainSystem
             }
             bool oceanToSpawn = wantOcean && keptOcean == null;
 
-            if (riversToSpawn <= 0 && outletsToSpawn <= 0 && lakesToSpawn <= 0 && !oceanToSpawn) return;
+            // Both silent-nothing exits speak now. A Generate that produced no water and
+            // no error was indistinguishable from a broken spawner; these say which of
+            // the two it was.
+            if (riversToSpawn <= 0 && outletsToSpawn <= 0 && lakesToSpawn <= 0 && !oceanToSpawn)
+            {
+                Debug.Log($"[UC Hydrology] node {node.id}: nothing to build - the scene already "
+                          + $"holds {currentRivers} river(s), {currentOutlets} outlet(s), "
+                          + $"{currentLakes} lake(s) and {proceduralOceans.Count} ocean(s) against "
+                          + $"targets {node.targetRiverCount}/{desiredOutlets}/{desiredLakes}/"
+                          + (wantOcean ? "1" : "0") + ". Raise a target, or clear the WaterSystem "
+                          + "child to rebuild from scratch.");
+                return;
+            }
 
-            Terrain[] terrains = Terrain.activeTerrains;
-            if (terrains == null || terrains.Length == 0) return;
+            Terrain[] allTerrains = Terrain.activeTerrains;
+            if (allTerrains == null || allTerrains.Length == 0)
+            {
+                Debug.LogWarning($"[UC Hydrology] node {node.id}: no active Terrain in the scene, so "
+                                 + "there is no ground to read heights from and no water was built. "
+                                 + "Generate the terrain first.");
+                return;
+            }
+
+            // Terrain.activeTerrains returns a Terrain even when its terrainData asset is
+            // null - a real editor state after a data asset is deleted, or a Terrain added
+            // without data. Reading terrainData.size on one of those throws, and it is the
+            // kind of scene state the synthetic self-test never produces, so it surfaces
+            // only in the editor as an unexplained "hydrology node" error. Filter them out
+            // once here, and every consumer below (bounds, GetHeightAt) sees only real ground.
+            List<Terrain> valid = new List<Terrain>(allTerrains.Length);
+            for (int ti = 0; ti < allTerrains.Length; ti++)
+                if (allTerrains[ti] != null && allTerrains[ti].terrainData != null) valid.Add(allTerrains[ti]);
+
+            if (valid.Count == 0)
+            {
+                Debug.LogWarning($"[UC Hydrology] node {node.id}: the scene has Terrain objects but none "
+                                 + "has a Terrain Data asset, so there is no ground to read. Assign or "
+                                 + "regenerate the terrain data first.");
+                return;
+            }
+
+            Terrain[] terrains = valid.ToArray();
 
             Bounds bounds = new Bounds(terrains[0].transform.position + terrains[0].terrainData.size / 2f, terrains[0].terrainData.size);
             foreach (var t in terrains)
@@ -179,21 +241,31 @@ namespace UniverseCreator.TerrainSystem
             // --- ONE sea level for the whole generate (T17) ---
             // The ocean's surface is also the elevation the rivers have to reach, so it is
             // resolved once, here, and handed to both. An ocean already standing wins,
-            // because the user may have moved it and the water itself is then the truth;
-            // failing that it is the median coastal height, exactly as before. A world
-            // with no sea gets negative infinity, which tells the river planner to look
-            // for lake and world-edge outlets instead of a coastline that is not there.
+            // because the user may have moved it and the water itself is then the truth.
+            // Failing that it is the NODE'S OWN DATUM, converted to metres with the
+            // expression SyncSeaLevelFromOcean inverts.
             //
-            // This replaces the pair of ReadFalloffBand/ComputeOceanSeaLevel calls that
-            // used to sit inside the ocean branch: two consumers, one number.
+            // THE DATUM IS A NUMBER, NOT A MEASUREMENT OF THE LAND
+            // This used to measure the world instead: the median terrain height around
+            // the perimeter, inset into the world-edge falloff band. That reads whatever
+            // the land happens to be doing at the edge, so it landed somewhere other than
+            // node.seaLevel - and node.seaLevel is what the graph's own River Mask,
+            // Lake Mask, Coastal Erosion and Coastal Shelf Shaper all stamp against. Two
+            // numbers for one waterline: the mask ended courses at one height while the
+            // object put the sea at another, so a river mouth hung above the sea or ran
+            // on under it, and the beach band was cut somewhere the water never reached.
+            // A measured median also moves every time the terrain is edited, which meant
+            // the whole coast shifted when an unrelated mountain was raised.
+            //
+            // A WORLD WITH NO OCEAN STILL HAS A WATERLINE
+            // Sea level is a datum, not a mesh: it means the same thing with the ocean
+            // surface switched off. The River Mask ends every course at it and the Lake
+            // Mask refuses to flood at or below it whether or not an ocean object exists,
+            // so the object side reads the same figure in all three cases.
             UCWaterBody seaBody = keptOcean != null ? keptOcean : handOcean;
-            float seaLevelMetres;
-            if (seaBody != null)
-                seaLevelMetres = seaBody.transform.position.y + seaBody.surfaceOffsetMetres;
-            else if (wantOcean)
-                seaLevelMetres = ComputeOceanSeaLevel(terrains, bounds, ReadFalloffBand(uc));
-            else
-                seaLevelMetres = float.NegativeInfinity;
+            float seaLevelMetres = seaBody != null
+                ? seaBody.transform.position.y + seaBody.surfaceOffsetMetres
+                : uc.transform.position.y + Mathf.Clamp01(node.seaLevel) * uc.maxHeightMeters;
 
             // GetHeightAt stays the single terrain sampler, and every consumer below -
             // the lake contour, the drainage solve, the valley fit - is handed this one
@@ -218,9 +290,29 @@ namespace UniverseCreator.TerrainSystem
             List<Vector3> lakeCenters = SelectLakeBasins(terrains, bounds, uc, chunkSize,
                                                          lakesToSpawn * 4);
 
+            // THE DEPTH THE LAKE MASK REJECTS AT, CONVERTED TO METRES ONCE
+            // node.minLakeDepth is a fraction of world height, because the mask works in
+            // the graph's 0..1 height space; the objects are placed in metres. Without
+            // this figure the object side accepted a basin on AREA alone, so a wide
+            // ankle-deep dimple that the Lake Mask left dry still received a Lake object:
+            // a lake surface with no mask under it, and so no bed carved beneath it
+            // either. The spawner's own field decided where water was marked and had no
+            // say at all in where water was PLACED - the definition of a stub.
+            float minLakeDepthMetres = Mathf.Max(0f, node.minLakeDepth) * uc.maxHeightMeters;
+
             // Spawn Lakes
             int lakesMade = 0;
-            int puddlesSkipped = 0;
+            // Rejections are counted BY REASON, not as one "skipped" total. "0 of 8
+            // lakes" with no reason is the report that sent this system's own author
+            // looking for a code fault when the world genuinely had no basin deep
+            // enough - the reason is the answer, so it is what gets printed.
+            int lakeNoContour = 0;
+            int lakeTooSmall = 0;
+            int lakeTooShallow = 0;
+
+            // One line per body actually built, so the report can be checked against the
+            // hierarchy without opening it.
+            List<string> bodyLines = new List<string>();
 
             for (int i = 0; i < lakeCenters.Count && lakesMade < lakesToSpawn; i++)
             {
@@ -239,9 +331,18 @@ namespace UniverseCreator.TerrainSystem
                 Polyline outline = SolveLakeContour(ground, bounds, centerPoint,
                                                     out fillLevel, out lakeArea);
 
-                if (outline == null || lakeArea < MinLakeAreaSquareMetres)
+                if (outline == null) { lakeNoContour++; continue; }
+                if (lakeArea < MinLakeAreaSquareMetres) { lakeTooSmall++; continue; }
+
+                // How deep the water stands over the basin floor. FloodBasin seeds its
+                // flood at centerPoint and raises the level from there, so the water above
+                // that point is the deepest the lake gets. If even that is under the
+                // floor, no cell in the basin clears it and the Lake Mask marks nothing
+                // here - so placing a Lake object would be placing water the graph does
+                // not agree is there.
+                if (fillLevel - centerPoint.y < minLakeDepthMetres)
                 {
-                    puddlesSkipped++;
+                    lakeTooShallow++;
                     continue;
                 }
 
@@ -270,25 +371,22 @@ namespace UniverseCreator.TerrainSystem
                                                         fillLevel - lake.surfaceOffsetMetres,
                                                         centerPoint.z);
                 lake.Rebuild();
+                ReportIfDry(lake, lakeGo.name);
 
                 // Into the same one list the rivers read, so a lake spawned this pass is
                 // a river terminus this pass too - no separate "new lakes" collection.
                 allLakes.Add(lake);
                 lakesMade++;
+                bodyLines.Add("    " + lakeGo.name + " - lake, surface "
+                              + lake.SurfaceWorldY().ToString("0.##") + " m, "
+                              + Mathf.RoundToInt(lakeArea) + " m^2, "
+                              + (fillLevel - centerPoint.y).ToString("0.##") + " m deep");
             }
 
-            // Said out loud, because "I asked for eight lakes and got five" is otherwise a
-            // mystery: the world simply had five basins that hold water.
-            if (lakesMade < lakesToSpawn)
-                Debug.Log("[UC Hydrology] placed " + lakesMade + " of " + lakesToSpawn
-                          + " lakes - " + puddlesSkipped + " candidate basin(s) held less "
-                          + "than " + MinLakeAreaSquareMetres + " m^2 of water and were "
-                          + "passed over rather than filled as a puddle");
-
             // --- Spawn the ocean (T10) ---
-            // One world-sized, flat sea. Its level is the median terrain height sampled a
-            // little way in from the world edge (ComputeOceanSeaLevel), so the coast sits
-            // where the world-edge falloff brings the land down to the water. It does NOT
+            // One world-sized, flat sea, standing at the datum resolved above - the same
+            // node.seaLevel the graph's masks stamp against, so the coast forms exactly
+            // where the graph says the land drops below the waterline. It does NOT
             // dig: BuildLevelBody culls every vertex whose ground is at or above the
             // surface, so the sea shows only where the land is already below sea level and
             // any higher ground reads as shore or island - coastline and islands follow
@@ -331,6 +429,9 @@ namespace UniverseCreator.TerrainSystem
                                                        seaLevel - ocean.surfaceOffsetMetres,
                                                        bounds.center.z);
                 ocean.Rebuild();
+                ReportIfDry(ocean, oceanGo.name);
+                bodyLines.Add("    " + oceanGo.name + " - ocean, surface "
+                              + ocean.SurfaceWorldY().ToString("0.##") + " m");
             }
 
             // --- Rivers (T17) and lake drain-out rivers (spec 2.2) ---
@@ -343,6 +444,12 @@ namespace UniverseCreator.TerrainSystem
             // Trunk rivers and lake outlets share this whole block: one drainage solve,
             // one spawn loop. They differ only in where the planner starts the course, so
             // giving them separate loops would be two copies of the same river object.
+            int plannedTrunks = 0;
+            int plannedTributaries = 0;
+            int plannedOutlets = 0;
+            int distributariesMade = 0;
+            int riversMade = 0;
+
             if (riversToSpawn > 0 || outletsToSpawn > 0)
             {
                 // Where the lakes actually are, read back from the scene so generated,
@@ -352,22 +459,32 @@ namespace UniverseCreator.TerrainSystem
                 // planner index read back against allLakes would slide by one per null
                 // and join an outlet to the wrong lake.
                 List<UCWaterBody> lakeBodies = new List<UCWaterBody>();
-                float lakeReach = 0f;
+                // Index-aligned too. Each lake carries ITS OWN reach: a single shared
+                // maximum handed a hillside pond the span of the largest lake in the
+                // world, so the planner marked hundreds of metres of dry ground as that
+                // pond's water and stopped rivers short of anything they could join.
+                List<float> lakeRadii = new List<float>();
                 for (int i = 0; i < allLakes.Count; i++)
                 {
                     UCWaterBody lake = allLakes[i];
                     if (lake == null) continue;
                     lakeCentres.Add(lake.transform.position);
                     lakeBodies.Add(lake);
-                    lakeReach = Mathf.Max(lakeReach, OutlineReach(lake));
+                    lakeRadii.Add(OutlineReach(lake));
                 }
 
-                // About 40 cells across each chunk, so a 5x5-chunk world solves on a
-                // 200x200 grid - roughly 25 m per cell. Fine enough to find a valley,
-                // coarse enough that the solve stays effectively linear. Nothing close-in
-                // depends on it: the spline resamples at 6 m and RiverCourseSolver's
-                // valley seek does the detail work.
-                int gridPerSide = Mathf.Clamp(uc.chunkCountPerSide * 40, 96, 384);
+                // THE LATTICE THE MASK WAS SOLVED ON, NOT ONE OF ITS OWN
+                // The node's River Mask traces the network on a grid of
+                // node.drainageResolution cells per side; this plans the river OBJECTS
+                // that have to sit in the trench that mask carved. Solved on a different
+                // grid the two disagree about where the valley floor is - D8 turns on
+                // whole cells, so a coarser or finer lattice picks a different cell and
+                // the course drifts from the trench by up to a cell's width. One
+                // setting, one lattice, so the object lands in its own channel.
+                //
+                // Floored at 64 because a course cannot be traced across a world only a
+                // few dozen cells wide; RiverNetworkPlanner.Solve caps the top at 512.
+                int gridPerSide = Mathf.Max(64, node.drainageResolution);
 
                 RiverNetworkPlanner.DrainageGrid drainage =
                     RiverNetworkPlanner.Solve(ground, bounds, gridPerSide);
@@ -381,11 +498,16 @@ namespace UniverseCreator.TerrainSystem
                 // Main stems plus the branches that join them. minTributaries is the
                 // node's own "how many small rivers merge to form a big one", so the
                 // network's shape is the user's setting rather than a hidden constant.
+                // channelHeadArea is the node's too, and for a sharper reason: it is the
+                // figure its River Mask stamped at, so passing anything else would plan
+                // courses for a network the graph did not draw - or, on a small world
+                // where the user lowered it, plan none at all.
                 List<RiverNetworkPlanner.PlannedRiver> plans =
                     RiverNetworkPlanner.PlanTrunkRivers(drainage, riversToSpawn,
                                                        Mathf.Max(0, node.minTributaries),
                                                        seaLevelMetres,
-                                                       lakeCentres, lakeReach, seedSpacing);
+                                                       lakeCentres, lakeRadii, seedSpacing,
+                                                       node.channelHeadArea);
 
                 // Each plan carries the name its object will take, so the three budgets
                 // stay tellable apart on the next Generate without re-reading any course:
@@ -397,7 +519,10 @@ namespace UniverseCreator.TerrainSystem
 
                 for (int i = 0; i < plans.Count; i++)
                 {
-                    planNames.Add(plans[i].joinsPlanIndex >= 0
+                    bool isTributary = plans[i].joinsPlanIndex >= 0;
+                    if (isTributary) plannedTributaries++; else plannedTrunks++;
+
+                    planNames.Add(isTributary
                         ? $"Tributary {++nextTributary}"
                         : $"River {++nextRiver}");
                 }
@@ -409,12 +534,13 @@ namespace UniverseCreator.TerrainSystem
                 // joinsPlanIndex above pointing at the same course it did.
                 List<RiverNetworkPlanner.PlannedRiver> outlets =
                     RiverNetworkPlanner.PlanLakeOutlets(drainage, outletsToSpawn, seaLevelMetres,
-                                                        lakeCentres, lakeReach, seedSpacing);
+                                                        lakeCentres, lakeRadii, seedSpacing);
 
                 for (int i = 0; i < outlets.Count; i++)
                 {
                     plans.Add(outlets[i]);
                     planNames.Add($"Outlet {highestOutletIndex + i + 1}");
+                    plannedOutlets++;
                 }
 
                 // The largest catchment in THIS world anchors the size scale below.
@@ -449,20 +575,22 @@ namespace UniverseCreator.TerrainSystem
                     WaterPresets.ApplyDefaults(river);
                     WaterPresets.ApplyManagerDefaults(river);
                     // Procedural policy the menu leaves off: a generated river carves its
-                    // bed (digTerrain is on by default), fits the valley and routes around
-                    // high ground, so the drawn intent becomes a real channel.
-                    river.fitToValley = true;
-                    river.routeAroundHighGround = true;
+                    // bed (digTerrain is on by default). It does NOT re-fit its course -
+                    // SeatCourse above already did that once, bounded to the corridor.
+                    // Leaving these on ran a second, 2 km-wide solve on live terrain and
+                    // slid the water off the trench that had just been cut for it.
+                    river.fitToValley = false;
+                    river.routeAroundHighGround = false;
 
                     // The course is authored in the body's own space, head at the origin.
                     List<Vector3> local = new List<Vector3>(plan.course.Count);
                     for (int p = 0; p < plan.course.Count; p++) local.Add(plan.course[p] - head);
                     river.course = new Polyline(local);
 
-                    // Zero per-node values mean "inherit the body's", which is what
-                    // WorldCourse resolves before it tessellates. Only the estuary below
-                    // overrides them, so an untouched node stays inherited and a user edit
-                    // to the body width still reaches every node.
+                    // Per-node size, graded along the course by the land each point
+                    // actually drains. Filled below from the drainage solve; a node left
+                    // at zero means "inherit the body's", which is what WorldCourse
+                    // resolves before it tessellates.
                     river.nodeDepthMetres = new List<float>(new float[local.Count]);
                     river.nodeWidthMetres = new List<float>(new float[local.Count]);
 
@@ -478,7 +606,7 @@ namespace UniverseCreator.TerrainSystem
                     // BigRiverWidthMetres sets the absolute scale. Both are honoured, and
                     // no number is guessed.
                     float ratio = Mathf.Clamp01(plan.catchmentSquareMetres / largestCatchment);
-                    float width = BigRiverWidthMetres * Mathf.Pow(ratio, 0.4f);
+                    float width = BigRiverWidthMetres * Mathf.Pow(ratio, WidthAreaExponent);
 
                     // A trunk - a course that joins no other course, which is exactly
                     // what the node's river count sets - is one of the spec's "bigger
@@ -496,6 +624,48 @@ namespace UniverseCreator.TerrainSystem
                     river.channelDepthMetres =
                         Mathf.Clamp(river.widthMetres / WidthToDepthRatio, 0.4f, 8f);
 
+                    // --- Source to mouth, from the land each node actually drains ---
+                    // The widths above size the river as ONE object, at its mouth. A real
+                    // river is not one width: it starts where a channel first forms and
+                    // grows every time more land drains through it. So each node is sized
+                    // by its own catchment, read from the same solved grid that planned
+                    // the course, under the same area^0.4 law - which makes the last node
+                    // land back on river.widthMetres by construction, because the plan's
+                    // own catchment was read from this grid at this course's mouth.
+                    //
+                    // The accumulation is taken as a running maximum down the course. D8
+                    // flow directions turn on whole cells, so a course point can round to
+                    // a cell just off the thread of the channel and read a catchment
+                    // smaller than the reach above it. Water does not lose its watershed
+                    // halfway down, and honouring such a dip would pinch the channel to a
+                    // thread and then reopen it - the discontinuous, zigzag width the
+                    // spec calls out. A maximum lets the river widen and never narrow.
+                    float mouthCatchment = Mathf.Max(1f, plan.catchmentSquareMetres);
+                    float cellArea = drainage != null ? drainage.CellAreaSquareMetres : 0f;
+                    float drained = 0f;
+
+                    for (int p = 0; drainage != null && p < local.Count; p++)
+                    {
+                        Vector3 world = plan.course[p];
+                        int cell = drainage.CellAt(world.x, world.z);
+
+                        drained = Mathf.Max(drained, drainage.accum[cell] * cellArea);
+
+                        float share = Mathf.Clamp01(drained / mouthCatchment);
+                        float nodeWidth = river.widthMetres * Mathf.Pow(share, WidthAreaExponent);
+
+                        // Floored at the narrowest channel that gets built at all, and
+                        // capped at the body's own width: the mouth is the widest the
+                        // river gets, and the estuary flare below is the one exception.
+                        river.nodeWidthMetres[p] =
+                            Mathf.Clamp(nodeWidth, MinRiverWidthMetres, river.widthMetres);
+
+                        // Same width-to-depth ratio as the body, so a headwater reach is
+                        // shallow as well as narrow instead of a narrow slot cut deep.
+                        river.nodeDepthMetres[p] =
+                            Mathf.Clamp(river.nodeWidthMetres[p] / WidthToDepthRatio, 0.4f, 8f);
+                    }
+
                     // A river widens where it meets the sea - the estuary. Over the last
                     // stretch only: halfway up its length is not a delta.
                     if (plan.mouth == RiverNetworkPlanner.MouthKind.Ocean)
@@ -507,7 +677,16 @@ namespace UniverseCreator.TerrainSystem
                         for (int p = estuaryStart; p < local.Count; p++)
                         {
                             float t = (p - estuaryStart) / (float)span;
-                            river.nodeWidthMetres[p] = river.widthMetres * (1f + t * (EstuaryFlare - 1f));
+
+                            // Flares the GRADED width where there is one. A zero means the
+                            // grading did not run - the same "unset, inherit the body"
+                            // that ResolveNodeSeries reads it as - so the body's width is
+                            // the thing flared instead of multiplying the zero away.
+                            float at = river.nodeWidthMetres[p] > 1e-4f
+                                ? river.nodeWidthMetres[p]
+                                : river.widthMetres;
+
+                            river.nodeWidthMetres[p] = at * (1f + t * (EstuaryFlare - 1f));
                         }
                     }
 
@@ -541,6 +720,18 @@ namespace UniverseCreator.TerrainSystem
                     }
 
                     river.Rebuild();
+                    ReportIfDry(river, riverGo.name);
+                    riversMade++;
+
+                    // Head and mouth elevations rather than one surface height: a river's
+                    // surface is a profile, and printing both ends is what shows at a
+                    // glance that it descends instead of climbing.
+                    bodyLines.Add("    " + riverGo.name + " - river, order "
+                                  + plan.streamOrder + ", into " + plan.mouth + ", "
+                                  + Mathf.RoundToInt(plan.lengthMetres) + " m long, "
+                                  + river.widthMetres.ToString("0.##") + " m wide, "
+                                  + plan.course[0].y.ToString("0.##") + " m -> "
+                                  + plan.course[plan.course.Count - 1].y.ToString("0.##") + " m");
 
                     // --- Delta distributaries (spec 1.10) ---
                     // Arms leave the trunk near its mouth and each finds its own way to the
@@ -596,7 +787,8 @@ namespace UniverseCreator.TerrainSystem
                         distRiver.SetKindOnce(WaterBodyKind.River);
                         WaterPresets.ApplyDefaults(distRiver);
                         WaterPresets.ApplyManagerDefaults(distRiver);
-                        distRiver.fitToValley = true;
+                        distRiver.fitToValley = false;
+                        distRiver.routeAroundHighGround = false;
 
                         List<Vector3> armLocal = new List<Vector3>(armCourse.Count);
                         for (int p = 0; p < armCourse.Count; p++)
@@ -619,9 +811,59 @@ namespace UniverseCreator.TerrainSystem
                         if (distRiver.CanJoin(river)) distRiver.joinUpstreamFrom = river;
 
                         distRiver.Rebuild();
+                        distributariesMade++;
                     }
                 }
             }
+
+            // --- One report per Generate ---
+            // Everything a "nothing appeared" question needs, in one line-block: which node
+            // asked, the datum in BOTH units (the node stores 0..1, the world is metres, and
+            // a mismatch between them is invisible unless both are printed), what was asked
+            // for against what stands, why each rejected basin was rejected, and a line per
+            // body actually built so the result can be checked without opening the hierarchy.
+            float seaNormalized = uc.maxHeightMeters > 0.0001f
+                ? (seaLevelMetres - uc.transform.position.y) / uc.maxHeightMeters
+                : 0f;
+
+            System.Text.StringBuilder report = new System.Text.StringBuilder(512);
+            report.Append("[UC Hydrology] node ").Append(node.id).Append('\n');
+            report.Append("  sea level  : ").Append(seaLevelMetres.ToString("0.##"))
+                  .Append(" m  (").Append(seaNormalized.ToString("0.###"))
+                  .Append(" of ").Append(uc.maxHeightMeters.ToString("0.##"))
+                  .Append(" m world height)").Append('\n');
+            report.Append("  lakes      : asked ").Append(lakesToSpawn)
+                  .Append(", built ").Append(lakesMade)
+                  .Append(", from ").Append(lakeCenters.Count).Append(" candidate basin(s)")
+                  .Append('\n');
+            report.Append("    rejected : ").Append(lakeNoContour).Append(" no closed contour, ")
+                  .Append(lakeTooSmall).Append(" under ")
+                  .Append(Mathf.RoundToInt(MinLakeAreaSquareMetres)).Append(" m^2, ")
+                  .Append(lakeTooShallow).Append(" under ")
+                  .Append(minLakeDepthMetres.ToString("0.##")).Append(" m deep").Append('\n');
+            report.Append("  rivers     : asked ").Append(riversToSpawn)
+                  .Append(", planned ").Append(plannedTrunks).Append(" trunk(s) + ")
+                  .Append(plannedTributaries).Append(" tributary(ies), outlets asked ")
+                  .Append(outletsToSpawn).Append(" planned ").Append(plannedOutlets)
+                  .Append(", built ").Append(riversMade)
+                  .Append(", distributaries ").Append(distributariesMade).Append('\n');
+            report.Append("  ocean      : ").Append(oceanToSpawn ? "built" :
+                          (wantOcean ? "already standing" : "not requested"));
+
+            if (bodyLines.Count == 0)
+            {
+                report.Append('\n').Append("  NO WATER BODIES WERE BUILT. The counts above say "
+                              + "which stage stopped: 0 candidate basins means the terrain has no "
+                              + "closed depressions, and 0 planned rivers means no cell reached "
+                              + "the channel-head drainage area.");
+            }
+            else
+            {
+                report.Append('\n').Append("  built:");
+                for (int i = 0; i < bodyLines.Count; i++) report.Append('\n').Append(bodyLines[i]);
+            }
+
+            Debug.Log(report.ToString());
         }
 
         // --- River size constants (spec 11.7 / 1.9) ---
@@ -629,7 +871,13 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Width of this world's largest river, in metres. The spec's band for a
         /// big river is 40-80 m; this is its top, and every smaller river scales below it
         /// by catchment.</summary>
-        private const float BigRiverWidthMetres = 80f;
+        /// <remarks>
+        /// Internal rather than private because the Hydrology Spawner's River Mask port
+        /// has to stamp the channel at the width the river object will actually be. A
+        /// mask narrower than its river leaves water standing over an uncarved bank; a
+        /// mask wider leaves a dry trench beside the water. One constant, both users.
+        /// </remarks>
+        internal const float BigRiverWidthMetres = 80f;
 
         /// <summary>Bottom of the same band, in metres. Applied only to a trunk - a
         /// course that joins no other - so the rivers the node count asks for measure
@@ -637,10 +885,26 @@ namespace UniverseCreator.TerrainSystem
         private const float TrunkMinWidthMetres = 40f;
 
         /// <summary>Nothing narrower than this gets built as a river object.</summary>
-        private const float MinRiverWidthMetres = 4f;
+        /// <remarks>Shared with the spawner's River Mask - see BigRiverWidthMetres.</remarks>
+        internal const float MinRiverWidthMetres = 4f;
 
         /// <summary>Alluvial channels are roughly this many times wider than deep.</summary>
         private const float WidthToDepthRatio = 18f;
+
+        /// <summary>
+        /// How channel width grows with the land it drains.
+        /// </summary>
+        /// <remarks>
+        /// Downstream hydraulic geometry (Leopold and Maddock, 1953) puts bankfull width
+        /// at about the square root of discharge, and Hack's law puts discharge at about
+        /// the 0.8 power of drainage area - so width goes as area^0.4.
+        ///
+        /// Internal because the Hydrology Spawner's River Mask has to stamp the channel
+        /// at the width the river object will actually be built at. Two copies of this
+        /// exponent would widen the mask and the body at different rates, and the
+        /// mismatch shows up as water standing over an uncarved bank near the mouth.
+        /// </remarks>
+        internal const float WidthAreaExponent = 0.4f;
 
         /// <summary>Fraction of a river's length that behaves as its estuary.</summary>
         private const float EstuaryFraction = 0.15f;
@@ -773,7 +1037,28 @@ namespace UniverseCreator.TerrainSystem
             const float MinRelief = 2f;      // metres the surroundings must rise
             const float MinEnclosure = 0.6f; // fraction of bearings that must be higher
 
-            // Pass 1: genuine enclosed basins, lowest first, de-clustered.
+            // How far inside its own chunk a basin centre must sit to be preferred. A lake
+            // floods out from the centre to its spill point, so a centre hard against a
+            // chunk border produces a lake that straddles two chunks - the reported "lakes
+            // form at borders" fault. Keeping the centre a band inside the chunk lets the
+            // body sit within one chunk. Not a hard rule: if every real basin is near a
+            // border, the fallback passes below still place the lake rather than dropping
+            // it, because a real basin on genuine low ground beats an interior on a hill.
+            float borderMargin = Mathf.Clamp(chunkSize * 0.2f, 8f, chunkSize * 0.4f);
+
+            // Pass 1: genuine enclosed basins that also sit inside a chunk, lowest first.
+            for (int k = 0; k < order.Count && chosen.Count < count; k++)
+            {
+                int idx = order[k];
+                if (enclosure[idx] < MinEnclosure || rise[idx] < MinRelief) continue;
+                if (ChunkBorderDistance(pos[idx], bounds, chunkSize) < borderMargin) continue;
+                if (TooClose(chosen, pos[idx], minSeparation)) continue;
+                chosen.Add(pos[idx]);
+            }
+
+            // Pass 1b: genuine enclosed basins that fell in the border band. A real basin
+            // near a chunk seam is still a better lake than a shallow interior dish, so it
+            // is taken before the flat-ground fill - just after the clean-interior ones.
             for (int k = 0; k < order.Count && chosen.Count < count; k++)
             {
                 int idx = order[k];
@@ -813,6 +1098,27 @@ namespace UniverseCreator.TerrainSystem
                 if (dx * dx + dz * dz < sq) return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Distance in metres from a world point to the nearest chunk boundary line. Used
+        /// to prefer lake centres that sit inside a chunk rather than on a seam between
+        /// two, so a lake floods within one chunk. The chunk grid is anchored at the
+        /// world bounds' minimum corner and stepped by chunkSize, matching how the chunk
+        /// manager tiles the world.
+        /// </summary>
+        private static float ChunkBorderDistance(Vector3 p, Bounds bounds, float chunkSize)
+        {
+            if (chunkSize <= 0.01f) return float.MaxValue;
+
+            // Offset within the current chunk cell, on each axis.
+            float ox = Mathf.Repeat(p.x - bounds.min.x, chunkSize);
+            float oz = Mathf.Repeat(p.z - bounds.min.z, chunkSize);
+
+            // Nearest of the two borders on each axis, then the nearer axis overall.
+            float dx = Mathf.Min(ox, chunkSize - ox);
+            float dz = Mathf.Min(oz, chunkSize - oz);
+            return Mathf.Min(dx, dz);
         }
 
         // --- Lake size and shape (spec 11.7 / T19, revised 2026-08-18) --------------
@@ -1377,6 +1683,7 @@ namespace UniverseCreator.TerrainSystem
         {
             foreach (var t in terrains)
             {
+                if (t == null || t.terrainData == null) continue;   // a Terrain with no data samples nothing
                 Vector3 local = t.transform.InverseTransformPoint(new Vector3(x, 0, z));
                 if (local.x >= 0 && local.x <= t.terrainData.size.x && local.z >= 0 && local.z <= t.terrainData.size.z)
                 {
@@ -1386,51 +1693,28 @@ namespace UniverseCreator.TerrainSystem
             return 0f;
         }
 
-        // The sea level for a world-sized ocean: the MEDIAN terrain height sampled a
-        // short way in from the world edge, all the way around the perimeter. Sampling
-        // 40% of the falloff band inward reads the land where the world-edge falloff has
-        // already brought it down toward the water, so the coast forms there rather than
-        // at an arbitrary fixed height. Median (not mean) ignores a few tall outliers - a
-        // headland, a river mouth - so one cliff cannot drag the whole sea up. (T10)
-        private static float ComputeOceanSeaLevel(Terrain[] terrains, Bounds bounds, float band)
+        // WHY A BODY THAT BUILT NOTHING HAS TO SAY SO
+        // UCWaterBody.RebuildSurface asks BuildData for geometry and returns early,
+        // without creating its "UC Water Surface" child, whenever the answer is null -
+        // which Assemble returns the moment not one quad of the footprint came out wet.
+        // That is the reported fault in its exact shape: the object sits in the
+        // hierarchy with every field correctly filled in, there is no water and no
+        // shader anywhere, and the console says nothing at all. The condition is a real
+        // description of the world, not a code error - a water plane with no ground
+        // under it, a course too short to raise a mesh - so it is reported rather than
+        // thrown, it names the height it used so the figure can be checked against the
+        // terrain, and the object is left standing so its settings can be read.
+        private static void ReportIfDry(UCWaterBody body, string what)
         {
-            float inset = Mathf.Max(0f, 0.4f * band);
-            // Never inset past the middle of a small world.
-            inset = Mathf.Min(inset, Mathf.Min(bounds.size.x, bounds.size.z) * 0.45f);
+            if (body == null) return;
+            if (body.transform.Find("UC Water Surface") != null) return;
 
-            const int PerEdge = 64;
-            List<float> heights = new List<float>((PerEdge + 1) * 4);
-
-            float minX = bounds.min.x + inset, maxX = bounds.max.x - inset;
-            float minZ = bounds.min.z + inset, maxZ = bounds.max.z - inset;
-
-            for (int s = 0; s <= PerEdge; s++)
-            {
-                float tx = Mathf.Lerp(minX, maxX, s / (float)PerEdge);
-                heights.Add(GetHeightAt(terrains, tx, minZ)); // south edge, inset north
-                heights.Add(GetHeightAt(terrains, tx, maxZ)); // north edge, inset south
-                float tz = Mathf.Lerp(minZ, maxZ, s / (float)PerEdge);
-                heights.Add(GetHeightAt(terrains, minX, tz)); // west edge, inset east
-                heights.Add(GetHeightAt(terrains, maxX, tz)); // east edge, inset west
-            }
-
-            if (heights.Count == 0) return 0f;
-            heights.Sort();
-            return heights[heights.Count / 2];
-        }
-
-        // The world-edge falloff band, read from a World Edge Falloff node in the graph if
-        // one is present (the node whose outer ring blends the land down to sea level);
-        // otherwise that node's own 500 m default. The ocean's coast is placed a fraction
-        // of this band in from the edge, so the two stay consistent by construction.
-        private static float ReadFalloffBand(UniverseCreatorObject uc)
-        {
-            const float Fallback = 500f;
-            if (uc == null || uc.graph == null) return Fallback;
-            List<WorldEdgeFalloffNode> nodes = uc.graph.GetNodesOfType<WorldEdgeFalloffNode>();
-            if (nodes == null || nodes.Count == 0) return Fallback;
-            float band = nodes[0].falloffMeters;
-            return band > 0f ? band : Fallback;
+            Debug.LogWarning("[UC Hydrology] " + what + " produced no surface geometry; its water plane "
+                             + "stands at " + body.SurfaceWorldY().ToString("0.##") + " m. For a lake or "
+                             + "the ocean that means no ground inside its footprint lies below that "
+                             + "height, so there is no basin for the water to stand in; for a river it "
+                             + "means the course was too short or too narrow to raise a mesh. The object "
+                             + "is left in place rather than removed, so its settings can be inspected.");
         }
 
         // A body created by this generator is named "Lake <n>". A hand-placed body

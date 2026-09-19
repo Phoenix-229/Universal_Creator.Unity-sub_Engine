@@ -84,10 +84,46 @@ namespace UniverseCreator.TerrainSystem
 
         // =====================================================================
         //  CHUNK SETTINGS (25+1 Virtual System)
+        //
+        //  Two numbers, deliberately separate, that a previous design fused into one:
+        //
+        //   - chunkSizeMeters is the AUTHORED source of truth: how big one tile is.
+        //     The world is cut into as many tiles as it takes to cover it, so the tile
+        //     stays the size the developer asked for whatever the world size. Setting
+        //     it to 1000 gives 1 km tiles - a 9 km world is 9x9, a 5 km world is 5x5.
+        //
+        //   - chunkCountPerSide is DERIVED from the two above and cached here for the
+        //     many consumers that read it. It is not authored any more; ValidateSettings
+        //     overwrites it. This is "the +1": the whole-world subdivision, present in
+        //     full only while authoring.
+        //
+        //   - residentWindowPerSide is "the 25": how many tiles stay loaded around the
+        //     player at runtime. Fixed, NOT tied to world size, so a 40 km world streams
+        //     the same small window a 5 km world does and never holds the whole world
+        //     resident on a phone. The tiles outside it are parked (skeleton recycled),
+        //     not destroyed, so walking back re-enables a surface with no re-bake.
         // =====================================================================
 
-        [Tooltip("Chunks per side in the virtual grid. 5 gives the 25-chunk layout.")]
+        [Tooltip("Metres per chunk - the authored source of truth. The chunk COUNT is " +
+                 "derived from this and the world size, so a tile stays this size " +
+                 "whatever the world size. 1000 = 1 km tiles.")]
+        public float chunkSizeMeters = 1000f;
+
+        [Tooltip("Derived: chunks per side = worldSize / chunkSize. Set by " +
+                 "ValidateSettings, not authored. Read-only in the inspector.")]
         public int chunkCountPerSide = 5;
+
+        [Tooltip("Resident streaming window per side at runtime - 'the 25'. Fixed, not " +
+                 "tied to world size. 5 keeps a 5x5 window (radius 2) around the player. " +
+                 "Odd only, so there is a single centre tile to keep the player in.")]
+        public int residentWindowPerSide = 5;
+
+        [Tooltip("Stream a window around the player at runtime instead of holding the whole " +
+                 "world. On by default. It only ever engages when the world is bigger than " +
+                 "the resident window (a world that already fits stays whole either way), so " +
+                 "small worlds pay nothing and only a large world streams. Untick to force a " +
+                 "world to stay whole in play mode - only safe when it fits in memory.")]
+        public bool streamingEnabled = true;
 
         [Tooltip("High-LOD ring size (centre square). 3 gives 9 high-fidelity chunks.")]
         public int highLODRingSize = 3;
@@ -420,13 +456,16 @@ namespace UniverseCreator.TerrainSystem
             // Only generate if the creator node is actually connected to the output!
             if (graph != null)
             {
-                // Water is procedural ONLY where the graph asks for it. A Hydrology
-                // Spawner must be present AND wired through to an Output before any
-                // river or lake is drawn - a disconnected node, or no node at all,
-                // means no procedural water, full stop. This is the user's rule:
-                // "make sure the lake do not just create themselves but until their
-                // nodes are created." (Bodies orphaned by a since-disconnected node
-                // are torn down by the graph-reactive removal pass, not here.)
+                // Water is procedural ONLY where the graph asks for it - but the graph
+                // can ask for it in more than one way. A Hydrology Spawner wired
+                // through to an Output settles the counts outright. Failing that, a
+                // water node that reaches an Output - a River Network Trace, a River
+                // Fill, a Lake Fill, an Ocean Level - has plainly asked for water too,
+                // and gets it with the counts derived from the world's own size. Only
+                // when the graph contains neither does the world stay dry. That split
+                // is the user's rule: the spawner's numbers when it is connected,
+                // native math when it is not. ResolveHydrology holds both halves, so
+                // there is one answer to "does this world generate water".
                 //
                 // The reach-an-Output walk lives on the water manager rather than being
                 // written out here, because UCWaterBody.IsGraphLinked asks the same
@@ -438,11 +477,8 @@ namespace UniverseCreator.TerrainSystem
                     GetComponentInChildren<UCWaterSystemManager>(true);
                 bool spawnAllowed = water == null || water.NodeWaterEnabled;
 
-                System.Collections.Generic.List<UniverseCreator.Nodes.Creators.HydrologyNode> spawners =
-                    UCWaterSystemManager.ConnectedHydrology(graph);
-
                 UniverseCreator.Nodes.Creators.HydrologyNode connectedHydrology =
-                    spawnAllowed && spawners.Count > 0 ? spawners[0] : null;
+                    spawnAllowed ? UCWaterSystemManager.ResolveHydrology(graph, this) : null;
 
                 // DEFERRED, not called here. RebuildAll below is async, so at this line
                 // the terrains still hold the flat/stale baseline - spawning now traced
@@ -481,6 +517,27 @@ namespace UniverseCreator.TerrainSystem
                 }
                 else
                 {
+                    // WHY NOTHING WAS PRODUCED, SAID OUT LOUD
+                    // Two quite different situations arrive here and both look identical
+                    // from the scene - an empty water system. Either the graph genuinely
+                    // asks for no water, which is the ordinary case and rightly says
+                    // nothing, or the graph DOES hold a wired Hydrology Spawner and the
+                    // water manager's Source field is refusing it, and then the sweep
+                    // below takes down every river and lake a previous run made with no
+                    // explanation anywhere. The second case is a setting rather than a
+                    // fault, so it is reported and not overridden: the field is the
+                    // user's to set, and the one thing it must not do is this silently.
+                    if (!spawnAllowed
+                        && UCWaterSystemManager.ConnectedHydrology(graph).Count > 0)
+                    {
+                        Debug.LogWarning("[UC Water] a Hydrology Spawner is wired in the graph, but the "
+                                         + "Water System Manager's Source is set to " + water.source
+                                         + ", which does not let the graph produce water. No river, lake "
+                                         + "or ocean will be generated, and any this world already had is "
+                                         + "being removed. Set Source to Node Graph or Both to let it run.",
+                                         water);
+                    }
+
                     // No Hydrology node reaches an Output any more (disconnected or
                     // deleted), or the water manager's Source says the graph may not
                     // produce water, so any river/lake a previously-connected node
@@ -776,17 +833,22 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Radius, in cells, of the window kept loaded around the player at runtime.
         ///
-        /// Derived from the visible grid rather than hard-coded to 2, so a world authored
-        /// with a 7x7 or 9x9 grid streams the window its author asked for. The default
-        /// 5x5 grid gives radius 2 - the 25-chunk window - and the buffer ring beyond it
-        /// is pre-generated so the edge never streams in visibly.
+        /// Derived from residentWindowPerSide - 'the 25' - NOT from the world subdivision.
+        /// This is the fix for the crash the old design courted: when the radius followed
+        /// the world count, a large world's window grew to cover the whole world, so a
+        /// 40 km world at 1 km tiles tried to hold ~1600 heightmaps resident and took a
+        /// phone out of memory. Pinning it to the resident window means the window is the
+        /// same small 5x5 (radius 2) on a 5 km world and a 40 km one; the difference is
+        /// only how many tiles it slides across. The buffer ring beyond it is
+        /// pre-generated so the edge never streams in visibly.
         ///
         /// Edit mode does not use this: the whole world stays resident there, which is
         /// what makes global placement of cities, roads and foliage possible.
         /// </summary>
         public int GetStreamRadius()
         {
-            int radius = (Mathf.Max(1, chunkCountPerSide) - 1) / 2;
+            int window = Mathf.Max(1, residentWindowPerSide);
+            int radius = (window - 1) / 2;
             return Mathf.Max(1, radius) + Mathf.Max(0, bufferRingWidth);
         }
 
@@ -815,17 +877,32 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>
         /// Whether the world should hold every cell resident instead of streaming a
-        /// window. True in the editor while not playing.
+        /// window. This is the hybrid gate.
         ///
         /// The two modes want opposite things and cannot share one policy. Authoring
         /// needs the whole 10-40 km world on screen at once, because a road or a city
         /// placed against a cell that is not loaded has nothing to sit on. Runtime needs
         /// the opposite: the same world resident in full is thousands of heightmaps, and
         /// on a phone that is an out-of-memory kill rather than a slow frame.
+        ///
+        /// So the whole world stays resident when ANY of these hold:
+        ///   - the editor is not playing (authoring always sees everything);
+        ///   - the developer unticked streamingEnabled (an explicit "keep it whole");
+        ///   - the world already FITS in the resident window - no cell would ever fall
+        ///     outside it, so streaming would slide a window that never has an edge to
+        ///     stream and would only spend the LOD sweep to discover nothing changed.
+        ///     This is the "small world does not stream" rule: streaming engages only
+        ///     when the world is bigger than the window, exactly the auto-activation the
+        ///     25+1 needs. GetStreamRadius gives the window radius; a world whose own
+        ///     radius is within it is fully inside the window at any centre.
         /// </summary>
         public bool ShouldRenderWholeWorld()
         {
-            return !Application.isPlaying;
+            if (!Application.isPlaying) return true;
+            if (!streamingEnabled) return true;
+
+            int worldRadius = (chunkCountPerSide - 1) / 2;
+            return worldRadius <= GetStreamRadius();
         }
 
         /// <summary>
@@ -834,6 +911,22 @@ namespace UniverseCreator.TerrainSystem
         /// doubling the side quadruples the bill.
         /// </summary>
         public const int WholeWorldClampGridSide = 16;
+
+        /// <summary>
+        /// Ceiling on the derived chunk count per side. The 56 km stress world at the
+        /// smallest sensible tile (about 900 m) lands near this; past it the tile size
+        /// is raised for the developer rather than instantiating thousands of Terrains.
+        /// The resolution clamp above keeps the heightmap memory affordable well before
+        /// this; this bound is about GameObject/TerrainData count, not samples.
+        /// </summary>
+        public const int MaxChunkCountPerSide = 63;
+
+        /// <summary>
+        /// Ceiling on the resident streaming window per side - 'the 25' can be widened
+        /// (a fast-vehicle world may want 7x7) but not without bound: the resident set is
+        /// window^2 heightmaps held on the device at once, and a phone cannot hold many.
+        /// </summary>
+        public const int MaxResidentWindowPerSide = 9;
 
         /// <summary>
         /// Highest 2^n+1 resolution whose full grid fits inside the platform budget.
@@ -896,14 +989,31 @@ namespace UniverseCreator.TerrainSystem
             maxHeightMeters = Mathf.Clamp(maxHeightMeters, 1f, 10000f);
             resolution = SnapToPowerOfTwoPlusOne(resolution, 33, 4097);
 
-            // Odd counts only: an even grid has no single centre chunk to keep the
-            // player in, which the 25+1 recentring logic depends on.
-            chunkCountPerSide = Mathf.Clamp(chunkCountPerSide, 1, 15);
-            if (chunkCountPerSide % 2 == 0) chunkCountPerSide++;
+            // CHUNK COUNT IS DERIVED, NOT AUTHORED. The tile size is what the developer
+            // sets; the count is however many tiles it takes to cover the world. This is
+            // the inversion the old design had backwards - it pinned the count and let
+            // the tile size float, so asking for 1000 m tiles on a 4 km world gave 800 m
+            // (round(4000/1000)=4, forced odd to 5, 4000/5=800). No odd-forcing here:
+            // the odd-centre requirement belongs to the resident WINDOW below, not the
+            // world subdivision, and forcing it is exactly what mangled the tile size.
+            chunkSizeMeters = Mathf.Clamp(chunkSizeMeters, 50f, worldSizeKm * 1000f);
+            int derived = Mathf.RoundToInt((worldSizeKm * 1000f) / chunkSizeMeters);
+            chunkCountPerSide = Mathf.Clamp(derived, 1, MaxChunkCountPerSide);
 
-            highLODRingSize = Mathf.Clamp(highLODRingSize, 1, chunkCountPerSide);
+            // Resident window - 'the 25'. Odd only: an even window has no single centre
+            // tile to keep the player in, which the recentring depends on. Never larger
+            // than the world, and never larger than the runtime cap that keeps the
+            // resident set affordable on a phone.
+            residentWindowPerSide = Mathf.Clamp(residentWindowPerSide, 1,
+                                                Mathf.Min(chunkCountPerSide, MaxResidentWindowPerSide));
+            if (residentWindowPerSide % 2 == 0) residentWindowPerSide++;
+            residentWindowPerSide = Mathf.Min(residentWindowPerSide, chunkCountPerSide);
+
+            // High-LOD ring is measured against the resident window, not the world: it is
+            // the sharp centre of what is streamed, so it can never exceed the window.
+            highLODRingSize = Mathf.Clamp(highLODRingSize, 1, residentWindowPerSide);
             if (highLODRingSize % 2 == 0) highLODRingSize++;
-            highLODRingSize = Mathf.Min(highLODRingSize, chunkCountPerSide);
+            highLODRingSize = Mathf.Min(highLODRingSize, residentWindowPerSide);
 
             bufferRingWidth = Mathf.Clamp(bufferRingWidth, 0, 3);
             recenterThreshold = Mathf.Clamp01(recenterThreshold);

@@ -51,6 +51,9 @@ using UniverseCreator.Nodes.Creators;
 // for the ocean-level node that turns it into a mask and a shoreline.
 using UniverseCreator.Nodes.Outputs;
 using UniverseCreator.Nodes.Selectors;
+// Same again, for the two nodes that cut the land at the waterline - the wave notch
+// and the near-shore shelf. They measure from sea level, so they are pushed to as well.
+using UniverseCreator.Nodes.Modifiers;
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -120,10 +123,10 @@ namespace UniverseCreator.TerrainSystem
         [Header("Sea Level")]
 
         [Tooltip("Height that counts as sea level, as a fraction of the world's max " +
-                 "height. 0.3 on a 600 m world is 180 m. Push To Graph writes it into " +
+                 "height. 0.35 on a 600 m world is 210 m. Push To Graph writes it into " +
                  "the nodes that paint the beach at the waterline.")]
         [Range(0f, 1f)]
-        public float nodeSeaLevel = 0.3f;
+        public float nodeSeaLevel = 0.35f;
 
         // REMOVED: ten more "node path" fields - surface offset, mesh resolution, min
         // depth, min area, edge feather, Manning roughness, hydraulic radius cap, max
@@ -406,17 +409,20 @@ namespace UniverseCreator.TerrainSystem
         /// Writes the sea level into every node in a graph that measures anything from
         /// it, and returns how many nodes were touched.
         ///
-        /// The shoreline is one elevation, so it has to come from one number. Two
-        /// nodes read it and neither can ask the water where it ended up: both run on
-        /// a worker thread while the terrain is being built, before any water body
-        /// exists. So it is pushed to them from here, and read back from none of them
-        /// - a value with one writer cannot disagree with itself.
+        /// The shoreline is one elevation, so it has to come from one number. Six node
+        /// types read it and none of them can ask the water where it ended up: all of
+        /// them run on a worker thread while the terrain is being built, before any
+        /// water body exists. So it is pushed to them from here, and read back from
+        /// none of them - a value with one writer cannot disagree with itself.
         ///
         /// Ocean Level turns it into the ocean mask, the depth field and the shoreline
-        /// band that textures the beach. Biome Splat paints its sand at it. When those
-        /// two and the ocean body's real surface do not agree, the sand lands at an
-        /// elevation the water never reached and the true waterline stays untextured -
-        /// which is the white shore of 4.4.
+        /// band that textures the beach. Biome Splat paints its sand at it. The
+        /// Hydrology Spawner, River Network Trace, River Fill and Lake Fill decide from
+        /// it where water may stand at all. When any of them and the ocean body's real
+        /// surface do not agree, the sand lands at an elevation the water never reached
+        /// and the true waterline stays untextured - which is the white shore of 4.4 -
+        /// and the channels cut for rivers stop short of the sea that was meant to fill
+        /// them.
         /// </summary>
         public int ApplyToGraph(Graph graph)
         {
@@ -469,6 +475,74 @@ namespace UniverseCreator.TerrainSystem
                         splat.MarkDirty();
                     }
                     touched++;
+                    continue;
+                }
+
+                // EVERY NODE THAT MEASURES FROM THE SHORELINE, NOT JUST THE TWO THAT
+                // PAINT IT. The four below decide where water STANDS, and each carries
+                // its own copy of the one elevation: the spawner ends its rivers at it
+                // and refuses lakes below it, River Network Trace stops a course at it,
+                // River Fill hands the sea's level to the reach at the mouth, Lake Fill
+                // will not flood a basin at or under it.
+                //
+                // Left out of this walk they kept whatever the user last typed while the
+                // ocean settled somewhere else entirely - so the graph carved beds and
+                // flooded basins against one shoreline and the water arrived at another.
+                // That is the coastal half of "trenches with no water in them": a river
+                // mouth cut to 0.35 of world height under a sea standing at 0.05 is a
+                // channel that the ocean never reaches, and a lake basin rejected for
+                // sitting below a sea level that was never true is a basin left dry.
+                HydrologyNode hydrology = node as HydrologyNode;
+                if (hydrology != null)
+                {
+                    if (write) { hydrology.seaLevel = seaLevel; hydrology.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                RiverNetworkTraceNode trace = node as RiverNetworkTraceNode;
+                if (trace != null)
+                {
+                    if (write) { trace.seaLevel = seaLevel; trace.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                RiverFillNode riverFill = node as RiverFillNode;
+                if (riverFill != null)
+                {
+                    if (write) { riverFill.seaLevel = seaLevel; riverFill.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                LakeFillNode lakeFill = node as LakeFillNode;
+                if (lakeFill != null)
+                {
+                    if (write) { lakeFill.seaLevel = seaLevel; lakeFill.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                // THE TWO THAT CUT THE LAND AT THE WATERLINE
+                // Coastal Erosion cuts the wave notch and Coastal Shelf Shaper flattens
+                // the near-shore bed, both measured from their own seaLevel. Left out of
+                // this walk the notch is cut into a hillside the sea never reaches and
+                // the shelf is drowned or left standing in the air - a shoreline the
+                // water disagrees with, in terrain rather than in a mask.
+                CoastalErosionNode erosion = node as CoastalErosionNode;
+                if (erosion != null)
+                {
+                    if (write) { erosion.seaLevel = seaLevel; erosion.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                CoastalShelfShaperNode shelf = node as CoastalShelfShaperNode;
+                if (shelf != null)
+                {
+                    if (write) { shelf.seaLevel = seaLevel; shelf.MarkDirty(); }
+                    touched++;
                 }
             }
 
@@ -483,11 +557,11 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Locks the normalised sea level onto the ocean's real surface height.
         ///
-        /// The sea's level is not authored: it is derived from the median terrain height
-        /// around the world edge, in metres, and baked into the ocean body's transform.
-        /// The splat node paints its beach from a 0..1 fraction of the height range.
-        /// Those are one elevation in two units, and until they are locked together the
-        /// sand paints where the water is not - the untextured shoreline.
+        /// The sea's level is authored as a 0..1 fraction of the height range and baked
+        /// into the ocean body's transform in metres. Those are one elevation in two
+        /// units, and if the user drags the ocean body the metres move while the fraction
+        /// does not - so the sand paints where the water is not, the untextured shoreline.
+        /// This locks the fraction back onto wherever the body actually stands.
         ///
         /// Returns true when the value actually moved, which means the splatmaps already
         /// on the terrain were painted from a stale sea level and owe a repaint.
@@ -500,8 +574,8 @@ namespace UniverseCreator.TerrainSystem
             if (ocean == null) return false;
 
             // Read off the body with the same expression every other consumer of a
-            // surface uses, rather than recomputing the median here: a second copy of
-            // that calculation is a second answer waiting to disagree.
+            // surface uses: a second copy of that calculation is a second answer
+            // waiting to disagree.
             float surfaceY = ocean.transform.position.y + ocean.surfaceOffsetMetres;
 
             float normalised = Mathf.Clamp01(
@@ -526,33 +600,112 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Every Hydrology Spawner in a graph that actually reaches an Output, which is
-        /// the one honest answer to "does this world generate its own water".
+        /// Every Hydrology Spawner in a graph that is actually wired, which is the one
+        /// honest answer to "does this world generate its own water".
         ///
-        /// Presence is not enough. A spawner sitting in a graph with nothing plugged
-        /// into an Output produces nothing, so counting it would tell a body it is
-        /// graph-linked when the graph will never re-fit it - and it would break the
-        /// user's rule that water appears only where the graph asks for it. Walked
-        /// backwards from every Output node, which is the same reachability the
-        /// evaluator itself uses.
+        /// Presence is not enough. A spawner dropped in a graph with nothing connected to
+        /// it at all has not been asked for anything, so counting it would tell a body it
+        /// is graph-linked when nothing will ever re-fit it - and it would break the
+        /// user's rule that water appears only where the graph asks for it.
         ///
-        /// One walk with two callers: the world reads the first spawner to run it, and
+        /// Wired means either half: its mask outputs reach an Output (walked backwards,
+        /// the same reachability the evaluator uses), or it is connected at all - see
+        /// SpawnerIsWired for why the object half cannot be judged by mask reachability.
+        ///
+        /// One test with two callers: the world reads the first spawner to run it, and
         /// a body reads the count to know whether it is graph-linked. Two copies of "is
         /// it connected" would eventually give two answers.
         /// </summary>
         public static List<HydrologyNode> ConnectedHydrology(Graph graph)
         {
             List<HydrologyNode> found = new List<HydrologyNode>();
-            if (graph == null || graph.nodes == null || graph.connections == null) return found;
+            if (graph == null || graph.nodes == null) return found;
 
-            // Seed the walk with every Output node, then follow connections backwards.
-            HashSet<string> reached = new HashSet<string>();
-            Queue<string> pending = new Queue<string>();
+            HashSet<string> reached = ReachedNodeIds(graph);
 
             for (int i = 0; i < graph.nodes.Count; i++)
             {
+                HydrologyNode h = graph.nodes[i] as HydrologyNode;
+                if (h == null) continue;
+                if (reached.Contains(h.id) || SpawnerIsWired(graph, h)) found.Add(h);
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// True when a Hydrology Spawner is wired into the graph at all: its Height input
+        /// is fed, or one of its mask outputs is consumed.
+        /// </summary>
+        /// <remarks>
+        /// WHY THE SPAWNER IS NOT JUDGED BY OUTPUT-REACHABILITY ALONE
+        /// Output-reachability is the right question for a node whose product is a
+        /// matrix: a Lake Fill that reaches no Output has had its flood thrown away, so
+        /// it did nothing. The spawner's product is not a matrix. It places river, lake
+        /// and ocean OBJECTS in the scene, reading the finished ground straight off
+        /// Terrain.activeTerrains - the graph is not in that path at all. Its two mask
+        /// ports are a separate, optional service: they let the same drainage drive
+        /// carving and splatting.
+        ///
+        /// Judged only by whether those optional masks reach an Output, a spawner fed a
+        /// Height chain and asked for three rivers produced nothing, because the user had
+        /// not also wired the mask half - and there is no wiring that makes a river mask
+        /// terminate in a Height Output on its own merits. So the node that exists to
+        /// make water sat there with every field filled in, doing nothing, until an
+        /// unrelated second chain was built. That is the reported fault in one sentence.
+        ///
+        /// Being wired is still required. A spawner dropped in a graph and left
+        /// completely unconnected has not been asked for anything, and must not flood a
+        /// world by its mere presence - which is also the rule the user set: water
+        /// appears only where the graph asks for it.
+        /// </remarks>
+        private static bool SpawnerIsWired(Graph graph, HydrologyNode node)
+        {
+            if (graph == null || graph.connections == null || node == null) return false;
+
+            for (int i = 0; i < graph.connections.Count; i++)
+            {
+                Connection c = graph.connections[i];
+                if (c.targetNodeId == node.id || c.sourceNodeId == node.id) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Every node id that reaches an Output, walked backwards from every Output
+        /// node. This is the same reachability the evaluator itself uses.
+        /// </summary>
+        /// <remarks>
+        /// One walk, every caller. The spawner lookup and the water-node lookup below
+        /// ask the same question about the same graph; written twice they would
+        /// eventually give two answers about whether a world generates water.
+        ///
+        /// SEEDED ON IOutputNode, WHICH IS WHAT THE EVALUATOR SEEDS ON
+        /// This used to seed on the OutputNode base class, and that is a narrower set
+        /// than the evaluator's: Scatter nodes, Shader Output, and the Lighting, Weather
+        /// and Wind outputs implement IOutputNode directly without deriving from
+        /// OutputNode. GraphEvaluator collects "n is IOutputNode", so a graph terminating
+        /// in one of those was evaluated in full - the masks were built, the ground was
+        /// carved - while this walk could not see the terminal, found the Hydrology
+        /// Spawner unreached, and reported that the world asks for no procedural water.
+        /// ResolveHydrology then returned null and the caller SWEPT: every river, lake
+        /// and ocean object removed, on a graph that had just finished drawing them a
+        /// riverbed. A spawner with every field correctly filled in and wired to a live
+        /// Height chain produced nothing, which is exactly the "the ports do nothing when
+        /// I connect them" fault. The doc line above had claimed these two agreed for as
+        /// long as they did not.
+        /// </remarks>
+        private static HashSet<string> ReachedNodeIds(Graph graph)
+        {
+            HashSet<string> reached = new HashSet<string>();
+            if (graph == null || graph.nodes == null || graph.connections == null) return reached;
+
+            Queue<string> pending = new Queue<string>();
+
+            // Seed the walk with every Output node, then follow connections backwards.
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
                 Generator node = graph.nodes[i];
-                if (node == null || !(node is OutputNode)) continue;
+                if (node == null || !(node is IOutputNode)) continue;
                 if (reached.Add(node.id)) pending.Enqueue(node.id);
             }
 
@@ -568,12 +721,197 @@ namespace UniverseCreator.TerrainSystem
                 }
             }
 
+            return reached;
+        }
+
+        /// <summary>
+        /// The hydrology settings this world's graph asks for, or null when it asks for
+        /// no procedural water at all. What HydrologyGenerator is actually driven by.
+        /// </summary>
+        /// <remarks>
+        /// THREE ANSWERS, IN PRIORITY ORDER
+        ///
+        /// 1. A Hydrology Spawner reaching an Output. Its numbers win outright - every
+        ///    count comes off the node the user placed, and nothing here second-guesses
+        ///    it. This is the user's rule: "if connected the number of rivers comes from
+        ///    the hydrology node, same for the lake number".
+        ///
+        /// 2. No spawner, but a water node reaching an Output - a River Network Trace,
+        ///    a River Fill, a Lake Fill, an Ocean Level. The graph has plainly asked for
+        ///    water, so it gets water, with the counts derived from the world's own size
+        ///    by the drainage math below rather than from a node that is not there. This
+        ///    is the other half of the same rule: "if the hydrology spawner node is not
+        ///    connected then they will use native math".
+        ///
+        ///    It is per kind, not all-or-nothing. A graph with only river nodes gets
+        ///    rivers and stays land-locked; one with an Ocean Level gets the sea. A
+        ///    world does not sprout a coastline because it was asked for a stream.
+        ///
+        /// 3. Neither. No procedural water, and the caller sweeps anything a
+        ///    since-disconnected node left standing.
+        ///
+        /// The answer is a HydrologyNode either way - the real one, or one synthesized
+        /// from native math - because that is the whole of what GenerateFromNode reads.
+        /// A parallel settings struct would be the same eight fields written twice.
+        /// </remarks>
+        public static HydrologyNode ResolveHydrology(Graph graph, UniverseCreatorObject world)
+        {
+            if (graph == null || graph.nodes == null) return null;
+
+            HashSet<string> reached = ReachedNodeIds(graph);
+
+            // 1. The spawner wins whenever one is connected. Same test ConnectedHydrology
+            //    applies, so the count in the inspector and the node that actually runs
+            //    can never disagree about which spawners are live.
             for (int i = 0; i < graph.nodes.Count; i++)
             {
                 HydrologyNode h = graph.nodes[i] as HydrologyNode;
-                if (h != null && reached.Contains(h.id)) found.Add(h);
+                if (h == null) continue;
+                if (reached.Contains(h.id) || SpawnerIsWired(graph, h)) return h;
             }
-            return found;
+
+            // 2. Otherwise, what kinds of water did the graph ask for?
+            bool wantRivers = false;
+            bool wantLakes = false;
+            bool wantOcean = false;
+
+            // THE CONNECTED NODES' OWN SETTINGS, NOT A SECOND SET OF DEFAULTS
+            // Only the COUNTS are native math. Everything that decides where the water
+            // goes has already been authored - on the very nodes that asked for it - so
+            // a spawner synthesized on class defaults would solve a different world from
+            // the one the graph carved. The case that made it plain: a River Network
+            // Trace with its channel-head area lowered to suit a small world stamps a
+            // network and River Carve digs it, while a spawner left on the real-world
+            // quarter of a square kilometre finds no qualifying mouth, plans no course,
+            // and puts no river object in the trench. Trenches with no water in them,
+            // from the procedural nodes alone and with no spawner in sight.
+            //
+            // First of each kind wins. Two Lake Fills disagreeing about sea level is a
+            // graph that already contradicts itself, and picking the later one would
+            // only make which contradiction wins depend on node creation order.
+            RiverNetworkTraceNode trace = null;
+            LakeFillNode lakeFill = null;
+            OceanLevelNode oceanLevel = null;
+
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                Generator node = graph.nodes[i];
+                if (node == null || !reached.Contains(node.id)) continue;
+
+                // River Carve and Water Bank Seat are deliberately NOT here. They shape
+                // ground for water decided elsewhere; on their own they say nothing
+                // about whether any river exists, and a carve fed by a hand-drawn mask
+                // must not conjure river objects the user never asked for.
+                if (node is RiverNetworkTraceNode || node is RiverFillNode)
+                {
+                    wantRivers = true;
+                    if (trace == null) trace = node as RiverNetworkTraceNode;
+                }
+                else if (node is LakeFillNode)
+                {
+                    wantLakes = true;
+                    if (lakeFill == null) lakeFill = (LakeFillNode)node;
+                }
+                else if (node is OceanLevelNode)
+                {
+                    wantOcean = true;
+                    if (oceanLevel == null) oceanLevel = (OceanLevelNode)node;
+                }
+            }
+
+            if (!wantRivers && !wantLakes && !wantOcean) return null;   // 3.
+
+            HydrologyNode native = new HydrologyNode();
+
+            // Lakes and outlets keep the node's own defaults, which are already a
+            // fraction of the world's chunk count - the density IS the native math.
+            // Zeroed when no lake node is connected, so the graph gets what it asked
+            // for and not a lake district beside it.
+            if (!wantLakes)
+            {
+                native.targetLakeCount = 0;
+                native.lakeChunkPercentage = 0f;
+                native.lakeOutletChunkPercentage = 0f;
+            }
+
+            // Adopted BEFORE the river count is derived, because the trunk spacing that
+            // count comes from is itself measured in channel-head areas.
+            if (trace != null)
+            {
+                native.drainageResolution = trace.drainageResolution;
+                native.channelHeadArea = trace.channelHeadArea;
+                native.maxChannels = trace.maxChannels;
+            }
+            else if (lakeFill != null)
+            {
+                native.drainageResolution = lakeFill.drainageResolution;
+            }
+
+            if (lakeFill != null)
+            {
+                native.minLakeDepth = lakeFill.minDepth;
+                native.depthNormalise = lakeFill.depthNormalise;
+                native.shoreSoftness = lakeFill.shoreSoftness;
+            }
+
+            // Sea level has several possible authors and they are all one elevation, so
+            // the most specific wins: the Ocean Level node that asked for the sea, then
+            // whichever water node states one. Whatever is picked here only stands until
+            // the ocean is actually placed - ApplyToGraph then pushes its settled surface
+            // back over every one of them, this node included.
+            if (oceanLevel != null) native.seaLevel = oceanLevel.seaLevel;
+            else if (trace != null) native.seaLevel = trace.seaLevel;
+            else if (lakeFill != null) native.seaLevel = lakeFill.seaLevel;
+
+            native.targetRiverCount = wantRivers ? NativeRiverCount(world, native.channelHeadArea) : 0;
+            native.generateOcean = wantOcean;
+
+            return native;
+        }
+
+        /// <summary>
+        /// How many trunk rivers a world of this size supports, by drainage math.
+        /// </summary>
+        /// <remarks>
+        /// Major valleys are spaced by the catchment each one drains: a trunk river
+        /// needs TrunkCatchmentMultiple channel-heads' worth of land above it
+        /// (1 km^2 with the planner's own figures), and a catchment of that area is
+        /// about its square root across - a kilometre. So trunk rivers land about a
+        /// kilometre apart across the world, and the count is the world's width
+        /// divided by that spacing. Both numbers are the planner's own, so the rivers
+        /// this asks for are rivers it can actually find catchments for.
+        ///
+        /// The channel-head area is passed in rather than read from the constant,
+        /// because the graph's own River Network Trace may state a smaller one for a
+        /// small world. Spacing follows it: halve the catchment a channel needs and its
+        /// valleys sit about seven tenths as far apart, so the same world carries more
+        /// of them. Asking for the constant's count while the planner traced at the
+        /// node's figure would leave a world full of qualifying valleys with one river
+        /// in it.
+        ///
+        /// Spacing is linear, not areal, which is why this is not a percentage of the
+        /// chunk count the way the lakes are: a lake occupies a basin - an area - while
+        /// a river crosses the world. Doubling the world's side gives four times the
+        /// lakes and twice the rivers, which is what a map shows.
+        ///
+        /// Clamped to 1..12. A world too small to hold a full catchment still gets the
+        /// one river its valley can carry, and no world is handed more trunk rivers
+        /// than the 40-80 m band can fit across it without merging into a floodplain.
+        /// </remarks>
+        private static int NativeRiverCount(UniverseCreatorObject world,
+                                            float channelHeadAreaSquareMetres)
+        {
+            if (world == null) return 1;
+
+            float headArea = channelHeadAreaSquareMetres > 0f
+                ? channelHeadAreaSquareMetres
+                : RiverNetworkPlanner.ChannelHeadAreaSquareMetres;
+
+            float worldSide = world.GetChunkSize() * Mathf.Max(1, world.chunkCountPerSide);
+            float trunkCatchment = headArea * RiverNetworkPlanner.TrunkCatchmentMultiple;
+            float spacing = Mathf.Sqrt(Mathf.Max(1f, trunkCatchment));
+
+            return Mathf.Clamp(Mathf.RoundToInt(worldSide / spacing), 1, 12);
         }
 
         /// <summary>How many Hydrology Spawners reach an Output. Drives the readout.</summary>

@@ -332,8 +332,10 @@ namespace UniverseCreator.Nodes.Modifiers
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
         public override string Tooltip { get { return "Flattens the near-shore sea bed into a shelf, then breaks to deep water."; } }
 
-        /// <summary>Sea level, 0..1 of world height.</summary>
-        public float seaLevel = 0.4f;
+        /// <summary>Sea level, 0..1 of world height. The world's one waterline - see
+        /// Coastal Erosion; a shelf cut at a different height than the sea stands at is
+        /// a shelf in mid-air or a shelf drowned too deep to read.</summary>
+        public float seaLevel = 0.35f;
 
         /// <summary>Depth at the shelf break, as a fraction below sea level.</summary>
         public float shelfDepth = 0.06f;

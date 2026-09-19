@@ -364,6 +364,80 @@ namespace UniverseCreator.TerrainSystem
                  "stops against a wall. Real rivers do this in karst and in desert.")]
         public float sinkRunMetres = 30f;
 
+        // ---- Meander -------------------------------------------------------
+        //
+        //  A river on a plain does not run in a straight line - it wanders in
+        //  regular loops (meanders), because the fastest water on the outside of
+        //  any small bend erodes that bank (the cut-bank) while the slack water on
+        //  the inside drops its load (the point-bar), and the bend grows. The loop
+        //  wavelength is not arbitrary: field measurement across rivers of every
+        //  size gives a meander wavelength of roughly 10-14 channel widths, which
+        //  is the one number this pass is built on. Steep ground is left straight,
+        //  because a river in a gorge has no floodplain to wander across - it is
+        //  pinned to the valley floor, which is exactly what the reported "sine
+        //  wiggle everywhere" got wrong.
+
+        [Tooltip("Let the river wander in natural meander loops on flat ground. " +
+                 "Off keeps the course exactly as fitted (straight down the valley). " +
+                 "The loops only form where the ground is flat enough to have a " +
+                 "floodplain - a river in a gorge stays pinned to the valley floor - " +
+                 "so this does not put a wiggle through a canyon.")]
+        public bool meander = true;
+
+        [Tooltip("How pronounced the meander loops are, 0..1. This scales the loop " +
+                 "amplitude, which is set from the channel width the way real rivers " +
+                 "are (wavelength about 11 widths, amplitude about 3 widths). At 0 " +
+                 "the river is straight; around 0.6 is an ordinary lowland river; 1 " +
+                 "is a strongly looping one near its floodplain base level.")]
+        [Range(0f, 1f)] public float meanderStrength = 0.6f;
+
+        [Tooltip("The downstream slope, as metres-fall per metre-run, at which " +
+                 "meandering is fully suppressed. Above this grade the reach is steep " +
+                 "enough that the river is confined and runs straight; below it the " +
+                 "loops fade in. 0.02 (a 2 percent grade) is the usual boundary " +
+                 "between a wandering lowland river and a confined upland one.")]
+        [Range(0.002f, 0.2f)] public float meanderMaxGrade = 0.02f;
+
+        // ---- Downstream hydraulic geometry (J.4) ----------------------------
+        //
+        //  A real river is not one width. It leaves its source as a narrow scrape,
+        //  and every tributary and hillside that drains into it adds discharge, so
+        //  it grows wider and deeper all the way to its mouth (Leopold & Maddock's
+        //  downstream hydraulic geometry: width goes as about the square root of
+        //  discharge, depth as about its 0.4 power). That growth is a property of
+        //  the LAND, not of numbers a designer types - so this makes it automatic.
+        //
+        //  It also does the cross-section trade the eye reads as "a real river":
+        //  the discharge at a reach fixes the flow AREA (width x depth), but how
+        //  that area is split between width and depth is set by how much the valley
+        //  confines the channel. In a tight gorge the river is forced narrow, so it
+        //  runs deep; where the valley opens onto a plain it spreads wide and shallow.
+        //  Width and depth therefore move OPPOSITE ways across a constriction while
+        //  their product - the discharge - is preserved. That is why a river can get
+        //  narrower yet deeper, exactly as asked.
+
+        [Tooltip("Grow the river's width and depth downstream automatically, from the " +
+                 "land it drains, instead of only where you type per-node numbers. A " +
+                 "river starts narrow at its source and widens to its mouth the way a " +
+                 "real one does (Leopold & Maddock). Leave on for procedural, natural " +
+                 "rivers; turn off if you want the width to be exactly the numbers you " +
+                 "set at each node and nothing else.")]
+        public bool autoHydraulicGeometry = true;
+
+        [Tooltip("How much of the source-to-mouth width is present already at the " +
+                 "source, 0..1. 0.15 means the headwater is about 15 percent of the " +
+                 "mouth width - a narrow brook growing to a wide river. Higher makes " +
+                 "the whole river more uniform; lower makes the source a thin trickle.")]
+        [Range(0.02f, 1f)] public float sourceWidthFraction = 0.15f;
+
+        [Tooltip("How strongly the valley walls trade width for depth, 0..1. 0 keeps " +
+                 "a constant width-to-depth ratio down the whole river (no gorge/plain " +
+                 "difference). 1 lets a tight gorge pull the channel to roughly half " +
+                 "its open-plain width and correspondingly deeper, at the same flow. " +
+                 "The flow area (width x depth) is preserved either way, so this only " +
+                 "redistributes the channel, it does not add or remove water.")]
+        [Range(0f, 1f)] public float valleyConfinementStrength = 0.6f;
+
         [Tooltip("On Build, if the mouth of the river comes within this many metres of " +
                  "an ocean or a lake, it joins that body automatically - no need to " +
                  "set the junction by hand. Pools are ignored. 0 switches it off.")]
@@ -773,6 +847,131 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Triangles in the built mesh, for the inspector's readout.</summary>
         public int BuiltTriangleCount { get { return lastBuild != null ? lastBuild.TriangleCount : 0; } }
 
+        // =====================================================================
+        //  DAM RESERVOIR GOVERNANCE  (Module 6 seam - RaiseWaterBody)
+        // =====================================================================
+        //
+        // Transient, never serialised. A dam request does not edit this body's own
+        // level or outline; it governs them for as long as the request stands, and
+        // DamReservoirReconciler re-derives that governance from the request set on
+        // every settle. Withdraw the dam and rebuild and the body is its authored
+        // self again - the reversibility the whole seam depends on. Only a level body
+        // is ever governed; the river path never reads these.
+
+        [System.NonSerialized] private bool damGoverned;
+        [System.NonSerialized] private float damSurfaceLevelMetres;
+        [System.NonSerialized] private float damTailwaterLevelMetres;
+        [System.NonSerialized] private Vector2 damBarrierCentre;   // world XZ
+        [System.NonSerialized] private Vector2 damUpstreamNormal;  // unit, world XZ
+        [System.NonSerialized] private float damCrestLengthMetres; // span of the dam line, metres
+        [System.NonSerialized] private string damSourceId = string.Empty;
+
+        /// <summary> True while a dam request is holding this body as its reservoir. The spillway illusion (U-2) and the
+        /// inspector read it to show the body is level-governed rather than sitting at its authored surface. </summary>
+        public bool IsDamGoverned { get { return damGoverned; } }
+
+        /// <summary> The tailwater level the governing dam holds below the line, in metres. Meaningful only while
+        /// <see cref="IsDamGoverned"/>; the reservoir-minus-tailwater drop is what the spillway flow (U-2) reads.
+        /// </summary>
+        public float GovernedTailwaterLevelMetres { get { return damTailwaterLevelMetres; } }
+
+        /// <summary> The world XZ midpoint of the dam line governing this reservoir. Meaningful only while
+        /// <see cref="IsDamGoverned"/>. The spillway illusion (U-2) plunges its foam and spray on the downstream side of
+        /// this point; the value is the request's outlet position, carried here by <see cref="GovernAsReservoir"/> so
+        /// U-2 reads U-1's governance and never the inbox a second time. </summary>
+        public Vector2 DamBarrierCentre { get { return damBarrierCentre; } }
+
+        /// <summary> The unit world-XZ normal pointing upstream (into the reservoir) from the dam line. Meaningful only
+        /// while <see cref="IsDamGoverned"/>. Downstream - where the spillway jet lands - is its negation, so U-2 offsets
+        /// the plunge point along <c>-DamUpstreamNormal</c> from <see cref="DamBarrierCentre"/>. </summary>
+        public Vector2 DamUpstreamNormal { get { return damUpstreamNormal; } }
+
+        /// <summary> The span of the governing dam line in metres - the request's crest length. Meaningful only while
+        /// <see cref="IsDamGoverned"/>. U-2 spreads the plunge foam and spray across this width along the barrier axis, so
+        /// a wide dam aerates a wide tailwater and a narrow one a narrow plume, rather than a guessed footprint. </summary>
+        public float GovernedCrestLengthMetres { get { return damCrestLengthMetres; } }
+
+        /// <summary> True for a lake, pool or ocean - a closed ring at one level - and false for a river. A reservoir is
+        /// a level body, so the reconciler governs only these. </summary>
+        public bool IsLevelBody { get { return shape != ShapeMode.RiverSpline; } }
+
+        /// <summary> The world Y of this body's surface: the level a governing dam holds it to, or its own authored
+        /// transform.position.y + surfaceOffsetMetres when no dam governs it. Every level-build site reads the surface
+        /// through here, so the raise is applied in exactly one place and cannot be half-applied. </summary>
+        public float SurfaceWorldY()
+        {
+            return damGoverned ? damSurfaceLevelMetres : transform.position.y + surfaceOffsetMetres;
+        }
+
+        /// <summary> Hold this body as the reservoir of a dam: raise it to <paramref name="surfaceLevelMetres"/> and
+        /// clip it at the dam line through (<paramref name="barrierCentreX"/>, <paramref name="barrierCentreZ"/>) with
+        /// <paramref name="upstreamNormal"/> impounding, spanning <paramref name="crestLengthMetres"/> along the line.
+        /// Returns true if any of the governance actually changed, so the reconciler rebuilds only a body whose reservoir
+        /// moved. Transient: never written to the serialised fields. </summary>
+        public bool GovernAsReservoir(float surfaceLevelMetres, float tailwaterLevelMetres,
+            float barrierCentreX, float barrierCentreZ, Vector2 upstreamNormal, float crestLengthMetres, string sourceId)
+        {
+            Vector2 centre = new Vector2(barrierCentreX, barrierCentreZ);
+            string id = sourceId ?? string.Empty;
+
+            bool changed = !damGoverned
+                || !Mathf.Approximately(damSurfaceLevelMetres, surfaceLevelMetres)
+                || !Mathf.Approximately(damTailwaterLevelMetres, tailwaterLevelMetres)
+                || (damBarrierCentre - centre).sqrMagnitude > 1e-6f
+                || (damUpstreamNormal - upstreamNormal).sqrMagnitude > 1e-6f
+                || !Mathf.Approximately(damCrestLengthMetres, crestLengthMetres)
+                || damSourceId != id;
+
+            damGoverned = true;
+            damSurfaceLevelMetres = surfaceLevelMetres;
+            damTailwaterLevelMetres = tailwaterLevelMetres;
+            damBarrierCentre = centre;
+            damUpstreamNormal = upstreamNormal;
+            damCrestLengthMetres = crestLengthMetres;
+            damSourceId = id;
+            return changed;
+        }
+
+        /// <summary> Release any dam governance so the body returns to its authored level and outline on the next build.
+        /// Returns true if it was governed, so the reconciler rebuilds a body a withdrawn dam just let go. </summary>
+        public bool ClearReservoirGovernance()
+        {
+            if (!damGoverned) { return false; }
+            damGoverned = false;
+            damSurfaceLevelMetres = 0f;
+            damTailwaterLevelMetres = 0f;
+            damBarrierCentre = Vector2.zero;
+            damUpstreamNormal = Vector2.zero;
+            damCrestLengthMetres = 0f;
+            damSourceId = string.Empty;
+            return true;
+        }
+
+        /// <summary> This body's footprint as a plan-view Bounds in world space (the shore ring's XZ extent, the height
+        /// axis flattened). The reconciler uses it to decide which dam impounds this body. False when the body has no
+        /// usable footprint yet. </summary>
+        public bool TryGetPlanBounds(out Bounds bounds)
+        {
+            bounds = new Bounds();
+            List<Vector3> ring = WorldShoreRing();
+            if (ring == null || ring.Count < 3) { return false; }
+
+            float minX = float.MaxValue, maxX = float.MinValue;
+            float minZ = float.MaxValue, maxZ = float.MinValue;
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector3 p = ring[i];
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+
+            bounds = new Bounds(new Vector3((minX + maxX) * 0.5f, 0f, (minZ + maxZ) * 0.5f),
+                                new Vector3(maxX - minX, 0f, maxZ - minZ));
+            return true;
+        }
+
         private const float Gravity = 9.81f;
 
         // =====================================================================
@@ -1144,6 +1343,36 @@ namespace UniverseCreator.TerrainSystem
         [System.NonSerialized] private List<float> solvedDepths;
         [System.NonSerialized] private float[] solvedSurfaceY;
 
+        /// <summary>
+        /// One steep reach of a river where the solved surface plunges fast enough to
+        /// read as a waterfall or cascade. Found at solve time from the surface profile,
+        /// consumed by <see cref="UCWaterfallEffect"/> which lays foam and spray over it.
+        /// No mesh is cut for these: the ribbon still follows the surface, the effect is
+        /// purely additive, exactly as the dam spillway seam is.
+        /// </summary>
+        public struct WaterfallReach
+        {
+            /// <summary>World point at the crest, where the plunge begins.</summary>
+            public Vector3 crest;
+            /// <summary>World point at the foot, where the plunge lands.</summary>
+            public Vector3 foot;
+            /// <summary>Vertical fall from crest to foot, metres. Always positive.</summary>
+            public float dropMetres;
+            /// <summary>Horizontal run the fall is spread over, metres.</summary>
+            public float runMetres;
+            /// <summary>Channel width at the crest, metres. Sets how wide the foam is.</summary>
+            public float widthMetres;
+        }
+
+        [System.NonSerialized] private List<WaterfallReach> solvedCascades;
+
+        /// <summary>
+        /// The steep reaches the last solve found on this course, or an empty list.
+        /// Read by <see cref="UCWaterfallEffect"/>. Never null after a solve; callers
+        /// still guard for null in case they run before the first solve.
+        /// </summary>
+        public IReadOnlyList<WaterfallReach> Cascades => solvedCascades;
+
         /// <summary>Throws away the last solve, so the next thing that needs the course
         /// re-fits it against the ground as it is now.</summary>
         private void InvalidateSolvedCourse()
@@ -1152,6 +1381,7 @@ namespace UniverseCreator.TerrainSystem
             solvedWidths = null;
             solvedDepths = null;
             solvedSurfaceY = null;
+            solvedCascades = null;
         }
 
         /// <summary>Solves the course if it has not been solved since the last change.</summary>
@@ -1159,6 +1389,47 @@ namespace UniverseCreator.TerrainSystem
         {
             if (solvedPoints != null && solvedPoints.Count >= 2) return true;
             return SolveRiverCourse();
+        }
+
+        /// <summary>
+        /// Builds this body's published river profile from its solved course -- the per-station width, water-surface
+        /// level and bed level, in world space -- for the settle pass to deposit into the world's RiverProfilePublication
+        /// so a city or road tool can bank the river UC actually cut. Rivers only: a level body (lake, ocean, reservoir)
+        /// is not a reach and returns false, as does a river whose course will not solve against the current ground. The
+        /// bed is the surface less the dug depth, floored so a dried reach never reports water below its own bed. The
+        /// publisher stamps the reach's stable id; this fills the geometry and a human label only.
+        /// </summary>
+        public bool TryBuildRiverProfile(out UniverseCreator.Integration.RiverReachProfile profile)
+        {
+            profile = null;
+            if (shape != ShapeMode.RiverSpline) return false;
+            if (!EnsureSolvedCourse()) return false;
+            if (solvedPoints == null || solvedPoints.Count < 2) return false;
+
+            int n = solvedPoints.Count;
+            var stations = new UniverseCreator.Integration.RiverProfileStation[n];
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 p = solvedPoints[i];
+                float surfaceY = solvedSurfaceY[i];
+                float depth = Mathf.Max(0f, solvedDepths[i]);
+
+                stations[i] = new UniverseCreator.Integration.RiverProfileStation
+                {
+                    worldX = p.x,
+                    worldZ = p.z,
+                    widthMetres = Mathf.Max(0f, solvedWidths[i]),
+                    surfaceLevelMetres = surfaceY,
+                    bedLevelMetres = surfaceY - depth,
+                };
+            }
+
+            profile = new UniverseCreator.Integration.RiverReachProfile
+            {
+                sourceLabel = name,
+                stations = stations,
+            };
+            return true;
         }
 
         // =====================================================================
@@ -1327,8 +1598,83 @@ namespace UniverseCreator.TerrainSystem
             solvedWidths = widths;
             solvedDepths = depths;
             solvedSurfaceY = surf;
+            solvedCascades = DetectCascades(world, surf, widths);
 
             return true;
+        }
+
+        // A reach is a waterfall when the water surface itself drops faster than this
+        // gradient. It is the SOLVED surface, not the raw ground, so the many small
+        // steps the smoothing and downhill passes already flattened do not count - only
+        // a sustained plunge that survived those passes reads as a fall. Below this the
+        // reach is just fast water and gets no foam column of its own.
+        private const float WaterfallGrade = 0.28f;       // ~15.6 deg; steeper than any bank
+        private const float WaterfallMinDropMetres = 1.5f; // shorter than this is a riffle, not a fall
+
+        /// <summary>
+        /// Walks the solved surface and gathers the reaches steep enough to read as a
+        /// waterfall or cascade. Elevation-driven exactly as the requirement asks: a
+        /// river that happens to cross a steep hillside grows a fall there, and one that
+        /// stays on gentle ground grows none, with no authoring and no marker node.
+        /// </summary>
+        private List<WaterfallReach> DetectCascades(List<Vector3> pts, float[] surf, List<float> w)
+        {
+            var found = new List<WaterfallReach>();
+            if (pts == null || surf == null || pts.Count < 2) return found;
+
+            int n = Mathf.Min(pts.Count, surf.Length);
+            int i = 0;
+            while (i < n - 1)
+            {
+                // Grade of this single segment, drop over horizontal run.
+                float run = Horizontal(pts[i], pts[i + 1]);
+                float drop = surf[i] - surf[i + 1];
+                if (run <= 0.001f || drop <= 0f || (drop / run) < WaterfallGrade)
+                {
+                    i++;
+                    continue;
+                }
+
+                // A fall can span several segments. Grow the reach downstream while the
+                // surface keeps plunging, so one tall cascade is one effect and not a
+                // stack of short ones fighting for the same water.
+                int start = i;
+                float totalDrop = drop;
+                float totalRun = run;
+                int j = i + 1;
+                while (j < n - 1)
+                {
+                    float r2 = Horizontal(pts[j], pts[j + 1]);
+                    float d2 = surf[j] - surf[j + 1];
+                    if (r2 <= 0.001f || d2 <= 0f || (d2 / r2) < WaterfallGrade) break;
+                    totalDrop += d2;
+                    totalRun += r2;
+                    j++;
+                }
+
+                if (totalDrop >= WaterfallMinDropMetres)
+                {
+                    found.Add(new WaterfallReach
+                    {
+                        crest = new Vector3(pts[start].x, surf[start], pts[start].z),
+                        foot = new Vector3(pts[j].x, surf[j], pts[j].z),
+                        dropMetres = totalDrop,
+                        runMetres = totalRun,
+                        widthMetres = (start < w.Count) ? Mathf.Max(0.5f, w[start]) : 1f,
+                    });
+                }
+
+                i = j; // resume past the reach just consumed
+            }
+
+            return found;
+        }
+
+        private static float Horizontal(Vector3 a, Vector3 b)
+        {
+            float dx = a.x - b.x;
+            float dz = a.z - b.z;
+            return Mathf.Sqrt(dx * dx + dz * dz);
         }
 
         /// <summary>
@@ -1588,7 +1934,7 @@ namespace UniverseCreator.TerrainSystem
                                      out Vector3 point, out float surfaceY, out float depthAtJoin)
         {
             point = fromWorld;
-            surfaceY = transform.position.y + surfaceOffsetMetres;
+            surfaceY = SurfaceWorldY();
             depthAtJoin = 0f;
 
             if (shape == ShapeMode.RiverSpline)
@@ -1668,7 +2014,7 @@ namespace UniverseCreator.TerrainSystem
             carve.shelfFraction = shelfFraction;
             carve.maxDepthMetres = digDepthMetres;
             carve.shoreRunMetres = shoreRunMetres;
-            carve.surfaceY = transform.position.y + surfaceOffsetMetres;
+            carve.surfaceY = SurfaceWorldY();
 
             // What stops the basin being a funnel with a point at the bottom. The
             // depth still increases inward from every part of the shore, but it does
@@ -1686,6 +2032,17 @@ namespace UniverseCreator.TerrainSystem
 
             List<Vector3> ring = WorldShoreRing();
             if (ring == null || ring.Count < 3) return;
+
+            // A governing dam impounds only the upstream side of its line, so the basin is
+            // cut there and not through the wall. Clipping the ring here - the one place the
+            // dig's bound is built - keeps the excavation, the island mask and the mesh cull
+            // all reading the same clipped footprint. Fewer than three points left means the
+            // dam holds back nothing placed here, and the dig honestly cuts nothing.
+            if (damGoverned)
+            {
+                ClipRingUpstream(ring);
+                if (ring.Count < 3) return;
+            }
 
             for (int i = 0; i < ring.Count; i++) carve.ringPoints.Add(ring[i]);
 
@@ -1721,6 +2078,52 @@ namespace UniverseCreator.TerrainSystem
             rect.Add(transform.TransformPoint(new Vector3(-hx, 0f,  hz)));
 
             return rect;
+        }
+
+        /// <summary>
+        /// Clips a shore ring to the upstream side of a governing dam's line, in place.
+        ///
+        /// Sutherland-Hodgman against the single half-plane (p - barrierCentre) . upstreamNormal
+        /// >= 0: vertices on the impounded side are kept, and each edge that crosses the line
+        /// contributes its intersection point, so the ring closes cleanly along the wall. The
+        /// same predicate the mesh cull and the tool's own flood fill use, so all three agree on
+        /// which side the water is. Fewer than three points left means the body lies wholly
+        /// downstream and impounds nothing - the honest zero of a dam holding back no placed lake.
+        /// Only called while <see cref="damGoverned"/>.
+        /// </summary>
+        private void ClipRingUpstream(List<Vector3> ring)
+        {
+            if (ring == null || ring.Count < 3) return;
+
+            List<Vector3> kept = new List<Vector3>(ring.Count + 2);
+            float cx = damBarrierCentre.x, cz = damBarrierCentre.y;
+            float nx = damUpstreamNormal.x, nz = damUpstreamNormal.y;
+
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector3 cur = ring[i];
+                Vector3 prev = ring[(i - 1 + ring.Count) % ring.Count];
+
+                float dCur = (cur.x - cx) * nx + (cur.z - cz) * nz;
+                float dPrev = (prev.x - cx) * nx + (prev.z - cz) * nz;
+                bool curIn = dCur >= 0f;
+                bool prevIn = dPrev >= 0f;
+
+                // Signs differ => the edge crosses the line and dPrev - dCur is non-zero, so the
+                // parameter is safe from a divide by zero; equal signs never take that branch.
+                if (curIn)
+                {
+                    if (!prevIn) kept.Add(Vector3.LerpUnclamped(prev, cur, dPrev / (dPrev - dCur)));
+                    kept.Add(cur);
+                }
+                else if (prevIn)
+                {
+                    kept.Add(Vector3.LerpUnclamped(prev, cur, dPrev / (dPrev - dCur)));
+                }
+            }
+
+            ring.Clear();
+            ring.AddRange(kept);
         }
 
         private List<Vector3> ToWorld(Polyline line)
@@ -1882,13 +2285,27 @@ namespace UniverseCreator.TerrainSystem
         public void ApplyValleyReroute()
         {
             if (course == null || course.Count < 2) return;
-            
+
             List<Vector3> worldPoints = ToWorld(course);
             RiverCourseSolver.GroundSampler ground = SampleGround;
-            
+
             RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12);
             RiverCourseSolver.Relax(worldPoints, 2);
-            
+
+            // Both passes move points in XZ only, so each one's stored elevation now
+            // belongs to ground it no longer stands on. Re-read it, and clamp to a
+            // running minimum from the head down: a water surface never climbs, and
+            // without this the reroute button could itself make a river run uphill.
+            float ceiling = ground(worldPoints[0].x, worldPoints[0].z);
+            worldPoints[0] = new Vector3(worldPoints[0].x, ceiling, worldPoints[0].z);
+
+            for (int i = 1; i < worldPoints.Count; i++)
+            {
+                Vector3 p = worldPoints[i];
+                ceiling = Mathf.Min(ceiling, ground(p.x, p.z));
+                worldPoints[i] = new Vector3(p.x, ceiling, p.z);
+            }
+
             for (int i = 0; i < worldPoints.Count; i++)
             {
                 course.points[i] = transform.InverseTransformPoint(worldPoints[i]);
@@ -2001,8 +2418,191 @@ namespace UniverseCreator.TerrainSystem
             if (lastDescentEnding == RiverCourseSolver.DescentEnding.NoWayDown)
                 RiverCourseSolver.TaperSink(result, widths, depths, sinkRunMetres);
 
+            // Let the fitted line wander into natural meander loops where the ground is
+            // flat enough to have a floodplain. Last, so it works on the planform the
+            // valley seek and descent walk already put in the right valley - it moves a
+            // point across its own flow, not down the course, so it cannot undo the fit
+            // or send the river uphill (steep reaches are gated out and every offset is
+            // refused if it would climb the bank). The surface solve that follows
+            // re-reads the ground under this wandered line, so the water still sits on
+            // the terrain the loops now cross.
+            if (meander)
+                RiverCourseSolver.Meander(result, SampleGround, widths, meanderStrength,
+                                          meanderMaxGrade, Mathf.Max(0.5f, widthMetres));
+
+            // Downstream hydraulic geometry (J.4). Last, on the fitted planform, so it
+            // reads the valley the course now sits in. Grows width/depth source->mouth
+            // from the land drained, then trades width for depth through gorges and back
+            // on plains at constant flow area. Operates on the resolved series in place;
+            // the surface solve that follows re-reads depth from these.
+            if (autoHydraulicGeometry)
+                ApplyHydraulicGeometry(result, widths, depths);
+
             return result;
         }
+
+        /// <summary>
+        /// Grows the channel downstream and trades width for depth by valley confinement,
+        /// so a procedural (or plainly-drawn) river sizes itself the way the land makes a
+        /// real one - without a designer typing per-node numbers. See the field block on
+        /// <see cref="autoHydraulicGeometry"/> for the physics.
+        /// </summary>
+        /// <remarks>
+        /// Two independent effects, applied in order:
+        ///
+        ///  1. DOWNSTREAM GROWTH. If the width series is essentially flat - which is the
+        ///     hand-drawn case, one inherited width all the way down, and also the case a
+        ///     designer wants "just make it look real" - the width is regraded from the
+        ///     source fraction up to the mouth width along arc length under the area^0.4
+        ///     law. A river whose widths were authored to vary (the procedural generator
+        ///     fills a real per-node profile from catchment) is left as graded: its
+        ///     growth is already the honest one and must not be flattened to a curve.
+        ///
+        ///  2. CONFINEMENT TRADE. At every point the cross-valley ground slope says how
+        ///     hard the walls squeeze the channel. Tight walls pull width down and depth
+        ///     up; open ground lets width up and depth down. Width*depth (the flow area
+        ///     the discharge sets) is held, so no water is invented or lost - the channel
+        ///     is only reshaped. This is what makes a reach get narrower AND deeper.
+        /// </remarks>
+        private void ApplyHydraulicGeometry(List<Vector3> pts, List<float> widths, List<float> depths)
+        {
+            if (pts == null || widths == null || depths == null) return;
+            int n = Mathf.Min(pts.Count, Mathf.Min(widths.Count, depths.Count));
+            if (n < 2) return;
+
+            // --- 1. Downstream growth, only when the width is otherwise flat ----
+            float wMin = float.MaxValue, wMax = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                float w = widths[i];
+                if (w < wMin) wMin = w;
+                if (w > wMax) wMax = w;
+            }
+            bool flat = wMax <= wMin * 1.05f + 1e-3f;   // no real downstream variation authored
+
+            if (flat)
+            {
+                // Arc length as the proxy for accumulated drainage: a longer course has
+                // gathered more land by the time it reaches a point. Not the true
+                // catchment (a hand-drawn river has no drainage grid), but monotone and
+                // source->mouth, which is the property that matters.
+                float[] s = new float[n];
+                for (int i = 1; i < n; i++) s[i] = s[i - 1] + Horizontal(pts[i - 1], pts[i]);
+                float total = Mathf.Max(1e-3f, s[n - 1]);
+
+                float mouthWidth = wMax;                 // the flat value is the target mouth width
+                float src = Mathf.Clamp01(sourceWidthFraction);
+
+                for (int i = 0; i < n; i++)
+                {
+                    float f = s[i] / total;              // 0 at source, 1 at mouth
+                    // width fraction eases from src to 1 as area^0.4; area rises ~linearly
+                    // with arc-proxy, so width rises as f^0.4 blended off the source floor.
+                    float grow = src + (1f - src) * Mathf.Pow(f, WidthAreaExponent);
+                    widths[i] = Mathf.Max(0.2f, mouthWidth * grow);
+                    // Depth tracks width at the base ratio here; the trade below reshapes it.
+                    depths[i] = Mathf.Max(0.1f, widths[i] / BaseWidthDepthRatio);
+                }
+            }
+
+            // --- 2. Confinement trade: reshape width vs depth at constant area --
+            float strength = Mathf.Clamp01(valleyConfinementStrength);
+            if (strength <= 1e-3f) return;
+
+            for (int i = 0; i < n; i++)
+            {
+                float w = widths[i];
+                float d = depths[i];
+                if (w <= 0.05f || d <= 0.02f) continue;
+
+                float area = w * d;                      // the flow the discharge fixed - held
+                float conf = ValleyConfinement(pts[i], w); // 0 open plain .. 1 tight gorge
+
+                // Confinement pulls the aspect ratio: open ground spreads wide (ratio up),
+                // a gorge squeezes narrow-and-deep (ratio down). Centred on the base ratio
+                // so an average valley is unchanged.
+                float shift = (0.5f - conf) * 2f;        // +1 fully open .. -1 fully confined
+                float ratio = BaseWidthDepthRatio * Mathf.Pow(GorgeRatioSpan, shift * strength);
+
+                // width*depth = area, width/depth = ratio  ->  width = sqrt(area*ratio)
+                float newW = Mathf.Sqrt(area * ratio);
+                float newD = area / Mathf.Max(0.05f, newW);
+
+                widths[i] = Mathf.Max(0.2f, newW);
+                depths[i] = Mathf.Max(0.1f, newD);
+            }
+        }
+
+        // The width-to-depth ratio of an ordinary alluvial channel in an average valley.
+        // Matches the generator's 18:1 so procedural and drawn rivers read the same.
+        private const float BaseWidthDepthRatio = 18f;
+
+        // How channel width grows with the land it drains. Downstream hydraulic geometry
+        // (Leopold & Maddock, 1953): width ~ Q^0.5, discharge Q ~ area^0.8, so width goes
+        // as area^0.4. The generator holds its own copy of this same number; kept local
+        // here so UCWaterBody's growth law does not reach across into the generator.
+        private const float WidthAreaExponent = 0.4f;
+
+        // How far the ratio can swing between a fully open plain and a fully confined
+        // gorge at full strength. 2.0 means a gorge reaches ~half the plain's width (and
+        // proportionally deeper) for the same flow - a strong but real difference.
+        private const float GorgeRatioSpan = 2.0f;
+
+        /// <summary>
+        /// How much the valley confines the channel at a point, 0 (open plain) to 1
+        /// (tight gorge). Read from the ground rising away from the course across the
+        /// flow: sheer walls close by give a high value, flat ground either side gives
+        /// near zero. Sampled at a few channel-widths out so it measures the valley, not
+        /// the channel's own dug banks.
+        /// </summary>
+        private float ValleyConfinement(Vector3 at, float channelWidth)
+        {
+            float reach = Mathf.Clamp(channelWidth * 2.5f, 6f, 120f);
+            float here = SampleGround(at.x, at.z);
+
+            // Cross-flow probes. Direction does not need to be exact - a gorge rises on
+            // both sides regardless of orientation - so four compass offsets sample the
+            // surrounding walls cheaply and symmetrically.
+            float rise = 0f;
+            rise += Mathf.Max(0f, SampleGround(at.x + reach, at.z) - here);
+            rise += Mathf.Max(0f, SampleGround(at.x - reach, at.z) - here);
+            rise += Mathf.Max(0f, SampleGround(at.x, at.z + reach) - here);
+            rise += Mathf.Max(0f, SampleGround(at.x, at.z - reach) - here);
+            rise *= 0.25f;                               // mean rise of the surrounding ground
+
+            // Normalise against the reach: a rise equal to the reach (a 45 deg wall all
+            // round) is full confinement. Gentle ground gives a small fraction.
+            return Mathf.Clamp01(rise / reach);
+        }
+
+#if UNITY_EDITOR
+        // ---------------------------------------------------------------------
+        //  Test seams. The self test drives the two elevation/physics passes
+        //  added for natural waterfalls (J.2) and downstream hydraulic geometry
+        //  (J.4) directly, so their maths is pinned by an executed assertion and
+        //  not only by "it compiled". These forward verbatim to the private
+        //  methods and add no behaviour; they are compiled out of player builds.
+        // ---------------------------------------------------------------------
+
+        /// <summary>Editor-only: run the cascade detector on a supplied course and
+        /// solved surface, exactly as a real solve does. Lets the self test build a
+        /// steep course and require that a fall is found where one physically is.
+        /// Public only because the diagnostics assembly cannot see internals; it is
+        /// compiled out of player builds by the guard.</summary>
+        public List<WaterfallReach> DetectCascadesForTest(List<Vector3> pts, float[] surf, List<float> w)
+        {
+            return DetectCascades(pts, surf, w);
+        }
+
+        /// <summary>Editor-only: run the downstream hydraulic-geometry pass on supplied
+        /// series. Set <see cref="valleyConfinementStrength"/> to 0 first to isolate the
+        /// growth law from the ground-sampling confinement trade. Public for the same
+        /// cross-assembly reason as above, and behind the same build guard.</summary>
+        public void ApplyHydraulicGeometryForTest(List<Vector3> pts, List<float> widths, List<float> depths)
+        {
+            ApplyHydraulicGeometry(pts, widths, depths);
+        }
+#endif
 
         /// <summary>Where the last build's descent walk ended. Reported by the
         /// inspector, because "the river stops here" is worth knowing about.</summary>
@@ -2399,6 +2999,16 @@ namespace UniverseCreator.TerrainSystem
             renderer.allowOcclusionWhenDynamic = false;
 
             if (generateVolume) AttachVolume(body);
+
+            // Natural waterfalls (J.2). A river whose solved surface plunges down a
+            // steep reach grows foam and spray there, driven by the drop the solve
+            // measured - no marker, no authored flag. Attached only when the course
+            // actually has falls and removed when it does not, the same reversible
+            // sync the dam spillway uses. Additive: the ribbon is untouched.
+            if (shape == ShapeMode.RiverSpline && solvedCascades != null && solvedCascades.Count > 0)
+                UCWaterfallEffect.Ensure(this);
+            else
+                UCWaterfallEffect.Remove(this);
         }
 
         /// <summary>Destroys everything Rebuild created. Leaves the settings alone.</summary>
@@ -2509,9 +3119,16 @@ namespace UniverseCreator.TerrainSystem
             float[] depth = new float[n];
             bool[] wet = new bool[n];
 
-            float surfaceY = transform.position.y + surfaceOffsetMetres;
+            float surfaceY = SurfaceWorldY();
 
             bool usePolygon = shape == ShapeMode.Polygon && outline != null && outline.closed && outline.Count >= 3;
+
+            // A governing dam impounds only the upstream side of its line. The dig ring was clipped to that half-plane;
+            // the mesh must cull the same way, or the flat raised surface would flood over the natural ground the dig
+            // deliberately left standing downstream of the wall.
+            bool clipDam = damGoverned;
+            float damCx = damBarrierCentre.x, damCz = damBarrierCentre.y;
+            float damNx = damUpstreamNormal.x, damNz = damUpstreamNormal.y;
 
             // Trim the surface to the bed the water will actually sit on. When this body
             // digs, that bed is the carved basin solved in BuildDig (run immediately
@@ -2548,6 +3165,9 @@ namespace UniverseCreator.TerrainSystem
                     depth[i] = surfaceY - bed;
 
                     bool inside = !usePolygon || SplineOperations.ContainsXZ(outline, lx, lz);
+
+                    // Downstream of the dam line the reservoir does not reach, so its wet mask stops at the wall.
+                    if (clipDam && (world.x - damCx) * damNx + (world.z - damCz) * damNz < 0f) inside = false;
 
                     // Cull at the waterline (this REPLACES the old flood-the-whole-polygon
                     // rule): a vertex whose bed is at or above the surface is dry - a bank,
@@ -2616,6 +3236,22 @@ namespace UniverseCreator.TerrainSystem
         {
             int[] index = new int[gx * gz];
             for (int i = 0; i < index.Length; i++) index[i] = -1;
+
+            // ONE BASIN, ONE SURFACE.
+            //
+            // A lake or a pool is a single body of standing water. Anything in its
+            // footprint that reads wet but does not join it is not part of it, and
+            // rendering it paints a scrap of water shader on dry land beside the real
+            // lake - the reported "small box shader below the nodes". Reduced to the
+            // one region the body actually is, before a single quad is counted.
+            //
+            // Rivers are exempt: a course sampled across a riffle can read one dry
+            // cell mid-channel, and pruning to the largest region there would delete
+            // half the river to remove nothing. The ocean is exempt because a
+            // world-sized sea legitimately floods several basins its own coastline
+            // separates, and they are all the same ocean.
+            if (shape != ShapeMode.RiverSpline && kind != WaterBodyKind.Ocean)
+                KeepLargestBody(wet, gx, gz);
 
             // A quad joins if any corner is wet, which is what makes the mesh reach
             // one cell past the waterline and gives the alpha fade room to work.
@@ -2750,6 +3386,93 @@ namespace UniverseCreator.TerrainSystem
             body.worldBounds = worldBounds;
 
             return body;
+        }
+
+        /// <summary>
+        /// Reduces a wet lattice to its single largest connected region, clearing the
+        /// rest.
+        /// </summary>
+        /// <remarks>
+        /// Why it is needed at all: Assemble emits a quad whenever ANY of its four
+        /// corners is wet, which is what lets the mesh reach one cell past the
+        /// waterline for the shore fade. The same rule means ONE stray wet vertex
+        /// paints the four quads around it - a two-cell square of water shader
+        /// standing on dry ground. A node dragged below the surface, a dip in the bed
+        /// under the shore ring, or near-level ground crossing the waterline all
+        /// produce such strays, and each arrives as its own little box of water
+        /// beside the real lake.
+        ///
+        /// Eight-connected, because a quad binds its diagonal corners as well as its
+        /// orthogonal ones: two diagonally adjacent wet vertices already share a quad
+        /// and are therefore one surface, so counting them as two regions would let
+        /// this delete water that is genuinely attached.
+        ///
+        /// Iterative with an explicit stack. A lattice is up to 512x512, and a
+        /// recursive fill over a quarter of a million connected cells overflows the
+        /// stack rather than returning an answer.
+        /// </remarks>
+        private static void KeepLargestBody(bool[] wet, int gx, int gz)
+        {
+            int n = gx * gz;
+            if (n <= 0) return;
+
+            // 0 means unvisited; regions are numbered from 1.
+            int[] region = new int[n];
+            int[] stack = new int[n];
+
+            int largest = 0;
+            int largestSize = 0;
+            int current = 0;
+
+            for (int seed = 0; seed < n; seed++)
+            {
+                if (!wet[seed] || region[seed] != 0) continue;
+
+                current++;
+                int size = 0;
+                int top = 0;
+
+                // Labelled as it is pushed, never as it is popped, so no cell can be
+                // pushed twice and the stack cannot exceed the lattice.
+                region[seed] = current;
+                stack[top++] = seed;
+
+                while (top > 0)
+                {
+                    int i = stack[--top];
+                    size++;
+
+                    int x = i % gx;
+                    int z = i / gx;
+
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        int nz = z + dz;
+                        if (nz < 0 || nz >= gz) continue;
+
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= gx) continue;
+
+                            int ni = nz * gx + nx;
+                            if (!wet[ni] || region[ni] != 0) continue;
+
+                            region[ni] = current;
+                            stack[top++] = ni;
+                        }
+                    }
+                }
+
+                if (size > largestSize) { largestSize = size; largest = current; }
+            }
+
+            // Nothing was wet. Assemble's own quad count then returns null, which is
+            // the honest "this body holds no water", so there is nothing to prune.
+            if (largest == 0) return;
+
+            for (int i = 0; i < n; i++)
+                if (wet[i] && region[i] != largest) wet[i] = false;
         }
 
         // ---------------------------------------------------------------------

@@ -163,6 +163,163 @@ namespace UniverseCreator.TerrainSystem
         }
 
         // =====================================================================
+        //  MEANDER
+        // =====================================================================
+
+        /// <summary>
+        /// Lets a river wander in natural meander loops across the flat ground it
+        /// runs over, and leaves it straight where the ground is steep.
+        /// </summary>
+        /// <remarks>
+        /// WHY THIS IS NOT "A SINE WIGGLE"
+        /// A meander is not a decoration added to a straight line; it is what a river
+        /// on a floodplain unavoidably becomes. The fastest water on the outside of any
+        /// chance bend scours that bank - the cut-bank - while the slack water on the
+        /// inside drops its sediment - the point-bar - so every bend deepens and the
+        /// river snakes. Three things about that are measurable and are the whole of
+        /// what this pass encodes, so nothing here is guessed:
+        ///
+        ///   WAVELENGTH scales with the channel. Across rivers from a ditch to the
+        ///   Mississippi the loop wavelength is about eleven channel widths (Leopold &
+        ///   Wolman). So the loops of a growing river lengthen downstream exactly as its
+        ///   width does - the phase below is advanced by arc length over the LOCAL
+        ///   wavelength, not a fixed one, which is why a headwater and its trunk carry
+        ///   loops of different size on the same course.
+        ///
+        ///   THE SHAPE is a sine-generated curve, not a sine wave of position (Langbein
+        ///   & Leopold): it is the DIRECTION that varies sinusoidally with distance, and
+        ///   the path that produces has the fat, round loops of a real river rather than
+        ///   the thin wiggle a positional sine draws. The Kinoshita skew term makes each
+        ///   loop steeper on its downstream limb, which is the cut-bank/point-bar
+        ///   asymmetry the report asked for - real meanders lean downstream, they are
+        ///   not symmetric.
+        ///
+        ///   IT ONLY HAPPENS ON FLAT GROUND. A river in a gorge has no floodplain to
+        ///   wander across; it is pinned to the valley floor. So the amplitude fades out
+        ///   as the downstream grade rises and is gone above <paramref name="maxGrade"/>,
+        ///   and every proposed offset is refused if it would push the centre line up
+        ///   into ground more than a little above where it already is - a loop cannot
+        ///   climb the valley side, which is precisely the fault ("wiggle everywhere,
+        ///   even through steep terrain") this guards against.
+        ///
+        /// Runs in place, but every point is judged against the ORIGINAL line: moving a
+        /// point and then reading its neighbour would let the loops feed on themselves.
+        /// The head and the mouth are held, so a meander never drags a river off its
+        /// source or off the body it empties into.
+        /// </remarks>
+        /// <param name="points">The fitted course, world space, head first. Modified.</param>
+        /// <param name="ground">Ground elevation sampler, for the grade gate and the
+        /// floodplain clamp.</param>
+        /// <param name="widths">Per-point channel width in metres, index-aligned with
+        /// <paramref name="points"/>. May be null, in which case
+        /// <paramref name="defaultWidthMetres"/> sets the loop scale everywhere.</param>
+        /// <param name="strength">0..1 overall amplitude. 0 leaves the course straight.</param>
+        /// <param name="maxGrade">Downstream slope (fall per run) at and above which the
+        /// reach is treated as confined and does not meander.</param>
+        /// <param name="defaultWidthMetres">Width used where the series has none.</param>
+        public static void Meander(List<Vector3> points, GroundSampler ground,
+                                   IList<float> widths, float strength,
+                                   float maxGrade, float defaultWidthMetres)
+        {
+            if (points == null || points.Count < 4 || ground == null) return;
+
+            float amp = Mathf.Clamp01(strength);
+            if (amp <= 1e-4f) return;
+
+            // Leopold & Wolman: wavelength ~ 11 w. Peak lateral offset held to about
+            // three widths, so the meander belt is a few channel widths across - a
+            // lowland river, not an oxbow field. Kinoshita skew leans each loop
+            // downstream. The clamp tolerance is how far a loop may rise into the bank
+            // before it is refused, so it can round a low rise but not climb a wall.
+            const float WavelengthWidths = 11f;
+            const float AmplitudeWidths = 3f;
+            const float PhaseSkew = 0.25f;
+            const float ClampToleranceMetres = 0.5f;
+            const int ClampSamples = 4;
+
+            int n = points.Count;
+            float gradeCut = Mathf.Max(0.002f, maxGrade);
+
+            Vector3[] moved = new Vector3[n];
+            moved[0] = points[0];
+            moved[n - 1] = points[n - 1];
+
+            // Phase is advanced along the course by arc length over the LOCAL
+            // wavelength, so a reach that has widened carries longer loops than the
+            // headwater above it - the loops grow with the river.
+            float phase = 0f;
+
+            for (int i = 1; i < n - 1; i++)
+            {
+                Vector3 p = points[i];
+
+                float dsx = points[i].x - points[i - 1].x;
+                float dsz = points[i].z - points[i - 1].z;
+                float ds = Mathf.Sqrt(dsx * dsx + dsz * dsz);
+
+                float wLocal = defaultWidthMetres;
+                if (widths != null && i < widths.Count && widths[i] > 0.05f) wLocal = widths[i];
+                wLocal = Mathf.Max(0.5f, wLocal);
+
+                float wavelength = Mathf.Max(4f, WavelengthWidths * wLocal);
+                phase += 2f * Mathf.PI * ds / wavelength;
+
+                // Mean flow from the original neighbours, so the offset is across the
+                // river's actual travel and a point on a bend measures its own normal.
+                Vector2 flow = new Vector2(points[i + 1].x - points[i - 1].x,
+                                           points[i + 1].z - points[i - 1].z);
+                if (flow.sqrMagnitude < 1e-8f) { moved[i] = p; continue; }
+
+                flow.Normalize();
+                Vector2 side = new Vector2(-flow.y, flow.x);
+
+                // Confined reaches do not meander. Grade over this step; the loop
+                // fades to nothing as the grade approaches maxGrade.
+                float gHere = ground(p.x, p.z);
+                float gNext = ground(points[i + 1].x, points[i + 1].z);
+                float grade = ds > 1e-3f ? Mathf.Abs(gHere - gNext) / ds : 0f;
+                float gradeGate = 1f - Mathf.Clamp01(grade / gradeCut);
+                if (gradeGate <= 1e-3f) { moved[i] = p; continue; }
+
+                float endWindow = EndTaper(i, n);
+
+                // Sine-generated curve with a downstream skew: the fat, asymmetric loop
+                // of a real river, not a symmetric positional sine.
+                float wave = Mathf.Sin(phase + PhaseSkew * Mathf.Sin(phase));
+
+                float target = AmplitudeWidths * wLocal * amp * gradeGate * endWindow * wave;
+
+                // Stay on the floodplain. Scan from the full offset inward and take the
+                // largest that does not rise more than the tolerance above the centre:
+                // a loop may round a low bar but never climb the valley side.
+                float allowed = 0f;
+                for (int s = 0; s < ClampSamples; s++)
+                {
+                    float trial = target * (1f - s / (float)ClampSamples);
+                    float gh = ground(p.x + side.x * trial, p.z + side.y * trial);
+                    if (gh <= gHere + ClampToleranceMetres) { allowed = trial; break; }
+                }
+
+                moved[i] = new Vector3(p.x + side.x * allowed, p.y, p.z + side.y * allowed);
+            }
+
+            for (int i = 0; i < n; i++) points[i] = moved[i];
+        }
+
+        /// <summary>
+        /// Fades a per-point strength to zero over the first and last twelfth of a
+        /// course, so a planform effect holds the head and the mouth exactly where the
+        /// fit left them.
+        /// </summary>
+        private static float EndTaper(int i, int n)
+        {
+            int fade = Mathf.Max(2, n / 12);
+            float head = Mathf.Clamp01(i / (float)fade);
+            float mouth = Mathf.Clamp01((n - 1 - i) / (float)fade);
+            return Mathf.Min(head, mouth);
+        }
+
+        // =====================================================================
         //  THE DESCENT WALK
         // =====================================================================
 

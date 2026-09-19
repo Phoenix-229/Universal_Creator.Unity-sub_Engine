@@ -763,7 +763,7 @@ html[data-find="1"] .rail .grp>ol{display:block}
         <li><a class="lv4" href="#texture-import-mask"><span class="n"></span>Texture Import Mask</a></li>
         <li><a class="lv4" href="#composite-filter"><span class="n"></span>Composite Filter</a></li>
         <li><a class="lv3" href="#hydrology-selectors"><span class="n"></span>Hydrology selectors</a></li>
-        <li><a class="lv4" href="#read-this-first-the-water-family-is-nine-nodes-in-three-graphs-worth-of-jobs"><span class="n"></span>Read this first: the water family is nine nodes, in three graphs' worth of jobs</a></li>
+        <li><a class="lv4" href="#read-this-first-the-water-family-is-ten-nodes-in-three-graphs-worth-of-jobs"><span class="n"></span>Read this first: the water family is ten nodes, in three graphs' worth of jobs</a></li>
         <li><a class="lv4" href="#the-shared-drainage-solve"><span class="n"></span>The shared drainage solve</a></li>
         <li><a class="lv4" href="#how-to-read-the-port-tables-below"><span class="n"></span>How to read the port tables below</a></li>
         <li><a class="lv4" href="#ocean-level"><span class="n"></span>Ocean Level</a></li>
@@ -992,13 +992,15 @@ html[data-find="1"] .rail .grp>ol{display:block}
       <div class="row"><a class="lv2" href="#33-water-authoring-physics-and-dynamics"><span class="n">33</span>Water authoring, physics and dynamics</a><button class="tw" type="button" aria-expanded="false" aria-label="Show subsections of Water authoring, physics and dynamics"></button></div>
       <ol>
         <li><a class="lv3" href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired"><span class="n"></span>How water is built end to end: two chains, and both must be wired</a></li>
-        <li><a class="lv4" href="#chain-1--where-the-water-is"><span class="n"></span>Chain 1 — where the water is</a></li>
-        <li><a class="lv4" href="#chain-2--what-the-water-looks-like"><span class="n"></span>Chain 2 — what the water looks like</a></li>
+        <li><a class="lv4" href="#chain-1--where-the-water-is"><span class="n"></span>Chain 1 &mdash; where the water is</a></li>
+        <li><a class="lv4" href="#chain-2--what-the-water-looks-like"><span class="n"></span>Chain 2 &mdash; what the water looks like</a></li>
         <li><a class="lv4" href="#the-checklist"><span class="n"></span>The checklist</a></li>
         <li><a class="lv4" href="#everything-you-can-still-do-by-hand-afterwards"><span class="n"></span>Everything you can still do by hand, afterwards</a></li>
         <li><a class="lv3" href="#geometry"><span class="n"></span>Geometry</a></li>
+        <li><a class="lv3" href="#downstream-hydraulic-geometry-how-a-river-grows"><span class="n"></span>Downstream hydraulic geometry: how a river grows</a></li>
         <li><a class="lv3" href="#flow-mannings-equation"><span class="n"></span>Flow: Manning's equation</a></li>
         <li><a class="lv3" href="#turbulence-the-froude-number"><span class="n"></span>Turbulence: the Froude number</a></li>
+        <li><a class="lv3" href="#waterfalls-and-cascades"><span class="n"></span>Waterfalls and cascades</a></li>
         <li><a class="lv3" href="#drag-the-reynolds-number"><span class="n"></span>Drag: the Reynolds number</a></li>
         <li><a class="lv3" href="#density"><span class="n"></span>Density</a></li>
         <li><a class="lv3" href="#waves-and-ripples"><span class="n"></span>Waves and ripples</a></li>
@@ -1077,7 +1079,7 @@ html[data-find="1"] .rail .grp>ol{display:block}
         <li><a class="lv3" href="#the-terrain-is-flat"><span class="n"></span>The terrain is flat</a></li>
         <li><a class="lv3" href="#the-terrain-is-spiky"><span class="n"></span>The terrain is spiky</a></li>
         <li><a class="lv3" href="#visible-seams-between-chunks"><span class="n"></span>Visible seams between chunks</a></li>
-        <li><a class="lv3" href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span>The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error</a></li>
+        <li><a class="lv3" href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span>The Hydrology Spawner produced nothing &mdash; no rivers, no lakes, no ocean, and no error</a></li>
         <li><a class="lv3" href="#a-water-body-exists-but-has-no-material--flat-untextured-grey"><span class="n"></span>A water body exists but has no material — flat untextured grey</a></li>
         <li><a class="lv3" href="#water-is-a-flat-opaque-sheet"><span class="n"></span>Water is a flat opaque sheet</a></li>
         <li><a class="lv3" href="#water-is-in-the-wrong-place"><span class="n"></span>Water is in the wrong place</a></li>
@@ -1168,25 +1170,13 @@ html[data-find="1"] .rail .grp>ol{display:block}
         <li><a class="lv3" href="#implementing-a-different-path-tool"><span class="n"></span>Implementing a different path tool</a></li>
       </ol>
     </li>
-    <li class="grp" data-for="44-wiring-road--city-master">
-      <div class="row"><a class="lv2" href="#44-wiring-road--city-master"><span class="n">44</span>Wiring Road &amp; City Master into the world</a><button class="tw" type="button" aria-expanded="false" aria-label="Show subsections of Wiring Road &amp; City Master into the world"></button></div>
-      <ol>
-        <li><a class="lv3" href="#rcm-who-owns"><span class="n"></span>Which tool owns the ground</a></li>
-        <li><a class="lv3" href="#rcm-parts"><span class="n"></span>The three components that make the bridge</a></li>
-        <li><a class="lv3" href="#rcm-connect"><span class="n"></span>Connecting the two tools, step by step</a></li>
-        <li><a class="lv3" href="#rcm-states"><span class="n"></span>The five things the socket can tell you</a></li>
-        <li><a class="lv3" href="#rcm-clear"><span class="n"></span>Disconnecting: giving the holds back</a></li>
-        <li><a class="lv3" href="#rcm-road-fields"><span class="n"></span>Road behaviour: 8 fields that are declared, not read</a></li>
-        <li><a class="lv3" href="#rcm-healer"><span class="n"></span>The healing half, and what it does not do yet</a></li>
-        <li><a class="lv3" href="#rcm-cuts"><span class="n"></span>Cut regions: the part of the bridge that works today</a></li>
-      </ol>
-    </li>
     <li class="grp" data-for="appendix-a--mathematical-reference">
       <div class="row"><a class="lv2" href="#appendix-a--mathematical-reference"><span class="n"></span>Appendix A — Mathematical reference</a><button class="tw" type="button" aria-expanded="false" aria-label="Show subsections of Appendix A — Mathematical reference"></button></div>
       <ol>
         <li><a class="lv3" href="#noise"><span class="n"></span>Noise</a></li>
         <li><a class="lv3" href="#erosion-1"><span class="n"></span>Erosion</a></li>
         <li><a class="lv3" href="#hydraulics-1"><span class="n"></span>Hydraulics</a></li>
+        <li><a class="lv3" href="#drainage-networks-and-channel-geometry"><span class="n"></span>Drainage networks and channel geometry</a></li>
         <li><a class="lv3" href="#terrain-analysis"><span class="n"></span>Terrain analysis</a></li>
         <li><a class="lv3" href="#climate"><span class="n"></span>Climate</a></li>
         <li><a class="lv3" href="#scale"><span class="n"></span>Scale</a></li>
@@ -1200,6 +1190,7 @@ html[data-find="1"] .rail .grp>ol{display:block}
       <ol>
         <li><a class="lv3" href="#run-self-test"><span class="n"></span>Run Self Test</a></li>
         <li><a class="lv3" href="#what-the-module-3-self-tests-cover"><span class="n"></span>What the Module 3 self-tests cover</a></li>
+        <li><a class="lv3" href="#what-the-module-2-water-tests-cover"><span class="n"></span>What the Module 2 water tests cover</a></li>
         <li><a class="lv3" href="#testing-the-install-without-opening-unity"><span class="n"></span>Testing the install without opening Unity</a></li>
         <li><a class="lv4" href="#exit-codes"><span class="n"></span>Exit codes</a></li>
         <li><a class="lv4" href="#running-it-by-hand"><span class="n"></span>Running it by hand</a></li>
@@ -1217,7 +1208,7 @@ html[data-find="1"] .rail .grp>ol{display:block}
       <div class="row"><a class="lv2" href="#appendix-d--glossary"><span class="n"></span>Appendix D — Glossary</a></div>
     </li>
   </ol>
-  <div class="railfoot"><b>420</b> C# files &middot; <b>18</b> shaders &middot; <b>17</b> include files<br>Every table on these pages is scanned from the tool tree at build time.</div>
+  <div class="railfoot"><b>429</b> C# files &middot; <b>18</b> shaders &middot; <b>17</b> include files<br>Every table on these pages is scanned from the tool tree at build time.</div>
 </nav>
 <main id="doc">
 <img id="masthead" src="Core/Editor/Resources/Branding/UniverseCreator.png" alt="Universe Creator — Developer Manual">
@@ -1230,11 +1221,11 @@ inspector does, how the maths works, and what to do when something looks wrong.<
 absent, this manual says so rather than leaving you to discover it.</p>
 <hr>
 <div class="page">
-<div class="pagehead"><span class="of">Page 1 of 49</span>
+<div class="pagehead"><span class="of">Page 1 of 48</span>
 <h2 id="contents" data-title="Table of contents"><span class="sect">Universe Creator</span>Table of contents</h2>
 </div>
 <!--BODY-->
-<p class="lede">Every page of the manual, and every heading inside it. <b>48</b> sections, <b>453</b> headings &mdash; each entry jumps straight to the page it names.</p>
+<p class="lede">Every page of the manual, and every heading inside it. <b>47</b> sections, <b>448</b> headings &mdash; each entry jumps straight to the page it names.</p>
 <div class="tocgrid">
   <section>
     <a class="top" href="#1-what-this-system-is"><span class="n">1</span>What this system is</a>
@@ -1494,8 +1485,10 @@ absent, this manual says so rather than leaving you to discover it.</p>
     <ol>
       <li><a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired"><span class="n"></span>How water is built end to end: two chains, and both must be wired</a></li>
       <li><a href="#geometry"><span class="n"></span>Geometry</a></li>
+      <li><a href="#downstream-hydraulic-geometry-how-a-river-grows"><span class="n"></span>Downstream hydraulic geometry: how a river grows</a></li>
       <li><a href="#flow-mannings-equation"><span class="n"></span>Flow: Manning's equation</a></li>
       <li><a href="#turbulence-the-froude-number"><span class="n"></span>Turbulence: the Froude number</a></li>
+      <li><a href="#waterfalls-and-cascades"><span class="n"></span>Waterfalls and cascades</a></li>
       <li><a href="#drag-the-reynolds-number"><span class="n"></span>Drag: the Reynolds number</a></li>
       <li><a href="#density"><span class="n"></span>Density</a></li>
       <li><a href="#waves-and-ripples"><span class="n"></span>Waves and ripples</a></li>
@@ -1575,7 +1568,7 @@ absent, this manual says so rather than leaving you to discover it.</p>
       <li><a href="#the-terrain-is-flat"><span class="n"></span>The terrain is flat</a></li>
       <li><a href="#the-terrain-is-spiky"><span class="n"></span>The terrain is spiky</a></li>
       <li><a href="#visible-seams-between-chunks"><span class="n"></span>Visible seams between chunks</a></li>
-      <li><a href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span>The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error</a></li>
+      <li><a href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span>The Hydrology Spawner produced nothing &mdash; no rivers, no lakes, no ocean, and no error</a></li>
       <li><a href="#a-water-body-exists-but-has-no-material--flat-untextured-grey"><span class="n"></span>A water body exists but has no material — flat untextured grey</a></li>
       <li><a href="#water-is-a-flat-opaque-sheet"><span class="n"></span>Water is a flat opaque sheet</a></li>
       <li><a href="#water-is-in-the-wrong-place"><span class="n"></span>Water is in the wrong place</a></li>
@@ -1662,24 +1655,12 @@ absent, this manual says so rather than leaving you to discover it.</p>
     <a class="more" href="#43-integrating-an-external-path-authoring-tool">and 6 further headings on this page</a>
   </section>
   <section>
-    <a class="top" href="#44-wiring-road--city-master"><span class="n">44</span>Wiring Road &amp; City Master into the world</a>
-    <ol>
-      <li><a href="#rcm-who-owns"><span class="n"></span>Which tool owns the ground</a></li>
-      <li><a href="#rcm-parts"><span class="n"></span>The three components that make the bridge</a></li>
-      <li><a href="#rcm-connect"><span class="n"></span>Connecting the two tools, step by step</a></li>
-      <li><a href="#rcm-states"><span class="n"></span>The five things the socket can tell you</a></li>
-      <li><a href="#rcm-clear"><span class="n"></span>Disconnecting: giving the holds back</a></li>
-      <li><a href="#rcm-road-fields"><span class="n"></span>Road behaviour: 8 fields that are declared, not read</a></li>
-      <li><a href="#rcm-healer"><span class="n"></span>The healing half, and what it does not do yet</a></li>
-      <li><a href="#rcm-cuts"><span class="n"></span>Cut regions: the part of the bridge that works today</a></li>
-    </ol>
-  </section>
-  <section>
     <a class="top" href="#appendix-a--mathematical-reference"><span class="n">&bull;</span>Appendix A — Mathematical reference</a>
     <ol>
       <li><a href="#noise"><span class="n"></span>Noise</a></li>
       <li><a href="#erosion-1"><span class="n"></span>Erosion</a></li>
       <li><a href="#hydraulics-1"><span class="n"></span>Hydraulics</a></li>
+      <li><a href="#drainage-networks-and-channel-geometry"><span class="n"></span>Drainage networks and channel geometry</a></li>
       <li><a href="#terrain-analysis"><span class="n"></span>Terrain analysis</a></li>
       <li><a href="#climate"><span class="n"></span>Climate</a></li>
       <li><a href="#scale"><span class="n"></span>Scale</a></li>
@@ -1693,6 +1674,7 @@ absent, this manual says so rather than leaving you to discover it.</p>
     <ol>
       <li><a href="#run-self-test"><span class="n"></span>Run Self Test</a></li>
       <li><a href="#what-the-module-3-self-tests-cover"><span class="n"></span>What the Module 3 self-tests cover</a></li>
+      <li><a href="#what-the-module-2-water-tests-cover"><span class="n"></span>What the Module 2 water tests cover</a></li>
       <li><a href="#testing-the-install-without-opening-unity"><span class="n"></span>Testing the install without opening Unity</a></li>
       <li><a href="#check-shaders"><span class="n"></span>Check Shaders</a></li>
       <li><a href="#repair-graphs"><span class="n"></span>Repair Graphs</a></li>
@@ -1714,7 +1696,7 @@ absent, this manual says so rather than leaving you to discover it.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 2 of 49</span>
+<div class="pagehead"><span class="of">Page 2 of 48</span>
 <h2 id="1-what-this-system-is" data-title="What this system is"><span class="sect">Section 1</span>What this system is</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -1780,7 +1762,7 @@ runs in play mode only — nothing in this layer executes in the Scene view in e
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 3 of 49</span>
+<div class="pagehead"><span class="of">Page 3 of 48</span>
 <h2 id="2-requirements-installation-and-first-run" data-title="Requirements, installation and first run"><span class="sect">Section 2</span>Requirements, installation and first run</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -1825,7 +1807,7 @@ servers and customers without editing anything.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 4 of 49</span>
+<div class="pagehead"><span class="of">Page 4 of 48</span>
 <h2 id="3-quick-start-your-first-world" data-title="Quick start: your first world"><span class="sect">Section 3</span>Quick start: your first world</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -1872,7 +1854,7 @@ mutable state between evaluations.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 5 of 49</span>
+<div class="pagehead"><span class="of">Page 5 of 48</span>
 <h2 id="4-the-hierarchy-it-builds" data-title="The hierarchy it builds"><span class="sect">Section 4</span>The hierarchy it builds</h2>
 </div>
 <!--BODY-->
@@ -1936,7 +1918,7 @@ replayed. See <code>Capture Manual Edits</code> in <a href="#29-the-world-inspec
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 6 of 49</span>
+<div class="pagehead"><span class="of">Page 6 of 48</span>
 <h2 id="5-every-menu-entry" data-title="Every menu entry"><span class="sect">Section 5</span>Every menu entry</h2>
 </div>
 <!--BODY-->
@@ -2000,7 +1982,7 @@ Modifiers — so there is one place to look for any given kind of node.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 7 of 49</span>
+<div class="pagehead"><span class="of">Page 7 of 48</span>
 <h2 id="6-architecture" data-title="Architecture"><span class="sect">Section 6</span>Architecture</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2090,7 +2072,7 @@ editor assembly (<code>Core/Editor/</code>) and are never shipped in a build.</p
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 8 of 49</span>
+<div class="pagehead"><span class="of">Page 8 of 48</span>
 <h2 id="7-the-generation-pipeline" data-title="The generation pipeline"><span class="sect">Section 7</span>The generation pipeline</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2135,7 +2117,7 @@ system does not crack the seam between them.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 9 of 49</span>
+<div class="pagehead"><span class="of">Page 9 of 48</span>
 <h2 id="8-world-space-scale-and-coordinates" data-title="World space, scale and coordinates"><span class="sect">Section 8</span>World space, scale and coordinates</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2189,7 +2171,7 @@ GameObject. Two uses:</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 10 of 49</span>
+<div class="pagehead"><span class="of">Page 10 of 48</span>
 <h2 id="9-virtual-chunking-and-the-dual-lod-system" data-title="Virtual chunking and the dual LOD system"><span class="sect">Section 9</span>Virtual chunking and the dual LOD system</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2245,7 +2227,7 @@ does not, the node itself is at fault.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 11 of 49</span>
+<div class="pagehead"><span class="of">Page 11 of 48</span>
 <h2 id="10-asynchronous-generation" data-title="Asynchronous generation"><span class="sect">Section 10</span>Asynchronous generation</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2296,7 +2278,7 @@ droplets is spread over four times as many samples.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 12 of 49</span>
+<div class="pagehead"><span class="of">Page 12 of 48</span>
 <h2 id="11-the-node-graph-window" data-title="The Node Graph window"><span class="sect">Section 11</span>The Node Graph window</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2382,7 +2364,7 @@ is unreadable a month later.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 13 of 49</span>
+<div class="pagehead"><span class="of">Page 13 of 48</span>
 <h2 id="12-ports-wires-and-data-types" data-title="Ports, wires and data types"><span class="sect">Section 12</span>Ports, wires and data types</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2460,7 +2442,7 @@ one <code>Height</code> out. That covers <code>Perlin Noise</code>, <code>Simple
 <tr><td>Domain Warp Field</td><td><em>(none)</em></td><td><code>Warp X</code>, <code>Warp Z</code> (Matrix)</td></tr>
 <tr><td>Tectonic Plate Seed</td><td><em>(none)</em></td><td><code>Height</code>, <code>Boundary</code>, <code>Plate Id</code> (Matrix)</td></tr>
 <tr><td>Prevailing Wind</td><td><em>(none)</em></td><td><code>Wind X</code>, <code>Wind Z</code> (Matrix)</td></tr>
-<tr><td>Hydrology Spawner</td><td><em>(none)</em></td><td><code>Lake Mask</code>, <code>River Mask</code> (Matrix)</td></tr>
+<tr><td>Hydrology Spawner</td><td><code>Height</code> (Matrix)</td><td><code>Lake Mask</code>, <code>River Mask</code> (Matrix)</td></tr>
 <tr><td>Random Seed</td><td><em>(none)</em></td><td><code>Seed</code> (<strong>Scalar</strong>)</td></tr>
 <tr><td>River Source Seed</td><td><code>Height</code>, <code>Precipitation</code> (Matrix)</td><td><code>Mask</code> (Matrix)</td></tr>
 </tbody>
@@ -2618,9 +2600,11 @@ several derived fields rather than terminating:</p>
 pixel, <code>Wetness</code> darkens it, and <code>Override</code> lets a hand-painted mask win locally. <code>Wind</code>,
 <code>Weather</code> and <code>Lighting Output</code> are the seams where the terrain graph hands biased fields to
 the three live Module-3 managers.</p>
-<p><code>Hydrology Spawner</code> (a <strong>Creator</strong>, <code>Lake Mask</code> + <code>River Mask</code> out, no input) is where a
-hydrology branch begins — its two masks seed the <code>River Network Trace</code> / <code>Lake Fill</code> chain
-documented above.</p>
+<p><code>Hydrology Spawner</code> (a <strong>Creator</strong>, <code>Height</code> in, <code>Lake Mask</code> + <code>River Mask</code> out) is where a
+procedural water branch begins. Feed it the terrain height that the water should follow. Its
+two masks describe the same lake basins and river courses used for the water bodies it spawns;
+they can be sent directly to the river and lake shaping nodes, or used to restrict <code>Lake Fill</code>
+while <code>River Network Trace</code> is used for an independently tuned network.</p>
 <h4 id="texture-graph-nodes-and-their-ports" data-title="Texture Graph nodes and their ports">Texture Graph nodes and their ports</h4>
 <p>Every Texture Graph node's ports, as declared. Surface-chain nodes (one <code>Surface</code> in, one
 <code>Surface</code> out) are the backbone; the rest either open the chain (no input) or branch it.</p>
@@ -2672,7 +2656,7 @@ description — merge before that final output.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 14 of 49</span>
+<div class="pagehead"><span class="of">Page 14 of 48</span>
 <h2 id="13-how-input-fields-behave" data-title="How input fields behave"><span class="sect">Section 13</span>How input fields behave</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2715,7 +2699,7 @@ value re-rolls a whole subsystem coherently.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 15 of 49</span>
+<div class="pagehead"><span class="of">Page 15 of 48</span>
 <h2 id="14-creator-nodes" data-title="Creator nodes"><span class="sect">Section 14</span>Creator nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -2972,71 +2956,116 @@ rivers should begin.</p>
 </tbody>
 </table></div>
 <h4 id="hydrology-spawner" data-title="Hydrology Spawner">Hydrology Spawner</h4>
-<p>The world's water. This is the <strong>only</strong> procedural producer of rivers, lakes and the sea,
-and it is <strong>opt-in</strong>: no water is placed unless this node exists in the graph <em>and</em> is
-wired through to an Output. Delete it, or disconnect it, and the bodies it made are torn
-down again.</p>
+<p>The world's water. Two jobs, one node. It <strong>settles the counts</strong> &mdash; how many trunk rivers, how many lakes, whether there is a sea &mdash; and it <strong>emits the matching masks</strong>, which say where that water will stand so the height chain can carve a bed for it before it arrives. Both halves come out of one drainage solve of the world, which is why the trench the graph digs is the trench the river object sits in.</p>
+<p><strong>Water is not conditional on this node.</strong> The spawner is the authority when the graph has one, and the graph still produces water without it. Which of those you are in is decided by the rule in <a href="#hydro-activation">when this node runs</a>, and that is the first thing to read if the water you got is not the water you expected.</p>
 <p><strong>Ports</strong></p>
 <div class="tablewrap"><table>
 <thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Required</th><th>Wire it to</th></tr></thead>
 <tbody>
-<tr><td><code>Lake Mask</code></td><td>out</td><td>Matrix</td><td><strong>effectively yes</strong></td><td><strong>Wire it, even though it is zero-filled.</strong> Take it to any Output — a <code>Height Output</code>'s <code>Mask</code>, a <code>Blend</code>, a <code>Biome Splat Output</code> layer mask. It is the wire, not the data, that matters: it is how the graph learns this node is in use. See below</td></tr>
-<tr><td><code>River Mask</code></td><td>out</td><td>Matrix</td><td>no</td><td>Same story. One wired output is enough to switch the node on; wire the second only if something downstream reads it</td></tr>
+<tr><td><code>Height</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td>The terrain height the water should follow, normally the same settled height chain the river and lake nodes read. Unwired, both mask outputs come back empty and no useful water can be planned from this node</td></tr>
+<tr><td><code>Lake Mask</code></td><td>out</td><td>Matrix</td><td>&mdash;</td><td>The procedural lake footprint. Feed it to <code>Lake Fill</code>'s optional restriction, a wetness or splat mask, or any path that reaches an Output</td></tr>
+<tr><td><code>River Mask</code></td><td>out</td><td>Matrix</td><td>&mdash;</td><td>The traced, width-graded river course. Feed it to <code>River Carve</code> and <code>River Fill</code>, or any path that reaches an Output</td></tr>
 </tbody>
 </table></div>
-<p>The node has <strong>no inputs</strong>. It reads the <em>settled terrain</em>, not the graph, because at
-graph-evaluation time the terrain does not exist yet.</p>
-<p><strong>The one rule that decides whether this node runs at all.</strong> The spawner is skipped unless a
-path exists from it, forwards through the wires, to an Output node. <code>UCWaterSystemManager</code>
-seeds a queue with every Output node in the graph and walks the connections <strong>backwards</strong>;
-only spawners it reaches are run. A <code>Hydrology Spawner</code> sitting on the canvas with both
-outputs free is <em>unreachable</em>, and unreachable means never executed — no rivers, no lakes,
-no ocean, no error, no warning. It is the single most common reason this node &quot;did nothing&quot;.</p>
-<p>The masks come out <strong>zero-filled</strong>, and that is not a bug — the node's real product is scene
-objects, not a matrix, and spawning <code>GameObject</code>s cannot happen on a worker thread. So
-<code>UniverseCreatorObject</code> runs it directly, on the main thread, <em>after the terrain has settled</em>
-(<code>ChunkManager.RunAfterSettle</code>) — spawning any earlier traced every river across the flat
-baseline and stacked every lake at one height. The masks exist so the ports can be wired at
-all, and wiring one is how you consent to the water.</p>
-<p>Two more gates sit outside the graph and both are open by default, but check them when the
-wire is right and nothing appears:</p>
-<ul>
-<li><code>UCWaterSystemManager.Source</code> must include the node graph. The default is <strong>Both</strong>, which does. Set to <code>Hand Placed</code> it ignores this node entirely.</li>
-<li>The terrain must actually settle. The spawn is queued behind <code>RunAfterSettle</code>, so a build that is still streaming has not reached it yet.</li>
-</ul>
-<p>The full wiring procedure, with the shader half as well, is
-<a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired">How water is built end to end</a>.</p>
+<p>The masks are computed data, not reachability tokens: <code>Lake Mask</code> is the basin water footprint and <code>River Mask</code> is the traced, width-graded course, and they match the basins and courses the spawned <code>UCWaterBody</code> objects are built on. Keep the height source and the water settings consistent across the spawner, <code>River Carve</code>, <code>River Fill</code>, <code>Lake Fill</code> and <code>Water Bank Seat</code>. The full wiring procedure, with the shader half as well, is <a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired">How water is built end to end</a>.</p>
+<h5 id="hydro-activation">When this node runs, and what happens when it is absent</h5>
+<p>Every generate asks <code>UCWaterSystemManager.ResolveHydrology</code> one question &mdash; <em>which settings decide this world's water?</em> &mdash; and there are exactly three answers. Earlier editions of this manual described only the first, and described it too narrowly.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>What the graph contains</th><th>What decides the water</th></tr></thead>
+<tbody>
+<tr><td><strong>1.</strong> A Hydrology Spawner that is <strong>wired at all</strong> &mdash; something feeding its <code>Height</code>, <em>or</em> something consuming either mask, <em>or</em> a path from it forwards to an Output</td><td>That spawner, outright. Its fields are the world's water settings and nothing else is consulted</td></tr>
+<tr><td><strong>2.</strong> No wired spawner, but a water node that reaches an Output</td><td>Native drainage math, <strong>per kind</strong>. The manager synthesises a spawner, adopts the settings already authored on the connected nodes, and derives only the counts. The next table is the whole of it</td></tr>
+<tr><td><strong>3.</strong> Neither</td><td>Nothing is planned, and the sweep removes procedural bodies left over from a previous run. A world with no water nodes in its graph is a dry world on purpose</td></tr>
+</tbody>
+</table></div>
+<p><strong>Correction to earlier guidance.</strong> A spawner sitting on the canvas with both outputs free but its <code>Height</code> fed is <em>live</em>, not unreachable. Only a completely unconnected spawner &mdash; no wire on any of its three ports &mdash; is passed over. Reachability to an Output is one of the ways this node activates, not the only one.</p>
+<p>Case 2 is what lets the selector nodes work on their own, and it exists because the opposite produced the most confusing failure this system has had. A <code>River Network Trace</code> with its channel-head area lowered for a small world stamps a network, <code>River Carve</code> digs it, and a spawner synthesised on class defaults would then find no qualifying mouth and put no river object in the trench: trenches with no water in them. So the synthesised spawner adopts the connected nodes' own settings.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Connected node</th><th>What it turns on</th><th>What the synthesised spawner takes from it</th></tr></thead>
+<tbody>
+<tr><td><code>River Network Trace</code> or <code>River Fill</code></td><td>Rivers</td><td>From the first <code>River Network Trace</code>: <code>Drainage Resolution</code>, <code>Channel Head Area</code>, <code>Max Channels</code>. The river count is then derived &mdash; see below</td></tr>
+<tr><td><code>Lake Fill</code></td><td>Lakes</td><td><code>Min Depth</code>, <code>Depth Normalise</code>, <code>Shore Softness</code>, and its <code>Drainage Resolution</code> if no trace was found. Lake <em>density</em> stays at the node defaults, which are already a fraction of the world's chunks</td></tr>
+<tr><td><code>Ocean Level</code></td><td>The sea</td><td>Its <code>Sea Level</code>, which outranks any other node's</td></tr>
+<tr><td><code>River Carve</code>, <code>Water Bank Seat</code></td><td><strong>Nothing</strong></td><td>Deliberately excluded. They shape ground for water decided elsewhere, so a carve fed by a hand-drawn mask must not conjure river objects nobody asked for</td></tr>
+</tbody>
+</table></div>
+<p>Where several nodes could state the sea level the most specific wins: <code>Ocean Level</code>, then <code>River Network Trace</code>, then <code>Lake Fill</code>. Where two nodes of one kind disagree the first in the graph wins, so the answer does not depend on the order you created them in. Turn on no lake node and the lake density is zeroed rather than left at its default &mdash; the graph gets the water it asked for and not a lake district beside it.</p>
+<p><strong>How the native river count is derived.</strong> A trunk river needs 4&times; the channel-head area draining into it, and a catchment of that area is about its own square root across &mdash; so trunk valleys sit roughly &radic;(4 &times; head area) apart, and the count is the world's side divided by that spacing, clamped to 1&ndash;12. At the planner's own default head area of 250,000 m&sup2; that is about a kilometre between trunks. Spacing is <em>linear</em>, which is why this is not a fraction of the chunk count the way the lakes are: doubling the world's side gives four times the lakes and twice the rivers, which is what a map shows.</p>
+<h5 id="hydro-fields">Every field in the inspector</h5>
+<p>Read down the table the way you read down the inspector: the order and the grouping are the ones Unity draws, and the defaults and ranges are scanned out of the class at build time, so they cannot drift away from what is on your screen.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
-<tr><td><code>Target River Count</code></td><td>3</td><td>How many trunk rivers to plan</td></tr>
-<tr><td><code>Target Lake Count</code></td><td>0</td><td>Explicit upper bound on lakes. <strong>0 means use the coverage percentage exactly</strong></td></tr>
-<tr><td><code>Lake Chunk Percentage</code></td><td>0.24 (0..1)</td><td>Fraction of the world's chunks eligible for a lake</td></tr>
-<tr><td><code>Lake Outlet Chunk Percentage</code></td><td>0.08 (0..1)</td><td>Fraction of chunks that get a lake drain-out river</td></tr>
-<tr><td><code>Min Tributaries</code></td><td>3</td><td>Merge this many small rivers to form a <strong>Big</strong> river</td></tr>
-<tr><td><code>Enable Distributaries</code></td><td>on</td><td>Let a big river split into a delta where it meets the ocean</td></tr>
-<tr><td><code>Max Distributaries</code></td><td>4</td><td>Arms in that delta</td></tr>
-<tr><td><code>Generate Ocean</code></td><td>on</td><td>Spawn one world-sized sea at the world-edge falloff level, clipped at the shore. Off leaves the world land-locked</td></tr>
+<tr><td colspan="3"><strong>Hydrology Counts</strong></td></tr>
+<tr><td><code>Target River Count</code></td><td>3</td><td>Number of trunk rivers to place. Tributaries are counted separately. Trunk rivers only &mdash; tributaries are traced onto each trunk and are not counted here, so a world set to 3 normally carries more than three visible watercourses.</td></tr>
+<tr><td><code>Target Lake Count</code></td><td>0</td><td>Lakes to place. 0 uses Lake Coverage instead; a typed count overrides it. <strong>Not a ceiling.</strong> A typed count replaces the coverage density outright rather than being clamped down to it; the older build took the smaller of the two, so on a world whose percentage rounded to zero the number you typed was silently discarded. What still limits the result is the ground &mdash; see <a href="#hydro-supply">why you can get fewer than you asked for</a>.</td></tr>
+<tr><td colspan="3"><strong>Lake Coverage</strong></td></tr>
+<tr><td><code>Lake Chunk Percentage</code></td><td>0.24 (0..1)</td><td>Fraction of terrain chunks eligible for procedural lakes. Used only while <code>Target Lake Count</code> is 0. Areal, not linear: doubling the world's side gives four times the lakes.</td></tr>
+<tr><td colspan="3"><strong>Lake Outflow</strong></td></tr>
+<tr><td><code>Lake Outlet Chunk Percentage</code></td><td>0.08 (0..1)</td><td>Fraction of terrain chunks that get a lake drain-out river. Capped at the lake count &mdash; an outlet is a lake's overflow, so there can never be more of them than there are lakes.</td></tr>
+<tr><td colspan="3"><strong>River Networks</strong></td></tr>
+<tr><td><code>Min Tributaries</code></td><td>3</td><td>Merge this many small rivers to form a Big river.</td></tr>
+<tr><td><code>Enable Distributaries</code></td><td>on</td><td>Enable river deltas / distributaries when a big river meets the ocean.</td></tr>
+<tr><td><code>Max Distributaries</code></td><td>4</td><td>Most branches one delta may split into. Ignored when distributaries are off.</td></tr>
+<tr><td colspan="3"><strong>Ocean</strong></td></tr>
+<tr><td><code>Generate Ocean</code></td><td>on</td><td>Spawn one world-sized ocean at the world-edge falloff level, clipped at the shore. Off does <em>not</em> remove the waterline; see <a href="#hydro-datum">sea level without an ocean</a>.</td></tr>
+<tr><td colspan="3"><strong>Mask Solve</strong></td></tr>
+<tr><td><code>Drainage Resolution</code></td><td>256</td><td>Cells per side of the world drainage solve. Coarse on purpose. Higher values cost more and refine routing, not the final chunk edge.</td></tr>
+<tr><td><code>Sea Level</code></td><td>0.35 (0..1)</td><td>Sea level as a fraction of world height. Rivers end here; lakes do not form below it. A starting position, not the last word. Once an ocean stands, its settled surface is pushed back over this field on the next sync, so move the ocean rather than editing this number.</td></tr>
+<tr><td colspan="3"><strong>River Mask</strong></td></tr>
+<tr><td><code>Channel Head Area</code></td><td>250000</td><td>Catchment a channel must drain to count as a river, in square metres. Auto-rescaled on small worlds. <strong>No longer lowered by hand.</strong> The planner measures this against the world it is given and rescales it where the terrain cannot afford it &mdash; see <a href="#hydro-headarea">channel head area on a small world</a>.</td></tr>
+<tr><td><code>Max Channels</code></td><td>512</td><td>Upper bound on traced courses. A guard, not a river count. A guard against a pathological heightfield, not a river count. Lowering it will not give you fewer rivers.</td></tr>
+<tr><td colspan="3"><strong>Lake Mask</strong></td></tr>
+<tr><td><code>Min Lake Depth</code></td><td>0.002</td><td>Basins shallower than this are not lakes. Fraction of world height. Gates the lake <em>object</em> as well as the mask: a candidate basin shallower than this is passed over rather than filled as a puddle, and the pass says so in the console.</td></tr>
+<tr><td><code>Depth Normalise</code></td><td>0.05</td><td>Depth at which a lake reads as fully flooded. Fraction of world height.</td></tr>
+<tr><td><code>Shore Softness</code></td><td>0.15 (0..1)</td><td>Softness of the shoreline edge in the Lake Mask.</td></tr>
 </tbody>
 </table></div>
-<p>Lakes and outlets are counted as a <strong>fraction of chunks</strong>, not as fixed numbers, because
-the number of basins a landscape supports scales with its area. At 8 % against 24 %, about
-one lake in three overflows into a river: a 5×5 world gets 6 lakes and 2 outlets, a 10×10
-world gets 24 lakes and 8 outlets.</p>
-<p><strong>Nothing here is random.</strong> Placement is read out of the landscape:</p>
+<p>Lakes and outlets are counted as a <strong>fraction of chunks</strong> rather than as fixed numbers because the number of basins a landscape supports scales with its area. At 8&nbsp;% against 24&nbsp;%, about one lake in 3 overflows into a river: a 5&times;5 world gets 6 lakes and 2 outlets, a 10&times;10 world gets 24 lakes and 8 outlets.</p>
+<h5 id="hydro-derivation">Nothing here is random &mdash; where each body comes from</h5>
+<p>Not one random number is drawn. Placement is read out of the landscape:</p>
 <ul>
-<li><strong>Lakes</strong> go in genuine low basins. Candidates are sampled on a grid and scored by how enclosed each one is — how many bearings rise above it, and by how much — then the lowest-lying qualifying basins are taken first with an exclusion radius around each pick so two lakes do not land in one valley. **Both the shape and the size of each lake are then read off the ground, and neither is chosen** — see <a href="#how-a-lake-gets-its-shape-and-its-size">How a lake gets its shape and its size</a>.</li>
-<li><strong>Rivers</strong> come out of a real drainage solve over the whole world at once (<code>RiverNetworkPlanner</code>): sample the settled terrain to a grid in metres → **priority-flood fill<strong> every closed depression to its spill elevation → </strong>D8<strong> steepest-descent → </strong>flow accumulation**. A river <em>mouth</em> is a land cell that drains straight into standing water, and ranking mouths by accumulation gives the world's trunk rivers by definition: the biggest catchments end at the biggest mouths. The <em>source</em> is found by walking back up from the mouth, always taking the upstream neighbour contributing the most water, until the contributing area falls below what a permanent channel needs — which is how a hydrologist names a river's source. The course is therefore continuous by construction, can never climb, and always ends in real water.</li>
+<li><strong>Lakes</strong> go in genuine low basins. Candidates are sampled on a grid and scored by how enclosed each one is &mdash; how many bearings rise above it, and by how much &mdash; then the lowest-lying qualifying basins are taken first, with an exclusion radius around each pick so two lakes do not land in one valley. Both the shape and the size of each lake are then read off the ground, and neither is chosen: see <a href="#how-a-lake-gets-its-shape-and-its-size">how a lake gets its shape and its size</a>.</li>
+<li><strong>Rivers</strong> come out of a real drainage solve over the whole world at once (<code>RiverNetworkPlanner</code>): sample the settled terrain to a grid in metres, priority-flood every closed depression to its spill elevation, D8 steepest descent, then flow accumulation. A river <em>mouth</em> is a land cell that drains straight into standing water, so ranking mouths by accumulation gives the world's trunk rivers by definition &mdash; the biggest catchments end at the biggest mouths. The <em>source</em> is found by walking back up from the mouth, always taking the upstream neighbour contributing the most water, until the contributing area falls below what a permanent channel needs, which is how a hydrologist names a river's source. The course is therefore continuous by construction, can never climb, and always ends in real water.</li>
 <li><strong>Lake outlets</strong> are the same reasoning from the other end. A lake with an inflow and no outflow is a sink, not a lake; a real one overflows at its lowest rim point, and the fill step has already found that point, because the elevation it raised the basin to <em>is</em> its spill elevation. No search needed.</li>
-<li><strong>Size</strong> follows hydraulic geometry, not taste. A trunk measures 40–80 m wide, tributaries scale below that by catchment, width-to-depth is ~18:1, the last 15 % of the course flares ×2.2 as an estuary, and a delta is only earned at Strahler order ≥ 2 — that is, where two comparable branches actually join.</li>
 </ul>
-<p>Ordering inside one spawn matters and is deliberate: <strong>ocean, then lakes, then rivers.</strong> A
-river's downstream end has to join real water, and <code>UCWaterBody</code> auto-connect scans the live
-scene, so the sea and the lakes must already exist or the course ends in mid-air.</p>
-<p>Not one random number is drawn in the planner. The same terrain plans the same rivers every
-time, which is what lets a hand-edited course survive a Regenerate. See
-<a href="#30-the-water-body-inspector">chapter 30</a> for the bodies it produces and
-<a href="#31-runtime-component-inspectors">chapter 31</a> for the <code>Source</code> switch that can veto it.</p>
+<p>The same terrain therefore plans the same rivers and the same lakes every time, which is what lets a hand-edited course survive a Regenerate.</p>
+<h5 id="hydro-size">How wide a river comes out</h5>
+<p>Size follows hydraulic geometry, not taste. Leopold and Maddock (1953) measured bankfull width against discharge across real river systems and found width scaling as about the square root of discharge; Hack's law puts discharge at about the 0.8 power of drainage area. Composed, that gives the exponent this system uses: <strong>width &prop; area<sup>0.4</sup></strong>, clamped to <strong>4&ndash;80 m</strong>.</p>
+<p>So a channel is 4 m wide where it first qualifies as one and grows towards 80 m as its catchment grows, each reach graded by the area actually draining through it rather than by its rank in a list. A <em>trunk</em> &mdash; a course that joins no other &mdash; is floored at 40 m, so the rivers the node count asks for measure inside the 40&ndash;80 m band while their tributaries stay honestly smaller. This is the correction to earlier editions, which gave the trunk band alone and left the impression that every river was one of two sizes.</p>
+<p>Downstream of that: width-to-depth runs at about <strong>18:1</strong>, which is the alluvial-channel figure; the last <strong>15&nbsp;%</strong> of a course behaves as its estuary and flares <strong>&times;2.2</strong>; a delta is earned rather than configured, at Strahler order <strong>2</strong> or above &mdash; that is, where two comparable branches actually join; a delta's arms together measure <strong>1.4&times;</strong> the trunk they split from.</p>
+<p>The mask and the object are stamped at the same widths from the same solve, which is the whole reason <code>River Mask</code> is worth wiring into <code>River Carve</code>: the trench is cut to the width of the river that will sit in it. A mask narrower than its river leaves water standing over an uncarved bank; a mask wider leaves a dry trench beside the water.</p>
+<h5 id="hydro-headarea">Channel head area on a small world</h5>
+<p>Below roughly a quarter of a square kilometre of temperate hillside, runoff is sheet flow and gullies that only run after rain &mdash; not a permanent watercourse. That is why the default is the real-world figure. It is also why a small test world used to trace no channels at all: no catchment anywhere on it was that large, so no mouth qualified, no course was planned, and the graph carved nothing.</p>
+<p><code>RiverNetworkPlanner.ResolveChannelHeadArea</code> now measures the threshold against the world it is actually given:</p>
+<ul>
+<li>Wherever the terrain holds a catchment large enough to afford the authored value, <strong>the authored value stands unchanged</strong>.</li>
+<li>Where it does not, the threshold drops to that world's own largest drainage divided by the trunk multiple (4).</li>
+<li>It is floored at one lattice cell, so a threshold finer than the grid cannot paint the whole world wet.</li>
+</ul>
+<p>Drainage networks are scale-invariant, so the rescaled figure describes the same channel hierarchy at a smaller size rather than approximating it. <strong>Do not lower this field by hand for a small world.</strong> Earlier editions of this manual told you to; that advice is now wrong, and lowering it below what the terrain needs only widens the network.</p>
+<h5 id="hydro-datum">Sea level without an ocean</h5>
+<p><code>Sea Level</code> is a datum, not a mesh. The River Mask ends every course at it and the Lake Mask refuses to flood at or below it, and both of those are true whether or not a sea object exists. With <code>Generate Ocean</code> off, the object side reads that same elevation &mdash; the world origin plus <code>Sea Level</code> &times; the world's maximum height &mdash; so the masks and the spawned bodies agree about where the water stops.</p>
+<p>Previously the no-ocean case had no waterline at all while the masks went on using the field. The graph stopped marking water at that elevation and <code>River Carve</code> stopped digging there, while the spawner carried river objects on down into ground that had never been cut for them and dropped lakes into basins the mask had left dry: two descriptions of one world, disagreeing.</p>
+<p>Where an ocean <em>is</em> placed the water is the truth and the field follows it &mdash; the settled surface is pushed back over every node holding a copy of the elevation, this one included. Editing the number while a sea stands will be overwritten on the next sync; move the ocean instead. See <a href="#sea-level">Sea Level</a> in the world inspector for the same datum from the other side.</p>
+<h5 id="hydro-supply">Why you can get fewer bodies than you asked for</h5>
+<p>The counts on this node are permission to look, not a promise to produce. Every candidate still has to be a real feature of the ground:</p>
+<ul>
+<li>A lake must be a genuine basin holding at least <strong>60 m&sup2;</strong> of water &mdash; a patch about eight metres across &mdash; and standing deeper than <code>Min Lake Depth</code>. A basin that fails either test is passed over rather than inflated into a puddle, and one that could hold more than 720 m&sup2; is filled to that and no further, because the water beyond it belongs to the ocean pass.</li>
+<li>A river must have a mouth that drains into standing water, and a catchment above it that clears the channel-head area.</li>
+<li>A delta needs <code>Enable Distributaries</code> on <em>and</em> a course that reaches the minimum Strahler order. <code>Max Distributaries</code> is an upper bound on the arms, not a request for them.</li>
+</ul>
+<p>Any shortfall is said out loud. A pass that places fewer lakes than it was asked for logs how many it placed, how many candidate basins were rejected, and which of the two tests they failed &mdash; because &ldquo;I asked for eight and got five&rdquo; is otherwise a mystery rather than a fact about the terrain.</p>
+<p><strong>A body that produced no surface is reported too.</strong> If a water body is built but raises no mesh, the pass warns, names the height its plane stands at, and <em>leaves the object in place</em> so its settings can be inspected. For a lake or the ocean that means no ground inside its footprint lies below that height, so there is no basin for the water to stand in; for a river it means the course was too short or too narrow to raise a mesh. This closes the case where water appeared to have been created and nothing was visible, with no message either way.</p>
+<h5 id="hydro-order">Ordering, and the two gates outside the graph</h5>
+<p>Spawning <code>GameObject</code>s cannot happen on a worker thread, so the masks are solved during graph evaluation and the matching <code>UCWaterBody</code> objects are placed on the main thread <em>after the terrain has settled</em>, through <code>ChunkManager.RunAfterSettle</code>. Inside that one pass the order is deliberate and fixed: <strong>ocean, then lakes, then rivers.</strong> A river's downstream end has to join real water and <code>UCWaterBody</code> auto-connect scans the live scene, so the sea and the lakes must already exist or the course ends in mid-air.</p>
+<p>Two gates sit outside the graph, both open by default, and both are worth checking when the wiring is right and nothing appears:</p>
+<ul>
+<li><code>UCWaterSystemManager.Source</code> must include the node graph. The default is <strong>Both</strong>, which does. Set to <code>Hand Placed</code> it ignores this node entirely &mdash; and now says so in the console rather than failing silently.</li>
+<li>The terrain must actually settle. The spawn is queued behind <code>RunAfterSettle</code>, so a build that is still streaming has not reached it yet.</li>
+</ul>
+<p>See <a href="#30-the-water-body-inspector">chapter 30</a> for the bodies this produces and <a href="#31-runtime-component-inspectors">chapter 31</a> for the <code>Source</code> switch that can veto it.</p>
+
 <h4 id="spot-brush" data-title="Spot Brush">Spot Brush</h4>
 <p>Hand-placed height stamps at explicit world positions — for when procedural is right
 everywhere except one place.</p>
@@ -3088,7 +3117,7 @@ tiling it, so the DEM lands exactly where it should.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 16 of 49</span>
+<div class="pagehead"><span class="of">Page 16 of 48</span>
 <h2 id="15-modifier-nodes" data-title="Modifier nodes"><span class="sect">Section 15</span>Modifier nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -3503,7 +3532,7 @@ sediment settles — which is where it grows in reality.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 17 of 49</span>
+<div class="pagehead"><span class="of">Page 17 of 48</span>
 <h2 id="16-selector-nodes" data-title="Selector nodes"><span class="sect">Section 16</span>Selector nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -3518,7 +3547,7 @@ sediment settles — which is where it grows in reality.</p>
 <li><a href="#texture-import-mask" class="sub"><span class="n"></span> Texture Import Mask</a></li>
 <li><a href="#composite-filter" class="sub"><span class="n"></span> Composite Filter</a></li>
 <li><a href="#hydrology-selectors"><span class="n"></span> Hydrology selectors</a></li>
-<li><a href="#read-this-first-the-water-family-is-nine-nodes-in-three-graphs-worth-of-jobs" class="sub"><span class="n"></span> Read this first: the water family is nine nodes, in three graphs' worth of jobs</a></li>
+<li><a href="#read-this-first-the-water-family-is-ten-nodes-in-three-graphs-worth-of-jobs" class="sub"><span class="n"></span> Read this first: the water family is ten nodes, in three graphs' worth of jobs</a></li>
 <li><a href="#the-shared-drainage-solve" class="sub"><span class="n"></span> The shared drainage solve</a></li>
 <li><a href="#how-to-read-the-port-tables-below" class="sub"><span class="n"></span> How to read the port tables below</a></li>
 <li><a href="#ocean-level" class="sub"><span class="n"></span> Ocean Level</a></li>
@@ -3639,8 +3668,8 @@ and three combiners.</p>
 </table></div>
 <p>The standard vegetation gate: height 200–1400 m, slope 0–28°, all combined. One node.</p>
 <h3 id="hydrology-selectors" data-title="Hydrology selectors">Hydrology selectors</h3>
-<h4 id="read-this-first-the-water-family-is-nine-nodes-in-three-graphs-worth-of-jobs" data-title="Read this first: the water family is nine nodes, in three graphs' worth of jobs">Read this first: the water family is nine nodes, in three graphs' worth of jobs</h4>
-<p>Water is not one node and it is not one chain. Nine nodes touch water, they live in three
+<h4 id="read-this-first-the-water-family-is-ten-nodes-in-three-graphs-worth-of-jobs" data-title="Read this first: the water family is ten nodes, in three graphs' worth of jobs">Read this first: the water family is ten nodes, in three graphs' worth of jobs</h4>
+<p>Water is not one node and it is not one chain. Ten nodes touch water, they live in three
 different categories, and they do three different jobs. Wiring one and expecting water is the
 single most common mistake, so here is the whole family on one page before the detail.</p>
 <div class="tablewrap"><table>
@@ -3889,7 +3918,7 @@ texturing, never for rivers.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 18 of 49</span>
+<div class="pagehead"><span class="of">Page 18 of 48</span>
 <h2 id="17-combiner-nodes" data-title="Combiner nodes"><span class="sect">Section 17</span>Combiner nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -3938,7 +3967,7 @@ meet, or the seam reads as a fold.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 19 of 49</span>
+<div class="pagehead"><span class="of">Page 19 of 48</span>
 <h2 id="18-climate-and-biome-nodes" data-title="Climate and biome nodes"><span class="sect">Section 18</span>Climate and biome nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4103,7 +4132,7 @@ texturing and planting.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 20 of 49</span>
+<div class="pagehead"><span class="of">Page 20 of 48</span>
 <h2 id="19-scatter-nodes" data-title="Scatter nodes"><span class="sect">Section 19</span>Scatter nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4314,7 +4343,7 @@ uniformly.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 21 of 49</span>
+<div class="pagehead"><span class="of">Page 21 of 48</span>
 <h2 id="20-utility-nodes" data-title="Utility nodes"><span class="sect">Section 20</span>Utility nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4358,7 +4387,7 @@ immediately.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 22 of 49</span>
+<div class="pagehead"><span class="of">Page 22 of 48</span>
 <h2 id="21-output-nodes" data-title="Output nodes"><span class="sect">Section 21</span>Output nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4452,10 +4481,10 @@ those same components, and (b) <code>Ocean Level</code>, <code>River Carve</code
 <code>Water Bank Seat</code>, which shape the <strong>ground</strong> the water sits in.</p>
 <p><strong>So how does water appear, if nothing outputs it?</strong> Two things, and they are the whole
 answer. First: a <code>Hydrology Spawner</code> must be <strong>wired through to one of the Output nodes
-above</strong> — any of them, by any path. Its own outputs are zero-filled and change nothing
-downstream, but the graph decides what to execute by walking backwards from every Output,
-so an unwired spawner is unreachable and is never run at all. The wire is not carrying
-data; it is granting permission. Second: the water's <em>material</em> comes from the Texture
+above</strong> — any of them, by any path. Its outputs carry the procedural lake and river masks,
+but the graph still decides what to execute by walking backwards from every Output, so an
+unwired spawner is unreachable and is never run at all. The wire both carries data and grants
+permission. Second: the water's <em>material</em> comes from the Texture
 Graph, through <code>Terrain Blend Final</code>'s <code>Water</code> input into <code>Shader Output</code>. Neither half
 produces visible water without the other. The full procedure, with a checklist, is
 <a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired">How water is built end to end</a>;
@@ -4472,7 +4501,7 @@ see also <a href="#30-the-water-body-inspector">chapter 30</a> and
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 23 of 49</span>
+<div class="pagehead"><span class="of">Page 23 of 48</span>
 <h2 id="22-the-texture-graph-window" data-title="The Texture Graph window"><span class="sect">Section 22</span>The Texture Graph window</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4547,7 +4576,7 @@ always the second-to-last node and <code>Shader Output</code> always the last.</
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 24 of 49</span>
+<div class="pagehead"><span class="of">Page 24 of 48</span>
 <h2 id="23-layer-and-texturing-nodes" data-title="Layer and texturing nodes"><span class="sect">Section 23</span>Layer and texturing nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4667,7 +4696,7 @@ shimmer, so fading it out is both cheaper and cleaner.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 25 of 49</span>
+<div class="pagehead"><span class="of">Page 25 of 48</span>
 <h2 id="24-surface-feature-and-pbr-nodes" data-title="Surface feature and PBR nodes"><span class="sect">Section 24</span>Surface feature and PBR nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4776,7 +4805,7 @@ that would also grade the sky, the characters and the UI.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 26 of 49</span>
+<div class="pagehead"><span class="of">Page 26 of 48</span>
 <h2 id="25-environment-nodes" data-title="Environment nodes"><span class="sect">Section 25</span>Environment nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -4888,7 +4917,7 @@ season the same way the ground does.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 27 of 49</span>
+<div class="pagehead"><span class="of">Page 27 of 48</span>
 <h2 id="26-water-appearance-nodes" data-title="Water appearance nodes"><span class="sect">Section 26</span>Water appearance nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -5020,7 +5049,7 @@ what it is imitating.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 28 of 49</span>
+<div class="pagehead"><span class="of">Page 28 of 48</span>
 <h2 id="27-texture-utility-nodes" data-title="Texture utility nodes"><span class="sect">Section 27</span>Texture utility nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -5095,7 +5124,7 @@ textures you do not have.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 29 of 49</span>
+<div class="pagehead"><span class="of">Page 29 of 48</span>
 <h2 id="28-texture-graph-output-nodes" data-title="Texture Graph output nodes"><span class="sect">Section 28</span>Texture Graph output nodes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -5140,7 +5169,7 @@ stored, so a project moved to another machine, or shipped to a customer, resolve
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 30 of 49</span>
+<div class="pagehead"><span class="of">Page 30 of 48</span>
 <h2 id="29-the-world-inspector" data-title="The World inspector"><span class="sect">Section 29</span>The World inspector</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -5343,7 +5372,7 @@ sections are foldouts, and their open/closed state persists: <code>Graph</code>,
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 31 of 49</span>
+<div class="pagehead"><span class="of">Page 31 of 48</span>
 <h2 id="30-the-water-body-inspector" data-title="The Water Body inspector"><span class="sect">Section 30</span>The Water Body inspector</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -5481,6 +5510,9 @@ lowering the floor below 60 m² starts reading heightmap noise as lakes.</p>
 <tr><td><code>Bank Profile</code></td><td>(1..6)</td><td>Cross-section shape. 1 is a V, 2 a U, higher approaches a box channel</td></tr>
 <tr><td><code>Enforce Downhill</code></td><td>on</td><td>Forces the water surface to descend monotonically along the course</td></tr>
 <tr><td><code>Profile Smoothing</code></td><td>(0..12)</td><td>Smoothing passes on the longitudinal profile</td></tr>
+<tr><td><code>Auto Hydraulic Geometry</code></td><td>on</td><td>Grows the channel from source to mouth by real-world hydraulic geometry when no per-node widths are set, and trades width for depth by valley confinement. See <a href="#downstream-hydraulic-geometry-how-a-river-grows">chapter 33</a></td></tr>
+<tr><td><code>Source Width Fraction</code></td><td>0.15 (0.02..1)</td><td>How narrow the head is as a fraction of the mouth width, when the growth law is filling in a flat width</td></tr>
+<tr><td><code>Valley Confinement Strength</code></td><td>0.6 (0..1)</td><td>How strongly a tight valley pinches the channel narrow-and-deep and an open plain spreads it wide-and-shallow, at constant flow area. 0 keeps a uniform channel</td></tr>
 </tbody>
 </table></div>
 <p>Buttons:</p>
@@ -5786,7 +5818,7 @@ safe, and it is the right way to get a clean rebuild.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 32 of 49</span>
+<div class="pagehead"><span class="of">Page 32 of 48</span>
 <h2 id="31-runtime-component-inspectors" data-title="Runtime component inspectors"><span class="sect">Section 31</span>Runtime component inspectors</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -6298,7 +6330,7 @@ shows a read-only <code>Active path</code> readout and, when it has fallen back,
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 33 of 49</span>
+<div class="pagehead"><span class="of">Page 33 of 48</span>
 <h2 id="32-windows-and-menus--every-window-and-every-command" data-title="Windows and menus — every window and every command"><span class="sect">Section 32</span>Windows and menus — every window and every command</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -6457,18 +6489,20 @@ a dialog</strong>, so they are safe in batch mode and in CI. See
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 34 of 49</span>
+<div class="pagehead"><span class="of">Page 34 of 48</span>
 <h2 id="33-water-authoring-physics-and-dynamics" data-title="Water authoring, physics and dynamics"><span class="sect">Section 33</span>Water authoring, physics and dynamics</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
 <li><a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired"><span class="n"></span> How water is built end to end: two chains, and both must be wired</a></li>
-<li><a href="#chain-1--where-the-water-is" class="sub"><span class="n"></span> Chain 1 — where the water is</a></li>
-<li><a href="#chain-2--what-the-water-looks-like" class="sub"><span class="n"></span> Chain 2 — what the water looks like</a></li>
+<li><a href="#chain-1--where-the-water-is" class="sub"><span class="n"></span> Chain 1 &mdash; where the water is</a></li>
+<li><a href="#chain-2--what-the-water-looks-like" class="sub"><span class="n"></span> Chain 2 &mdash; what the water looks like</a></li>
 <li><a href="#the-checklist" class="sub"><span class="n"></span> The checklist</a></li>
 <li><a href="#everything-you-can-still-do-by-hand-afterwards" class="sub"><span class="n"></span> Everything you can still do by hand, afterwards</a></li>
 <li><a href="#geometry"><span class="n"></span> Geometry</a></li>
+<li><a href="#downstream-hydraulic-geometry-how-a-river-grows"><span class="n"></span> Downstream hydraulic geometry: how a river grows</a></li>
 <li><a href="#flow-mannings-equation"><span class="n"></span> Flow: Manning's equation</a></li>
 <li><a href="#turbulence-the-froude-number"><span class="n"></span> Turbulence: the Froude number</a></li>
+<li><a href="#waterfalls-and-cascades"><span class="n"></span> Waterfalls and cascades</a></li>
 <li><a href="#drag-the-reynolds-number"><span class="n"></span> Drag: the Reynolds number</a></li>
 <li><a href="#density"><span class="n"></span> Density</a></li>
 <li><a href="#waves-and-ripples"><span class="n"></span> Waves and ripples</a></li>
@@ -6494,10 +6528,8 @@ regeneration. The two coexist freely: a spawned sea with three hand-placed ponds
 above it is normal, and the Water System's <code>Source</code> setting is what decides which of the two is
 live.</p>
 <h3 id="how-water-is-built-end-to-end-two-chains-and-both-must-be-wired" data-title="How water is built end to end: two chains, and both must be wired">How water is built end to end: two chains, and both must be wired</h3>
-<p>This is the procedure. If a <code>Hydrology Spawner</code> produced nothing, or a water body appeared but
-looks like untextured grey, the cause is almost always one of the wires below.</p>
-<p><strong>Water needs two independent chains, in two different graphs, and neither substitutes for the
-other.</strong></p>
+<p>This is the procedure. If a <code>Hydrology Spawner</code> produced nothing, or a water body appeared but looks like untextured grey, the cause is almost always one of the wires below.</p>
+<p><strong>Water needs two independent chains, in two different graphs, and neither substitutes for the other.</strong></p>
 <div class="tablewrap"><table>
 <thead><tr><th>Chain</th><th>Graph</th><th>Answers</th><th>Product</th></tr></thead>
 <tbody>
@@ -6505,107 +6537,79 @@ other.</strong></p>
 <tr><td><strong>What the water looks like</strong></td><td>Texture Graph</td><td>Colour, depth absorption, waves, foam, caustics</td><td>The <code>UC_WaterMaterial</code> those objects wear</td></tr>
 </tbody>
 </table></div>
-<p>Wire chain 1 only and you get water objects with no material: geometry that reads as flat grey.
-Wire chain 2 only and you get a material with nothing wearing it: a world with no water in it at
-all, and a perfectly tuned water shader sitting unused on disk. <strong>Both, every time.</strong></p>
-<h4 id="chain-1--where-the-water-is" data-title="Chain 1 — where the water is">Chain 1 — where the water is</h4>
-<p><strong>Step 1. Put a <code>Hydrology Spawner</code> in the terrain graph.</strong> It is under Creator nodes. This is
-the only node in the system that creates water objects. <code>River Carve</code>, <code>Lake Fill</code>, <code>River Fill</code>
-and <code>Ocean Level</code> do not create water — see
-<a href="#16-selector-nodes">chapter 16</a>.</p>
-<p><strong>Step 2. Wire one of its outputs through to an Output node.</strong> This is the step people skip, and
-skipping it is silent.</p>
-<p>The spawner's <code>Lake Mask</code> and <code>River Mask</code> come out <strong>zero-filled</strong>, so there is a natural
-instinct to leave them unconnected — the data is worthless, after all. But the graph does not
-decide what to run by looking at data; it decides by looking at <strong>reachability.</strong>
-<code>UCWaterSystemManager</code> collects every <code>Output</code> node in the graph, walks the wires <em>backwards</em>
-from each, and runs only the <code>Hydrology Spawner</code>s that walk reaches. A spawner whose outputs go
-nowhere is never reached, therefore never executed: no rivers, no lakes, no ocean, and <strong>no
-error message</strong>, because an unreachable node is a legitimate thing for a graph to contain.</p>
-<p>So the wire is the consent. Any path to any Output will do:</p>
-<pre data-lang="node graph"><code>Hydrology Spawner ──Lake Mask──▶ Height Output (Mask input)
-Hydrology Spawner ──Lake Mask──▶ Blend ──▶ … ──▶ Height Output
-Hydrology Spawner ──River Mask──▶ Biome Splat Output (a layer mask)
+<p>Wire chain 1 only and you get water objects with no material: geometry that reads as flat grey. Wire chain 2 only and you get a material with nothing wearing it: a world with no water in it at all, and a perfectly tuned water shader sitting unused on disk. <strong>Both, every time.</strong></p>
+<h4 id="chain-1--where-the-water-is" data-title="Chain 1 &mdash; where the water is">Chain 1 &mdash; where the water is</h4>
+<p><strong>Step 1. Decide who settles the counts.</strong> There are two ways to get procedural water, and you do not have to choose the first one:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>The graph holds</th><th>What happens</th><th>Where the numbers come from</th></tr></thead>
+<tbody>
+<tr><td>A wired <code>Hydrology Spawner</code></td><td>Rivers, lakes and ocean are placed</td><td><strong>The spawner's own fields.</strong> It is the authority whenever it is present</td></tr>
+<tr><td>No spawner, but <code>River Network Trace</code>, <code>River Fill</code>, <code>Lake Fill</code> or <code>Ocean Level</code> reaching an Output</td><td>The same kinds of water those nodes asked for are placed</td><td><strong>Native math.</strong> The counts are derived from the world's own size; everything that decides <em>where</em> the water goes is adopted from those very nodes</td></tr>
+<tr><td>Neither</td><td>The world stays dry</td><td>&mdash;</td></tr>
+</tbody>
+</table></div>
+<p><code>River Carve</code> and <code>Water Bank Seat</code> are deliberately not in that middle row. They shape ground for water decided somewhere else, so on their own they say nothing about whether a river exists &mdash; a carve fed by a hand-drawn mask must not conjure river objects you never asked for. Per-node detail is in <a href="#16-selector-nodes">chapter 16</a>; the full rule, including which field is adopted from which node, is under <a href="#hydro-activation">when the Hydrology Spawner runs</a>.</p>
+<p><strong>Step 2. Feed the spawner's <code>Height</code> input.</strong> This is the one wire it cannot do without. Without <code>Height</code> the node has no terrain to solve: both masks come back empty and there is nothing for it to place water on.</p>
+<p><strong>Step 3. Give it at least one wire &mdash; any wire, in either direction.</strong> A spawner connected to nothing at all is ignored, because a node dropped on the canvas and left alone has not been asked for anything and must not flood a world by its mere presence. Anything beyond that counts: <code>Height</code> in is enough on its own.</p>
+<p><strong>Its mask outputs do not have to reach an Output node.</strong> Earlier editions of this manual said they did, and that was the single most damaging sentence in the chapter. The spawner's product is not a matrix &mdash; it places river, lake and ocean <em>objects</em>, reading the finished ground straight off the terrains, and the graph is not in that path at all. <code>Lake Mask</code> and <code>River Mask</code> are a separate, optional service that lets the same drainage solve drive carving and splatting. Judged by those masks alone, a spawner fed a live height chain and asked for three rivers produced nothing &mdash; and there is no wiring that makes a river mask terminate in a <code>Height Output</code> on its own merits, so the node could never become live no matter how it was connected. That is the &quot;the ports do nothing when I connect them&quot; fault in one sentence, and it is fixed.</p>
+<p>So the wire is the consent, and any of these grants it:</p>
+<pre data-lang="node graph"><code>Height Source &#9472;&#9472;Height&#9472;&#9472;&#9654; Hydrology Spawner        (enough on its own)
+Hydrology Spawner &#9472;&#9472;Lake Mask&#9472;&#9472;&#9654; Lake Fill (Lake Mask)
+Hydrology Spawner &#9472;&#9472;River Mask&#9472;&#9472;&#9654; River Carve (River Mask)
+Hydrology Spawner &#9472;&#9472;River Mask&#9472;&#9472;&#9654; River Fill (River Mask)
 </code></pre>
-<p>The zero mask changes nothing downstream — it multiplies to nothing, blends to nothing — so
-wiring it into a live chain is harmless. Its only job is to be reachable.</p>
-<p><strong>Step 3. Shape the ground for it (recommended, not required).</strong> The spawner reads the <em>settled
-terrain</em> to decide where water goes, so a graph with river geometry already cut into it produces
-water that sits in real valleys:</p>
-<pre data-lang="node graph"><code>Noise ──▶ Hydraulic Erosion ──▶ River Network Trace ──River Mask──┐
-                       │                                          │
-                       └──Height──▶ River Carve ◀──River Mask─────┘
-                                        │
-                                        ├──Height──▶ River Fill ◀──River Mask (same trace)
-                                        │                 │
-                                        │      Water Level, Water Mask
-                                        │                 ▼
-                                        └──Height──▶ Water Bank Seat ──Height──▶ Height Output
+<p>The masks are <strong>real procedural masks</strong>, not zero-filled reachability tokens: they describe the same basins and courses the spawned bodies are built from, at the widths those rivers will actually be, so the trench the height chain digs is the trench the river object sits in. Wire them when you want that shaping; leave them free when you do not.</p>
+<p><strong>Step 4. Shape the ground for it (recommended, not required).</strong> The spawner reads the <em>settled terrain</em> to decide where water goes, so a graph with river geometry already cut into it produces water that sits in real valleys:</p>
+<pre data-lang="node graph"><code>Noise &#9472;&#9472;&#9654; Hydraulic Erosion &#9472;&#9472;&#9654; River Network Trace &#9472;&#9472;River Mask&#9472;&#9472;&#9488;
+                       &#9474;                                          &#9474;
+                       &#9492;&#9472;&#9472;Height&#9472;&#9472;&#9654; River Carve &#9664;&#9472;&#9472;River Mask&#9472;&#9472;&#9472;&#9472;&#9472;&#9496;
+                                        &#9474;
+                                        &#9500;&#9472;&#9472;Height&#9472;&#9472;&#9654; River Fill &#9664;&#9472;&#9472;River Mask (same trace)
+                                        &#9474;                 &#9474;
+                                        &#9474;      Water Level, Water Mask
+                                        &#9474;                 &#9660;
+                                        &#9492;&#9472;&#9472;Height&#9472;&#9472;&#9654; Water Bank Seat &#9472;&#9472;Height&#9472;&#9472;&#9654; Height Output
 </code></pre>
-<p>Add <code>Lake Fill</code> → a second <code>Water Bank Seat</code> for lakes, and <code>World Edge Falloff</code> →
-<code>Underwater Terrain Extend</code> if the world has a coast. Set every <code>Sea Level</code> in the graph to the
-same number.</p>
-<p><strong>Step 4. Check the Water System's <code>Source</code>.</strong> On the world's <code>UCWaterSystemManager</code>, <code>Source</code>
-must include the node graph. The default is <strong>Both</strong>, which does — so this is a check, not a
-step. Set to <code>Hand Placed</code>, it ignores the spawner completely.</p>
-<p><strong>Step 5. Let the terrain settle.</strong> The spawn is deliberately deferred: <code>UniverseCreatorObject</code>
-queues it behind <code>ChunkManager.RunAfterSettle</code>, because at graph-evaluation time the terrain is
-still the flat baseline, and spawning then traced every river across a plane and stacked every
-lake at one height. So water appears <strong>after</strong> the ground stops moving, not with it. On a large
-world that is a visible pause. It is not a hang.</p>
-<h4 id="chain-2--what-the-water-looks-like" data-title="Chain 2 — what the water looks like">Chain 2 — what the water looks like</h4>
-<p><strong>Step 6. Build the appearance chain in the Texture Graph.</strong></p>
-<pre data-lang="node graph"><code>Water Surface ──Water──▶ [Water Foam] ──Water──▶ [Caustics] ──Water──▶ Terrain Blend Final
+<p>Add <code>Lake Fill</code> &rarr; a second <code>Water Bank Seat</code> for lakes, and <code>World Edge Falloff</code> &rarr; <code>Underwater Terrain Extend</code> if the world has a coast. Set every <code>Sea Level</code> in the graph to the same number &mdash; and note that if this chain is all you build, with no spawner anywhere, it is still a world with rivers in it: <code>River Network Trace</code> in that graph is exactly the middle row of the table in step 1.</p>
+<p><strong>Step 5. Check the Water System's <code>Source</code>.</strong> On the world's <code>UCWaterSystemManager</code>, <code>Source</code> must include the node graph. The default is <strong>Both</strong>, which does &mdash; so this is a check, not a step. Set to <code>Hand Placed</code>, it ignores the graph completely and says so in the console rather than leaving you to wonder.</p>
+<p><strong>Step 6. Let the terrain settle.</strong> The spawn is deliberately deferred: <code>UniverseCreatorObject</code> queues it behind <code>ChunkManager.RunAfterSettle</code>, because at graph-evaluation time the terrain is still the flat baseline, and spawning then traced every river across a plane and stacked every lake at one height. So water appears <strong>after</strong> the ground stops moving, not with it. On a large world that is a visible pause. It is not a hang.</p>
+<h4 id="chain-2--what-the-water-looks-like" data-title="Chain 2 &mdash; what the water looks like">Chain 2 &mdash; what the water looks like</h4>
+<p><strong>Step 7. Build the appearance chain in the Texture Graph.</strong></p>
+<pre data-lang="node graph"><code>Water Surface &#9472;&#9472;Water&#9472;&#9472;&#9654; [Water Foam] &#9472;&#9472;Water&#9472;&#9472;&#9654; [Caustics] &#9472;&#9472;Water&#9472;&#9472;&#9654; Terrain Blend Final
                                                                         (its Water input)
-                                                                              │
-                                                                       Surface ▼
-                                                                        Shader Output
+                                                                              &#9474;
+                                                                 Surface &#9660;
+                                                                         Shader Output
 </code></pre>
-<p><code>Water Surface</code> alone is sufficient; foam and caustics are optional additions that must sit
-<strong>inside</strong> the chain rather than beside it. Full port detail is in
-<a href="#26-water-appearance-nodes">chapter 26</a>.</p>
-<p><strong>Step 7. Wire <code>Terrain Blend Final</code>'s <code>Water</code> input.</strong> This is chain 2's equivalent of step 2,
-and it fails the same silent way. Nothing in the Texture Graph reaches a material except through
-<code>Terrain Blend Final</code> → <code>Shader Output</code>. With the <code>Water</code> input empty, <code>Shader Output</code> produces a
-terrain material and <strong>no water material</strong> — and again, no error, because a graph that
-deliberately describes a dry world is legitimate. The material builder returns &quot;no water
-material&quot; for that world and moves on.</p>
-<p><strong>Step 8. Generate.</strong> On generation the material builder reads the water description off
-<code>Shader Output</code>, creates or updates <code>UC_WaterMaterial</code>, and hands it to every <code>UCWaterBody</code> in
-the world — spawned and hand-placed alike. It also <strong>force-enables the URP depth texture and
-opaque texture</strong> on the active renderer, because the water shader samples both: without the
-depth texture there is no shoreline fade and no foam, and without the opaque texture there is no
-refraction. Water rendered without them is a flat sheet of deep colour — recognisable, and the
-reason that switch is not left to the user to remember.</p>
+<p><code>Water Surface</code> alone is sufficient; foam and caustics are optional additions that must sit <strong>inside</strong> the chain rather than beside it. Full port detail is in <a href="#26-water-appearance-nodes">chapter 26</a>.</p>
+<p><strong>Step 8. Wire <code>Terrain Blend Final</code>'s <code>Water</code> input.</strong> This is chain 2's equivalent of step 3, and it fails the same silent way. Nothing in the Texture Graph reaches a material except through <code>Terrain Blend Final</code> &rarr; <code>Shader Output</code>. With the <code>Water</code> input empty, <code>Shader Output</code> produces a terrain material and <strong>no water material</strong> &mdash; and again, no error, because a graph that deliberately describes a dry world is legitimate. The material builder returns &quot;no water material&quot; for that world and moves on.</p>
+<p><strong>Step 9. Generate.</strong> On generation the material builder reads the water description off <code>Shader Output</code>, creates or updates <code>UC_WaterMaterial</code>, and hands it to every <code>UCWaterBody</code> in the world &mdash; spawned and hand-placed alike. It also <strong>force-enables the URP depth texture and opaque texture</strong> on the active renderer, because the water shader samples both: without the depth texture there is no shoreline fade and no foam, and without the opaque texture there is no refraction. Water rendered without them is a flat sheet of deep colour &mdash; recognisable, and the reason that switch is not left to the user to remember.</p>
 <h4 id="the-checklist" data-title="The checklist">The checklist</h4>
-<p>Run down this list before changing any field. Every line is a wire or a setting, and every one
-of them fails silently.</p>
+<p>Run down this list before changing any field. Every line is a wire or a setting, and every one of them fails quietly.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>#</th><th>Check</th><th>If it is wrong you see</th></tr></thead>
 <tbody>
-<tr><td>1</td><td>A <code>Hydrology Spawner</code> exists in the terrain graph</td><td>No water at all</td></tr>
-<tr><td>2</td><td>One of its outputs reaches an <code>Output</code> node, through any path</td><td>No water at all, no error</td></tr>
-<tr><td>3</td><td><code>Generate Ocean</code> is on, if you want a sea</td><td>Land-locked world, rivers ending nowhere</td></tr>
-<tr><td>4</td><td><code>Target River Count</code> / <code>Lake Chunk Percentage</code> are above zero</td><td>The kind you set to zero is missing</td></tr>
-<tr><td>5</td><td><code>UCWaterSystemManager.Source</code> includes the node graph</td><td>No procedural water; hand-placed still works</td></tr>
-<tr><td>6</td><td>The build has finished settling</td><td>Water appears late; looks like nothing happened</td></tr>
-<tr><td>7</td><td>A <code>Water Surface</code> node exists in the Texture Graph</td><td>Water objects with no material: flat grey</td></tr>
-<tr><td>8</td><td>Its chain reaches <code>Terrain Blend Final</code>'s <code>Water</code> input</td><td>Same: flat grey water</td></tr>
-<tr><td>9</td><td><code>Terrain Blend Final</code> reaches <code>Shader Output</code></td><td>No materials at all, terrain included</td></tr>
-<tr><td>10</td><td>Optional foam/caustics nodes are wired <strong>both</strong> in and out</td><td>They are simply absent, silently</td></tr>
-<tr><td>11</td><td>Every <code>Sea Level</code> in the terrain graph is the same number</td><td>Beaches at the wrong height; lake surfaces above their own coastline</td></tr>
-<tr><td>12</td><td><code>River Carve</code> and <code>River Fill</code> share one <code>Bank Width</code></td><td>Waterline in the wrong place across the channel</td></tr>
+<tr><td>1</td><td>A <code>Hydrology Spawner</code> exists in the terrain graph, <em>or</em> a <code>River Network Trace</code>, <code>River Fill</code>, <code>Lake Fill</code> or <code>Ocean Level</code> reaches an Output</td><td>No water at all. With neither, the world is dry by request</td></tr>
+<tr><td>2</td><td>The spawner&rsquo;s <code>Height</code> input is fed</td><td>Both masks empty, and nothing for the spawner to place water on</td></tr>
+<tr><td>3</td><td>The spawner has at least one wire, in or out</td><td>The spawner is ignored. If a water node still reaches an Output you get water, but with <em>native</em> counts, not the ones you typed</td></tr>
+<tr><td>4</td><td><code>Generate Ocean</code> is on, if you want a sea</td><td>Land-locked world, rivers ending nowhere</td></tr>
+<tr><td>5</td><td><code>Target River Count</code> and <code>Lake Chunk Percentage</code> are above zero</td><td>The kind you set to zero is missing. A typed <code>Target Lake Count</code> is an instruction, not a ceiling, and is no longer clamped down by the percentage</td></tr>
+<tr><td>6</td><td><code>UCWaterSystemManager.Source</code> includes the node graph</td><td>No procedural water; hand-placed still works, and the console says which setting vetoed it</td></tr>
+<tr><td>7</td><td>The build has finished settling</td><td>Water appears late; looks like nothing happened</td></tr>
+<tr><td>8</td><td>A <code>Water Surface</code> node exists in the Texture Graph</td><td>Water objects with no material: flat grey</td></tr>
+<tr><td>9</td><td>Its chain reaches <code>Terrain Blend Final</code>&rsquo;s <code>Water</code> input</td><td>Same: flat grey water</td></tr>
+<tr><td>10</td><td><code>Terrain Blend Final</code> reaches <code>Shader Output</code></td><td>No materials at all, terrain included</td></tr>
+<tr><td>11</td><td>Optional foam/caustics nodes are wired <strong>both</strong> in and out</td><td>They are simply absent, silently</td></tr>
+<tr><td>12</td><td>Every <code>Sea Level</code> in the terrain graph is the same number</td><td>Beaches at the wrong height; lake surfaces above their own coastline</td></tr>
+<tr><td>13</td><td><code>River Carve</code> and <code>River Fill</code> share one <code>Bank Width</code></td><td>Waterline in the wrong place across the channel</td></tr>
+<tr><td>14</td><td><code>Channel Head Area</code> is left at its default</td><td>Nothing &mdash; and that is the point. It rescales itself to the world it is given, so lowering it by hand for a small world now paints channels the terrain cannot support</td></tr>
 </tbody>
 </table></div>
+<p>On row 14, the authored figure is <strong>250000 m&sup2;</strong> of catchment &mdash; about a quarter of a square kilometre, which is roughly what a temperate hillside has to drain before its runoff stops being sheet flow and becomes a permanent watercourse. That number stands wherever the terrain can afford it and drops to the world's own largest drainage where it cannot.</p>
 <h4 id="everything-you-can-still-do-by-hand-afterwards" data-title="Everything you can still do by hand, afterwards">Everything you can still do by hand, afterwards</h4>
-<p>Procedural does not mean untouchable. A spawned body is an ordinary <code>UCWaterBody</code>: select it and
-every field in <a href="#30-the-water-body-inspector">chapter 30</a> is editable. Redraw a generated river's
-course node by node, then press <code>Save Placement</code> and the edit survives the next regeneration. Add
-three hand-placed ponds above a spawned sea and both coexist. The <code>Source</code> setting decides which
-route is live, not which route is allowed.</p>
-<p>If something on this list is right and water is still missing, go to
-<a href="#38-debugging-and-troubleshooting">chapter 38</a> — the two entries on a spawner that produced
-nothing and a body with no material carry the narrower diagnoses.</p>
+<p>Procedural does not mean untouchable. A spawned body is an ordinary <code>UCWaterBody</code>: select it and every field in <a href="#30-the-water-body-inspector">chapter 30</a> is editable. Redraw a generated river's course node by node, then press <code>Save Placement</code> and the edit survives the next regeneration. Add three hand-placed ponds above a spawned sea and both coexist. The <code>Source</code> setting decides which route is live, not which route is allowed.</p>
+<p>If something on this list is right and water is still missing, go to <a href="#38-debugging-and-troubleshooting">chapter 38</a> &mdash; the two entries on a spawner that produced nothing and a body with no material carry the narrower diagnoses.</p>
+
 <h3 id="geometry" data-title="Geometry">Geometry</h3>
 <p>A <strong>level body</strong> — ocean, lake, pool — is a horizontal surface bounded by an outline
 polygon, sampled against the terrain so that it only exists where the ground is below it.
@@ -6615,6 +6619,33 @@ and <code>Point Spacing Metres</code> along.</p>
 at the world root — <strong>not</strong> parented to a chunk, because a lake spanning four chunks belongs
 to none of them. Both carry <code>HideFlags.DontSave</code>: they are rebuilt, never saved into the
 scene file.</p>
+<h3 id="downstream-hydraulic-geometry-how-a-river-grows" data-title="Downstream hydraulic geometry: how a river grows">Downstream hydraulic geometry: how a river grows</h3>
+<p>A real river is a thread at its spring and broad at its mouth, because every tributary and
+every hillside it passes adds to the water it carries. A course body reproduces this
+<strong>on its own</strong> — you do not widen it by hand and you do not type a number per node.
+With <code>Auto Hydraulic Geometry</code> on (the default), width is set from the land the reach has
+gathered, following downstream hydraulic geometry (Leopold &amp; Maddock, 1953):</p>
+<pre data-lang="formula"><code>w ∝ Q^0.5     width against discharge
+Q ∝ A^0.8     discharge against contributing area
+∴ w ∝ A^0.4   width against the land drained
+</code></pre>
+<p>For a hand-drawn river there is no drainage grid to read, so arc length from the source stands
+in for the land gathered — a monotone, source-to-mouth proxy, which is the property that matters.
+The width eases from a narrow head, <code>Source Width Fraction</code> of the mouth width (0.15 by
+default), up to the full width at the mouth. A river whose per-node widths you <em>have</em> set is
+left exactly as authored — the automatic growth fills in for silence, it never overrides intent.</p>
+<p>Width alone is not the whole channel. The same discharge that fixes the <strong>flow area</strong>
+(width × depth) is squeezed into a different shape by the land around it: a tight valley forces the
+water narrow and deep, an open plain lets it spread wide and shallow. <code>Valley Confinement
+Strength</code> controls how strongly UC reads this. At each station the ground rising away from the
+channel across the flow is sampled; the aspect ratio then swings about the base 18:1 while
+<strong>holding the flow area constant</strong>, so no water is invented or lost:</p>
+<pre data-lang="formula"><code>ratio = 18 · span^(±strength)     width = √(area · ratio)     depth = area / width
+</code></pre>
+<p>So there is a place a river widens as it grows, and a place it pinches narrow and cuts deep as
+the walls close in — the gorge-and-plain behaviour asked of a real river, with no per-location
+authoring. Set <code>Valley Confinement Strength</code> to zero to keep a uniform channel and let
+only the downstream growth act.</p>
 <h3 id="flow-mannings-equation" data-title="Flow: Manning's equation">Flow: Manning's equation</h3>
 <p>Flow speed is computed from the <strong>water-surface slope</strong>, not the bed slope, using Manning's
 open-channel equation:</p>
@@ -6656,6 +6687,24 @@ river is glassy in its deep pools and white over its shallow rock bars <strong>w
 per-location authoring</strong> — depth <em>d</em> falls over the bar, <em>Fr</em> rises, and the foam appears.</p>
 <p>To get more whitewater, make the channel shallower or steeper; that is what does it in
 reality.</p>
+<h3 id="waterfalls-and-cascades" data-title="Waterfalls and cascades">Waterfalls and cascades</h3>
+<p>A waterfall is an <strong>elevation event</strong>, not a decoration, so UC grows one wherever a
+river genuinely crosses steep ground and grows none where it does not — with no marker node and
+nothing to place. After the course is solved, its <em>water surface</em> (not the raw ground: the
+smoothing and downhill passes have already erased the many small steps) is walked for reaches that
+plunge faster than <code>Waterfall Grade</code> (0.28, about 15.6°) and fall further than
+<code>Waterfall Min Drop</code> (1.5 m). Anything shallower is fast water or a riffle, and is left
+alone. Consecutive steep segments are <strong>merged into one fall</strong>, so a tall cascade is a
+single feature rather than a stack of short ones fighting over the same water.</p>
+<p>The intensity of the foam and spray at the foot is not chosen — it is read from the drop, through
+Torricelli's law for the speed water reaches at the bottom:</p>
+<pre data-lang="formula"><code>v = √(2 · g · H)          g = 9.81 m/s²,  H = the fall's drop
+</code></pre>
+<p>so a tall fall lands harder, aerates more and throws a higher spray column than a short one,
+automatically. The effect is self-driven and reversible: it appears when a river acquires a steep
+reach and removes itself when the ground beneath it changes so the reach is no longer steep. Foam
+is emitted into the same shared ripple field the rest of the water uses, so a fall's plunge pool
+sits in the surface rather than on top of it.</p>
 <h3 id="drag-the-reynolds-number" data-title="Drag: the Reynolds number">Drag: the Reynolds number</h3>
 <p>Drag on a body moving through water uses the Reynolds number to choose the correct
 skin-friction regime:</p>
@@ -6739,7 +6788,7 @@ volume only where the player can swim.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 35 of 49</span>
+<div class="pagehead"><span class="of">Page 35 of 48</span>
 <h2 id="34-vegetation-scatter-and-wind" data-title="Vegetation, scatter and wind"><span class="sect">Section 34</span>Vegetation, scatter and wind</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7363,7 +7412,7 @@ than thins, and truncation is visible as a sudden empty region.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 36 of 49</span>
+<div class="pagehead"><span class="of">Page 36 of 48</span>
 <h2 id="35-shaders-and-material-properties" data-title="Shaders and material properties"><span class="sect">Section 35</span>Shaders and material properties</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7519,7 +7568,7 @@ prototype.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 37 of 49</span>
+<div class="pagehead"><span class="of">Page 37 of 48</span>
 <h2 id="36-performance-and-mobile-budgets" data-title="Performance and mobile budgets"><span class="sect">Section 36</span>Performance and mobile budgets</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7588,7 +7637,7 @@ double the reported heightmap figure during generation, falling back afterwards.
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 38 of 49</span>
+<div class="pagehead"><span class="of">Page 38 of 48</span>
 <h2 id="37-recipes" data-title="Recipes"><span class="sect">Section 37</span>Recipes</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7714,7 +7763,7 @@ points, joining the mouth to a lake or sea — is in
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 39 of 49</span>
+<div class="pagehead"><span class="of">Page 39 of 48</span>
 <h2 id="38-debugging-and-troubleshooting" data-title="Debugging and troubleshooting"><span class="sect">Section 38</span>Debugging and troubleshooting</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7722,7 +7771,7 @@ points, joining the mouth to a lake or sea — is in
 <li><a href="#the-terrain-is-flat"><span class="n"></span> The terrain is flat</a></li>
 <li><a href="#the-terrain-is-spiky"><span class="n"></span> The terrain is spiky</a></li>
 <li><a href="#visible-seams-between-chunks"><span class="n"></span> Visible seams between chunks</a></li>
-<li><a href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span> The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error</a></li>
+<li><a href="#the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error"><span class="n"></span> The Hydrology Spawner produced nothing &mdash; no rivers, no lakes, no ocean, and no error</a></li>
 <li><a href="#a-water-body-exists-but-has-no-material--flat-untextured-grey"><span class="n"></span> A water body exists but has no material — flat untextured grey</a></li>
 <li><a href="#water-is-a-flat-opaque-sheet"><span class="n"></span> Water is a flat opaque sheet</a></li>
 <li><a href="#water-is-in-the-wrong-place"><span class="n"></span> Water is in the wrong place</a></li>
@@ -7777,27 +7826,22 @@ points, joining the mouth to a lake or sea — is in
 <li><strong>A node that is not a pure function of world position.</strong> Anything with per-chunk state will seam. Nodes in this system are stateless by design; a custom node that is not will show it here first.</li>
 </ol>
 <p>Turn on <strong><code>Show Slice Map</code></strong> on <code>ChunkManager</code> to see exactly which boundary is failing.</p>
-<h3 id="the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error" data-title="The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error">The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error</h3>
-<p><strong>Check the wire before anything else.</strong> The spawner is skipped entirely unless a path exists
-from one of its outputs, forwards through the graph, to an <code>Output</code> node. <code>UCWaterSystemManager</code>
-walks backwards from every Output and runs only the spawners it reaches, so a spawner sitting on
-the canvas with both <code>Lake Mask</code> and <code>River Mask</code> free is unreachable — and an unreachable node
-is a legitimate thing for a graph to contain, so nothing warns you.</p>
-<p>The confusing part is that both its outputs are <strong>zero-filled by design</strong>, which makes them look
-pointless to connect. They are: the wire carries nothing. It exists so the graph can see the node
-is in use. Wire either one into any live chain — a <code>Height Output</code>'s <code>Mask</code>, a <code>Blend</code>, a splat
-layer mask — and the zero multiplies away downstream while the node starts running.</p>
+<h3 id="the-hydrology-spawner-produced-nothing--no-rivers-no-lakes-no-ocean-and-no-error" data-title="The Hydrology Spawner produced nothing &mdash; no rivers, no lakes, no ocean, and no error">The Hydrology Spawner produced nothing &mdash; no rivers, no lakes, no ocean, and no error</h3>
+<p><strong>Check that it is wired to anything at all.</strong> One wire is the whole requirement, and it may be the <code>Height</code> input you already needed &mdash; a spawner with a live height chain is live. A spawner connected to nothing is skipped on purpose: an untouched node has not asked for water, and must not flood a world by sitting on the canvas.</p>
+<p><strong>If you are working from an older edition of this manual, stop here.</strong> It told you that one of the mask outputs had to reach an <code>Output</code> node. That is no longer true, and following it wasted a great deal of time: the masks are optional, and no wiring makes a river mask terminate in a <code>Height Output</code> on its own merits, so a correctly filled-in spawner could never come alive however carefully it was connected. Ignore that instruction.</p>
 <p>In order, the rest of the causes:</p>
 <ol>
-<li><strong>No path to an Output.</strong> As above. This is the overwhelming majority of cases.</li>
+<li><strong>The <code>Height</code> input is empty.</strong> The node has no terrain to solve, so both masks are blank and there is no ground to put water on. This is now the commonest cause.</li>
 <li><strong><code>Generate Ocean</code> off</strong> when the sea is what is missing. The world is then land-locked on purpose.</li>
-<li><strong><code>Target River Count</code> at 0</strong>, or <code>Lake Chunk Percentage</code> at 0 — the kind you zeroed is absent because you asked for none of it.</li>
-<li><strong><code>UCWaterSystemManager.Source</code> set to <code>Hand Placed</code>.</strong> The default is <code>Both</code>; on `Hand Placed` the manager ignores node-graph water completely, and hand-placed bodies keep working, which makes it look like water is fine and only the spawner is broken.</li>
+<li><strong><code>Target River Count</code> at 0</strong>, or <code>Lake Chunk Percentage</code> at 0 with <code>Target Lake Count</code> also 0 &mdash; the kind you zeroed is absent because you asked for none of it. A typed lake count on its own is enough: it is an instruction, not a ceiling the percentage may veto.</li>
+<li><strong><code>UCWaterSystemManager.Source</code> set to <code>Hand Placed</code>.</strong> The default is <code>Both</code>. On <code>Hand Placed</code> the manager ignores node-graph water completely while hand-placed bodies keep working, which makes it look as though water is fine and only the spawner is broken. It now writes a warning naming the setting instead of failing mute.</li>
 <li><strong>The build has not settled yet.</strong> The spawn is queued behind <code>ChunkManager.RunAfterSettle</code> on purpose: at graph-evaluation time the terrain is still the flat baseline, so spawning then would trace every river across a plane. On a large world the wait is visible. It is not a hang.</li>
-<li><strong>The world is too small for the thresholds.</strong> <code>Channel Head Area</code> defaults to 250,000 m² of catchment before a channel counts as a river. A 600 m test world may not contain a catchment that large anywhere, and comes out riverless with nothing wrong. Lower the threshold, or build a bigger world. Lakes have a 60 m² floor and are not affected.</li>
+<li><strong>The terrain has no basin deep enough.</strong> Every lake has to be a real depression holding water deeper than <code>Min Lake Depth</code> over at least 60 m&sup2;, so a smooth world produces fewer lakes than were asked for, or none, with nothing wrong. Add erosion, or lower <code>Min Lake Depth</code>.</li>
+<li><strong>A body was found but held no water.</strong> That case is reported rather than dropped: the console names the kind and why the surface came out empty. If you see no such line, the generator was never reached &mdash; go back to the first paragraph.</li>
 </ol>
-<p>The full wiring procedure with a twelve-line checklist is
-<a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired">How water is built end to end</a>.</p>
+<p><strong>Do not lower <code>Channel Head Area</code> to fix a small world.</strong> Earlier editions said to, because a 600 m test world contains no catchment of 250000 m&sup2; anywhere. The planner now measures the threshold against the world it is actually given: the authored figure stands wherever the terrain holds a catchment large enough to afford it, and on a world too small it drops to that world's own largest drainage divided by the trunk multiple, floored at one lattice cell. Drainage networks are scale-invariant, so the rescaled figure describes the same channel hierarchy at a smaller size rather than approximating it. Lowering it by hand now asks for channels the terrain cannot support.</p>
+<p>The full wiring procedure with a fourteen-line checklist is <a href="#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired">How water is built end to end</a>.</p>
+
 <h3 id="a-water-body-exists-but-has-no-material--flat-untextured-grey" data-title="A water body exists but has no material — flat untextured grey">A water body exists but has no material — flat untextured grey</h3>
 <p>The <em>where</em> chain worked and the <em>what it looks like</em> chain did not. Water needs both, and they
 live in different graphs.</p>
@@ -7922,7 +7966,7 @@ your chunks.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 40 of 49</span>
+<div class="pagehead"><span class="of">Page 40 of 48</span>
 <h2 id="39-extending-the-system" data-title="Extending the system"><span class="sect">Section 39</span>Extending the system</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -7994,7 +8038,7 @@ in the console, not the last.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 41 of 49</span>
+<div class="pagehead"><span class="of">Page 41 of 48</span>
 <h2 id="40-dynamic-lighting--capabilities-and-honest-limits" data-title="Dynamic lighting — capabilities and honest limits"><span class="sect">Section 40</span>Dynamic lighting — capabilities and honest limits</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -8180,7 +8224,7 @@ profiler captures noted above — measured on each device class, not estimated.<
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 42 of 49</span>
+<div class="pagehead"><span class="of">Page 42 of 48</span>
 <h2 id="41-geometric-density--capabilities-and-honest-limits" data-title="Geometric density — capabilities and honest limits"><span class="sect">Section 41</span>Geometric density — capabilities and honest limits</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -8338,7 +8382,7 @@ the design ceilings the tester verifies against, not a measurement.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 43 of 49</span>
+<div class="pagehead"><span class="of">Page 43 of 48</span>
 <h2 id="42-weather-and-climate" data-title="Weather and climate"><span class="sect">Section 42</span>Weather and climate</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -8537,7 +8581,7 @@ latitude twice from different frame counts produces identical state.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 44 of 49</span>
+<div class="pagehead"><span class="of">Page 44 of 48</span>
 <h2 id="43-integrating-an-external-path-authoring-tool" data-title="Integrating an external path-authoring tool"><span class="sect">Section 43</span>Integrating an external path-authoring tool</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
@@ -8735,6 +8779,7 @@ document drifts from the code.</p>
 <tr><td>Trees removed from the road corridor</td><td>both modes</td><td>trees standing in the corridor are removed and put back on delete</td><td>the same removal, announced with the corridor so the provider leaves it clear</td></tr>
 <tr><td>Terrain texture painted under the road</td><td>both modes</td><td>the splat map is painted under the road surface</td><td>the same painting, announced to the provider with the painted region</td></tr>
 <tr><td>Tunnel cavity kept open through terrain</td><td>needs a provider</td><td>the tunnel shell is placed and terrain holes are punched, but nothing holds them open if the terrain is regenerated -- to keep a cavity open, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain</td><td>the opening is held by the provider and survives regeneration; it is released when the tunnel is deleted</td></tr>
+<tr><td>Bridge deck carried over terrain</td><td>better connected</td><td>the deck spans the ground untouched and the abutments and pier footings are terraformed once; whether a pier lands in water can only be answered for terrain tiles in the scene</td><td>the footings are requested as held ground the provider keeps flat, and the provider answers what each support stands on, including ground no tile covers yet</td></tr>
 <tr><td>Building pads held against a shared heightfield</td><td>needs a provider</td><td>a pad is terraformed once and stays until something else changes that ground -- to hold a pad against regeneration, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain</td><td>the pad is a held request, so the provider keeps that ground flat and gives it back on delete</td></tr>
 <tr><td>Building and roads across streamed terrain chunks</td><td>needs a provider</td><td>only terrain tiles already loaded in the scene can be read or changed; a road leaving them stops affecting the ground -- for streamed terrain, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain</td><td>the provider reports which chunks are active, and ground outside them is requested rather than assumed absent</td></tr>
 <tr><td>Roads following the natural ground</td><td>better connected</td><td>height and slope are sampled from the terrain tiles in the scene</td><td>height and slope come from the provider, which knows ground that has not been built into a tile yet</td></tr>
@@ -8759,130 +8804,19 @@ world side who can see the name, the state and the held count without opening yo
 <nav class="pagenav" aria-label="Page navigation">
 <a class="previous" href="#42-weather-and-climate"><span class="k">Previous</span><span class="t">42 &middot; Weather and climate</span></a>
 <a class="up plain" href="#contents"><span class="k">&#8593;</span><span class="t">Contents</span></a>
-<a class="next" href="#44-wiring-road--city-master"><span class="k">Next</span><span class="t">44 &middot; Wiring Road &amp; City Master into the world</span></a>
-</nav>
-</div>
-
-<div class="page">
-<div class="pagehead"><span class="of">Page 45 of 49</span>
-<h2 id="44-wiring-road--city-master" data-title="Wiring Road &amp; City Master into the world"><span class="sect">Section 44</span>Wiring Road &amp; City Master into the world</h2>
-</div>
-<div class="otp inline"><h5>On this page</h5><ul>
-<li><a href="#rcm-who-owns"><span class="n"></span> Which tool owns the ground</a></li>
-<li><a href="#rcm-parts"><span class="n"></span> The three components that make the bridge</a></li>
-<li><a href="#rcm-connect"><span class="n"></span> Connecting the two tools, step by step</a></li>
-<li><a href="#rcm-states"><span class="n"></span> The five things the socket can tell you</a></li>
-<li><a href="#rcm-clear"><span class="n"></span> Disconnecting: giving the holds back</a></li>
-<li><a href="#rcm-road-fields"><span class="n"></span> Road behaviour: 8 fields that are declared, not read</a></li>
-<li><a href="#rcm-healer"><span class="n"></span> The healing half, and what it does not do yet</a></li>
-<li><a href="#rcm-cuts"><span class="n"></span> Cut regions: the part of the bridge that works today</a></li>
-</ul></div>
-<!--BODY-->
-<p class="lede">Section 43 describes the contract in the abstract: any path-authoring tool that can read a surface may drive this terrain. This section is the specific case the two assets were built for &mdash; Road &amp; City Master on one side, Universe Creator on the other &mdash; named component by component, with the procedure that connects them and an honest account of which parts of the bridge carry weight today.</p>
-<h3 id="rcm-who-owns" data-title="Which tool owns the ground">Which tool owns the ground</h3>
-<p>One rule decides everything else in this section: <b>Universe Creator owns the heightfield, and the path tool never writes to it.</b> A road that needs the ground lowered does not lower it; it asks, and the answer may be no. That is not politeness between two products, it is the only arrangement in which the terrain can be regenerated at all &mdash; if both tools wrote heights, a regenerate would silently destroy every cut the other one had made, and neither could tell you which of them was wrong.</p>
-<p>The assembly definitions enforce the direction, and they are worth reading before anything else, because they explain a piece of the API that otherwise looks like an oversight:</p>
-<dl class="kv">
-  <dt><code>UniverseCreator.asmdef</code></dt><dd>references neither the path tool nor anything from it</dd>
-  <dt><code>RoadCityMaster.asmdef</code></dt><dd>references <code>UniverseCreator</code></dd>
-</dl>
-<p>The dependency runs one way. Road &amp; City Master is compiled against Universe Creator and may name its types; Universe Creator is compiled without any knowledge that Road &amp; City Master exists, and cannot name a single one of its classes. This is why the socket described below holds a plain <code>MonoBehaviour</code> rather than a typed link field: the type it would need to declare lives in an assembly it is not allowed to see. It checks what you entered at runtime instead, and says so plainly when the answer is wrong.</p>
-<div class="note"><b>Either asset works alone.</b> Universe Creator with no path tool connected builds exactly the world it builds on its own; Road &amp; City Master with no Universe Creator in the scene falls back to whatever terrain it finds. Neither one is a prerequisite of the other, and the connection is something you make on purpose.</div>
-<h3 id="rcm-parts" data-title="The three components that make the bridge">The three components that make the bridge</h3>
-<p>All three live in <code>Core/Runtime/Integration/</code>. None of them is added for you: a scene has no correct guess about which world object a road tool should be talking to, so each is a component you add by hand to the object you mean.</p>
-<div class="tablewrap"><table>
-<thead><tr><th>Component</th><th>Add it to</th><th>What it does</th><th>State today</th></tr></thead><tbody>
-<tr><td><code>RoadCityMasterLinker</code></td><td>the object holding your <code>UniverseCreatorObject</code></td><td>Answers the path tool&rsquo;s questions about the surface &mdash; height, normal, loaded chunk bounds &mdash; and carves and releases tunnel openings on request.</td><td><span class="pill ok">live</span> all 6 members resolve against the real chunk grid</td></tr>
-<tr><td><code>PathProviderSocket</code></td><td>the same object</td><td>The slot you enter the path tool&rsquo;s link component into, and the one place that will tell you in a sentence whether the connection is actually working.</td><td><span class="pill ok">live</span> reports 5 states</td></tr>
-<tr><td><code>TerrainHealer</code></td><td>the same object</td><td>The other direction: the path tool hands over its finished splines and the healer blends the ground to meet them.</td><td><span class="pill warn">signatures only</span> 2 members declared, solver not written</td></tr>
-</tbody></table></div>
-<p>On the path tool&rsquo;s side there is exactly one component to find, and it is the only class in that asset implementing the link contract:</p>
-<dl class="kv">
-  <dt><code>RoadCityMaster.City.TerrainLinker</code></dt><dd>in <code>City/Runtime/Terrain/TerrainLinker.cs</code>, and it reports its name to the socket as &ldquo;Road & City Master&rdquo;.</dd>
-</dl>
-<h3 id="rcm-connect" data-title="Connecting the two tools, step by step">Connecting the two tools, step by step</h3>
-<p>Do this once per world object. Nothing here is reversible in a way that costs you work, and step 7 is how you confirm it rather than assume it.</p>
-<ol class="steps">
-<li>Have both assets in the same project, under <code>Assets/UniverseCreator/</code> and <code>Assets/RoadCityMaster/</code>. Let Unity finish compiling; the components below do not appear in the Add Component menu until it has.</li>
-<li>Select the object that carries your <code>UniverseCreatorObject</code> &mdash; the world itself, not a chunk.</li>
-<li>Add <b>Road City Master Linker</b>. Set its <code>Universe Creator</code> field to that same world object. Leave the Road Behaviour block alone for now; <a href="#rcm-road-fields">it is not read yet</a>.</li>
-<li>Add <b>Path Provider Socket</b> &mdash; it is also under <code>Universe Creator &rsaquo; Integration</code> in the Add Component menu. One per object: it refuses to be added twice.</li>
-<li>Add the path tool&rsquo;s <code>TerrainLinker</code> component to your road network object, and connect <em>its</em> provider field to the linker from step 3. That side of the handshake is documented in its own manual &mdash; see <a href="../RoadCityMaster/RoadCityMasterManual.html#linker-connect">&ldquo;Connecting the two systems, step by step&rdquo;</a> in the Road &amp; City Master manual.</li>
-<li>Drag that <code>TerrainLinker</code> component into the socket&rsquo;s <code>Entered Path Tool</code> field. Drag the component, not the GameObject: the socket needs the link itself, and it will tell you when you have handed it something else.</li>
-<li>Read the socket. It writes one sentence about what it is holding, and that sentence &mdash; not the fact that the field looks filled in &mdash; is the confirmation. You are looking for <b>Accepted</b>, naming &ldquo;Road & City Master&rdquo;, and repeating what the tool says about its own end.</li>
-</ol>
-<div class="tip">The socket never searches the scene for a link, on purpose. A scene with two road networks in it has no right answer to guess at, and a wrong guess that quietly works most of the time is worse than a field you filled in yourself.</div>
-<h3 id="rcm-states" data-title="The five things the socket can tell you">The five things the socket can tell you</h3>
-<p>The socket decides nothing and changes nothing when it is read, so the inspector may ask it on every repaint. Each answer carries the sentence the socket itself writes; the table below is the state, what it means, and what you do about it.</p>
-<div class="tablewrap"><table>
-<thead><tr><th>State</th><th>What it means</th><th>What to do</th></tr></thead><tbody>
-<tr><td><code>Empty</code></td><td>Nothing entered. Universe Creator behaves exactly as it does with no socket at all</td><td>Nothing. This is a valid, finished state for a world with no road tool in it &mdash; the terrain behaves exactly as it does alone.</td></tr>
-<tr><td><code>Accepted</code></td><td>Entered, accepted, and reporting</td><td>Nothing. Read the rest of the sentence: it repeats what the tool says about its own end, which is the half the socket cannot verify.</td></tr>
-<tr><td><code>NotALink</code></td><td>Something was entered that does not implement the link contract</td><td>Enter the tool&rsquo;s link component instead of whatever was dragged in. A GameObject, or another component from the same object, lands here.</td></tr>
-<tr><td><code>Vanished</code></td><td>A link was entered and what it named is gone from the scene</td><td>Look for pads or tunnel openings left behind, then either re-enter the link or clear the socket &mdash; see <a href="#rcm-clear">giving the holds back</a>.</td></tr>
-<tr><td><code>SurfaceMismatch</code></td><td>A link that speaks a different provider surface than this version publishes</td><td>Update whichever of the two assets is older. Until the member counts agree, treat everything the tool reports as unreliable rather than as a smaller problem.</td></tr>
-</tbody></table></div>
-<p>Two of those five deserve a second look, because they are the ones that catch real mistakes rather than reporting an idle scene.</p>
-<p><b>Surface mismatch</b> is a version check that costs nothing to run. The socket counts the members this build of the provider publishes, off the interface itself rather than from a number anyone typed; the link reports the count it was written against. When those differ, one asset was updated without the other. Nothing has crashed &mdash; and that is exactly the danger, because a tool built against an older surface will keep answering questions with an old idea of what it is allowed to ask for.</p>
-<p><b>Vanished</b> exists because a deleted link and an empty socket are not the same situation, and Unity cannot tell them apart on its own. The socket saves the accepted tool&rsquo;s name with the scene, so when the component is gone it can name what used to be there instead of shrugging. A tool that disappears never gets the chance to release what it was holding, which is why this state asks you to go looking.</p>
-<div class="spec"><b>Working</b> is deliberately stricter than <b>Accepted</b>. The socket reports working only when it accepted the link <em>and</em> the tool says it resolved a provider on its end. Accepted alone means the handshake is valid on this side, which is not the same as the road tool having found the terrain.</div>
-<h3 id="rcm-clear" data-title="Disconnecting: giving the holds back">Disconnecting: giving the holds back</h3>
-<p>A connected path tool may be holding things open &mdash; tunnel openings carved out of the chunk grid, cut regions recorded against the ground. Those are held on Universe Creator&rsquo;s side, by handle. Emptying the field by hand in the inspector drops the reference and strands every one of them: nothing owns them any more, so nothing will ever release them, and the openings stay in your terrain.</p>
-<p>Use the socket&rsquo;s <code>Clear</code> instead. It asks the tool for everything back <em>first</em>, and only then forgets it, and it returns the number of regions the tool released. That count is the point: it is the proof that the release path ran, and a clear that reports zero on a world full of tunnels is telling you something.</p>
-<ol class="steps">
-<li>Clear the socket. Note the released count.</li>
-<li>Regenerate the terrain if the count was non-zero, so the ground comes back without the openings.</li>
-<li>Only then delete the path tool&rsquo;s objects, if that is what you are doing. In the other order the link is gone before it can be asked, and the socket reports <code>Vanished</code> rather than a clean release.</li>
-</ol>
-<h3 id="rcm-road-fields" data-title="Road behaviour: 8 fields that are declared, not read">Road behaviour: 8 fields that are declared, not read</h3>
-<p>The linker&rsquo;s inspector carries a <b>Road Behaviour</b> block. Every tooltip in it begins with the word PLACEHOLDER, and that is not an oversight left in by accident &mdash; it is the honest label. These fields name the half of the bridge that is not written: how a road decides where to go, and what it does to the ground it crosses. They are declared here, with the units and the limits the terrain side already imposes, so that whoever writes that half does not invent a second set of answers next to this one.</p>
-<div class="warn"><b>Changing these changes nothing today.</b> Nothing reads them. They are safe to leave at their defaults, and a road that ignores a value you set here is behaving correctly &mdash; report it against the missing solver, not against the field.</div>
-<div class="tablewrap"><table>
-<thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Range</th><th>What it will mean</th></tr></thead><tbody>
-<tr><td><code>roadWidthMetres</code></td><td><code>float</code></td><td>7</td><td>&mdash;</td><td>Metres either side of a road centre line that the terrain is flattened to meet it.</td></tr>
-<tr><td><code>shoulderBlendMetres</code></td><td><code>float</code></td><td>4</td><td>&mdash;</td><td>Metres either side of the road over which the flattening blends back into the natural ground.</td></tr>
-<tr><td><code>maxGradientPercent</code></td><td><code>float</code></td><td>12</td><td>0, 45</td><td>Steepest gradient a road will climb, as a percentage. Past this the router cuts, tunnels or switches back.</td></tr>
-<tr><td><code>tunnelThresholdMetres</code></td><td><code>float</code></td><td>14</td><td>&mdash;</td><td>Metres of cut depth past which a tunnel is cheaper than a cutting, so the router bores instead of digging.</td></tr>
-<tr><td><code>bridgeThresholdMetres</code></td><td><code>float</code></td><td>8</td><td>&mdash;</td><td>Metres of fill height past which a bridge is cheaper than an embankment.</td></tr>
-<tr><td><code>conformTerrainToRoad</code></td><td><code>bool</code></td><td>true</td><td>&mdash;</td><td>Roads flatten the terrain under them. Off leaves the ground alone and lets the road mesh float or sink with it.</td></tr>
-<tr><td><code>reapplyAfterRegenerate</code></td><td><code>bool</code></td><td>true</td><td>&mdash;</td><td>A cut region is re-flattened after the terrain cell under it regenerates, so a rebuild does not swallow the road.</td></tr>
-<tr><td><code>vegetationClearanceMetres</code></td><td><code>float</code></td><td>2.5</td><td>&mdash;</td><td>Metres of clearance kept clear of vegetation either side of a road.</td></tr>
-</tbody></table></div>
-<p>Read as a group they describe a router rather than a set of knobs. A width and a shoulder blend say how wide the disturbance is; a maximum gradient says when a straight line stops being an option; a cut threshold and a fill threshold say which of the three expensive answers &mdash; bore a tunnel, build a bridge, or switch back &mdash; is cheapest at that point; and a clearance says how far back the planting has to stay. Those are the decisions a road router makes, in the order it makes them.</p>
-<h3 id="rcm-healer" data-title="The healing half, and what it does not do yet">The healing half, and what it does not do yet</h3>
-<p><code>TerrainHealer</code> is the reverse direction. Where the linker answers questions about the ground, the healer accepts finished splines and blends the ground to meet them. Its contract is <code>IPCGDataConsumer</code>, and it is the one to implement if you are replacing the healer with your own. Section 43 lists the provider members; these are the consumer&rsquo;s, which that section does not cover:</p>
-<div class="tablewrap"><table>
-<thead><tr><th>Member</th><th>Contract</th></tr></thead><tbody>
-<tr><td><code>void ConsumeSpline(GameObject splineObject, float blendDistance)</code></td><td>Called by the path tool after a spline is placed or edited. The consumer should read the spline's control points, sample its surface elevation, and blend the terrain heights within blendDistance of the spline to match that elevation.</td></tr>
-<tr><td><code>void ConsumeSplinesInChunk(List&lt;GameObject&gt; splines, Bounds chunkBounds, float blendDistance)</code></td><td>Batch variant: the path tool passes a list of all active splines in one chunk, so the consumer can heal them in a single pass rather than triggering a terrain update per spline.</td></tr>
-</tbody></table></div>
-<p>The signatures are final and the component compiles into any scene, so a path tool may hold a reference to it and call it today without a null check. What the bodies do is nothing: the solver that reads a spline&rsquo;s control points and writes blended heights back into the chunk&rsquo;s terrain data has not been written. Both members return without touching the ground.</p>
-<p>The one field that is real is the blend width:</p>
-<dl class="kv">
-  <dt><code>defaultBlendDistance</code></dt><dd>World metres. Heights within this distance of a spline are the ones the healer is allowed to move; beyond it the ground is untouched. A wider blend reads as a smoother transition and disturbs more terrain, which is the whole trade.</dd>
-</dl>
-<div class="note">Because the batch member exists, prefer it. One call carrying every spline in a chunk can accumulate the whole delta and write it once; calling the single-spline member in a loop asks the terrain to update per spline, which is the same arithmetic and far more of the expensive part.</div>
-<h3 id="rcm-cuts" data-title="Cut regions: the part of the bridge that works today">Cut regions: the part of the bridge that works today</h3>
-<p>One member of the provider contract does real work the moment you connect the two tools, and it is easy to miss because it returns nothing. When the path tool cuts the ground for a carriageway it reports the bounds it disturbed, and Universe Creator records them in its shared cut region registry &mdash; <code>UniverseCreator.Ecology.CutRegionRegistry</code>, reached through its <code>Shared</code> instance, which the scatter system reads at bake time.</p>
-<p>The chunk grid itself has no pre-loading to do &mdash; the whole continent is resident and only its level of detail varies &mdash; so the terrain side of that call is genuinely empty. The ecology side is not. A road cut is a fact about the world that only the road tool knows, and recording it is what lets the next scatter bake keep trees and grass off the carriageway instead of planting a forest through it.</p>
-<div class="tip">This is why the connection is worth making even while the healer is unwritten: with the socket connected, your planting already respects your roads.</div>
-<p>It also sets the order of operations. Bake vegetation <em>after</em> the roads are laid, not before &mdash; a bake that ran first never heard about the cuts, and re-baking is the fix.</p>
-<!--/BODY-->
-<nav class="pagenav" aria-label="Page navigation">
-<a class="previous" href="#43-integrating-an-external-path-authoring-tool"><span class="k">Previous</span><span class="t">43 &middot; Integrating an external path-authoring tool</span></a>
-<a class="up plain" href="#contents"><span class="k">&#8593;</span><span class="t">Contents</span></a>
 <a class="next" href="#appendix-a--mathematical-reference"><span class="k">Next</span><span class="t">Appendix A — Mathematical reference</span></a>
 </nav>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 46 of 49</span>
+<div class="pagehead"><span class="of">Page 45 of 48</span>
 <h2 id="appendix-a--mathematical-reference" data-title="Appendix A — Mathematical reference">Appendix A — Mathematical reference</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
 <li><a href="#noise"><span class="n"></span> Noise</a></li>
 <li><a href="#erosion-1"><span class="n"></span> Erosion</a></li>
 <li><a href="#hydraulics-1"><span class="n"></span> Hydraulics</a></li>
+<li><a href="#drainage-networks-and-channel-geometry"><span class="n"></span> Drainage networks and channel geometry</a></li>
 <li><a href="#terrain-analysis"><span class="n"></span> Terrain analysis</a></li>
 <li><a href="#climate"><span class="n"></span> Climate</a></li>
 <li><a href="#scale"><span class="n"></span> Scale</a></li>
@@ -8947,6 +8881,34 @@ turbulent (Prandtl–Schlichting):  Cf = 0.074 / Re^0.2
 <pre data-lang="formula"><code>F = ρ_fluid · V_displaced · g
 </code></pre>
 <p>Floats when <code>ρ_fluid · V &gt; m</code>. Fresh water 998 kg/m³, sea water 1025 kg/m³.</p>
+<h3 id="drainage-networks-and-channel-geometry" data-title="Drainage networks and channel geometry">Drainage networks and channel geometry</h3>
+<p>Manning, Froude and Reynolds above describe water that already exists. These decide whether it exists, where, and how big.</p>
+<p><strong>Where the water goes</strong> &mdash; three passes over a square lattice, in this order:</p>
+<pre data-lang="text"><code>1. priority-flood   fill every closed depression to its spill elevation,
+                    lowest rim first, so no cell is left without a downhill
+2. D8              every cell drains to its single steepest of eight neighbours
+3. accumulation    process cells in descending height order, pushing each
+                   cell&#39;s area into its receiver: A(cell) = own cell area
+                                                       + &#931; A(every cell draining into it)
+</code></pre>
+<p>The first pass is what makes the second total. Without it a pit has no outlet, the accumulation stops dead at it, and the network below the pit is starved of the area that should have reached it &mdash; which reads on screen as a river that stops in the middle of a hillside.</p>
+<p><strong>Channel head</strong> &mdash; a cell is a channel when the area draining through it passes a threshold:</p>
+<pre data-lang="formula"><code>channel  &#8660;  A &#8805; A_head        A_head = 250000 m&sup2;
+</code></pre>
+<p>That figure is the real-world order of magnitude for temperate hillslope: below roughly a quarter of a square kilometre the runoff is sheet flow and gullies that only run after rain, not a permanent watercourse. It is <strong>rescaled to the world being measured</strong> when that world is too small to contain it&mdash;</p>
+<pre data-lang="formula"><code>A_head&#39; = min( A_head, A_max / trunkMultiple )        floored at one lattice cell
+trunkMultiple = 4
+</code></pre>
+<p>&mdash; where <em>A_max</em> is the largest catchment that world actually has. This is legitimate rather than a fudge because drainage networks are <strong>scale-invariant</strong>: the branching statistics of a catchment do not change with its size, so a threshold rescaled by the same factor describes the same channel hierarchy at a smaller size instead of approximating it. The floor at one lattice cell stops a threshold finer than the grid from painting the whole world wet.</p>
+<p><strong>How wide it comes out</strong> &mdash; downstream hydraulic geometry, Leopold &amp; Maddock (1953) composed with Hack's law:</p>
+<pre data-lang="formula"><code>w &#8733; Q^0.5          Leopold &amp; Maddock: width against discharge
+Q &#8733; A^0.8          Hack: discharge against contributing area
+&#8658;  w &#8733; A^0.4       the exponent the generator uses
+</code></pre>
+<p>Clamped to <strong>4&ndash;80 m</strong>: a channel is 4 m wide where it first qualifies as one, and grows towards 80 m as its catchment grows. The two ends are measured, not chosen &mdash; they are the width of a stream you can step across and the width of a lowland trunk river.</p>
+<p><strong>How deep</strong> &mdash; width-to-depth ratio <strong>18:1</strong>, the alluvial figure for a channel free to shape its own bed. Depth follows width rather than being authored separately, which is why a river that is wider is also deeper and the bed never disagrees with the surface.</p>
+<p><strong>Strahler order</strong> &mdash; a headwater reach is order 1; where two reaches of equal order <em>n</em> meet, the reach below them is order <em>n</em>&nbsp;+&nbsp;1; where unequal orders meet, the larger is carried down unchanged. It is what a delta is gated on and what &quot;trunk&quot; means in this system.</p>
+
 <h3 id="terrain-analysis" data-title="Terrain analysis">Terrain analysis</h3>
 <p><strong>Slope</strong> from the central-difference gradient:</p>
 <pre data-lang="formula"><code>slope = atan(√((∂h/∂x)² + (∂h/∂z)²) · heightScale / sampleSpacing)
@@ -8978,14 +8940,14 @@ metresPerSample = (worldSizeKm × 1000) / (chunkCountPerSide × (resolution − 
 <hr>
 <!--/BODY-->
 <nav class="pagenav" aria-label="Page navigation">
-<a class="previous" href="#44-wiring-road--city-master"><span class="k">Previous</span><span class="t">44 &middot; Wiring Road &amp; City Master into the world</span></a>
+<a class="previous" href="#43-integrating-an-external-path-authoring-tool"><span class="k">Previous</span><span class="t">43 &middot; Integrating an external path-authoring tool</span></a>
 <a class="up plain" href="#contents"><span class="k">&#8593;</span><span class="t">Contents</span></a>
 <a class="next" href="#appendix-b--enumeration-reference"><span class="k">Next</span><span class="t">Appendix B — Enumeration reference</span></a>
 </nav>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 47 of 49</span>
+<div class="pagehead"><span class="of">Page 46 of 48</span>
 <h2 id="appendix-b--enumeration-reference" data-title="Appendix B — Enumeration reference">Appendix B — Enumeration reference</h2>
 </div>
 <!--BODY-->
@@ -9039,12 +9001,13 @@ Min, Max.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 48 of 49</span>
+<div class="pagehead"><span class="of">Page 47 of 48</span>
 <h2 id="appendix-c--diagnostics-and-self-test" data-title="Appendix C — Diagnostics and self test">Appendix C — Diagnostics and self test</h2>
 </div>
 <div class="otp inline"><h5>On this page</h5><ul>
 <li><a href="#run-self-test"><span class="n"></span> Run Self Test</a></li>
 <li><a href="#what-the-module-3-self-tests-cover"><span class="n"></span> What the Module 3 self-tests cover</a></li>
+<li><a href="#what-the-module-2-water-tests-cover"><span class="n"></span> What the Module 2 water tests cover</a></li>
 <li><a href="#testing-the-install-without-opening-unity"><span class="n"></span> Testing the install without opening Unity</a></li>
 <li><a href="#exit-codes" class="sub"><span class="n"></span> Exit codes</a></li>
 <li><a href="#running-it-by-hand" class="sub"><span class="n"></span> Running it by hand</a></li>
@@ -9059,11 +9022,7 @@ Min, Max.</p>
 </ul></div>
 <!--BODY-->
 <h3 id="run-self-test" data-title="Run Self Test">Run Self Test</h3>
-<p><strong>Tools ▸ Universe Creator ▸ Run Self Test.</strong> Exercises node evaluation, graph serialisation,
-chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the
-shoreline conformer and the scatter placer, and — since Module 3 — the whole Living-World
-layer as well (enumerated below). It writes the result to the console. As of the Module 3
-close-out it runs <strong>14498 checks</strong>.</p>
+<p><strong>Tools &#9656; Universe Creator &#9656; Run Self Test.</strong> Exercises node evaluation, graph serialisation, chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the shoreline conformer and the scatter placer, the Module 2 water chain enumerated below, and the whole Living-World layer. It writes the result to the console. The most recent passing run recorded here reports <strong>14547 checks</strong>.</p>
 <p>It <strong>never opens a dialog</strong>, so it is safe in batch mode:</p>
 <pre data-lang="shell"><code>Unity.exe -batchmode -quit -silent-crashes \
   -projectPath &quot;&lt;project&gt;&quot; \
@@ -9072,16 +9031,13 @@ close-out it runs <strong>14498 checks</strong>.</p>
 </code></pre>
 <p>The last three lines of the log are the result:</p>
 <pre data-lang="console"><code>=== UC SELF TEST: PASS ===
-checks run : 14498
+checks run : 14547
 failures   : 0
 </code></pre>
-<p><strong>The process exit code is not a reliable pass signal.</strong> Grep the log for <code>error CS</code> and for
-the self-test's own failure lines. A batch run that reports success while the log contains
-compile errors means Unity never got as far as the test.</p>
-<p><strong><code>checks run</code> is the assertion, not decoration.</strong> Adding N checks must move the total by
-exactly N. That is the one thing that separates &quot;my new test passed&quot; from &quot;my new test was never
-called&quot; — a test registered nowhere reports nothing and looks identical to a test that agreed
-with you.</p>
+<p><strong>The process exit code is not a reliable pass signal.</strong> Grep the log for <code>error CS</code> and for the self-test's own failure lines. A batch run that reports success while the log contains compile errors means Unity never got as far as the test.</p>
+<p><strong><code>checks run</code> is the assertion, not decoration.</strong> Adding N checks must move the total by exactly N. That is the one thing that separates &quot;my new test passed&quot; from &quot;my new test was never called&quot; &mdash; a test registered nowhere reports nothing and looks identical to a test that agreed with you. A <strong>PASS can be vacuous</strong>; reconcile the delta, every time.</p>
+<p>Do not quote a total from memory either. The figure above is read off the newest passing log in the project's <code>Logs</code> folder when this manual is built, for the same reason: a number nobody measured is indistinguishable from a number that used to be true.</p>
+
 <h3 id="what-the-module-3-self-tests-cover" data-title="What the Module 3 self-tests cover">What the Module 3 self-tests cover</h3>
 <p>The Living-World checks are registered in <code>UCSelfTest.Run()</code> alongside the terrain and water
 tests, so they are part of the single total above — not a separate suite you have to remember to
@@ -9105,6 +9061,20 @@ run. They fall into these families:</p>
 this list — those are runtime measurements the standing rule forbids asserting without a
 profiler capture, and they are recorded in the close-out with the device and the numbers, not
 here.</p>
+<h3 id="what-the-module-2-water-tests-cover" data-title="What the Module 2 water tests cover">What the Module 2 water tests cover</h3>
+<p>These are registered in <code>UCSelfTest.Run()</code> beside the terrain and Living-World tests, so they are part of the single total above rather than a separate suite you have to remember to run. Every one of them exists because the thing it checks once shipped broken.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Check</th><th>What it asserts, and what it caught</th></tr></thead>
+<tbody>
+<tr><td><code>Channel Head Area Rescales To The World</code></td><td>A world smaller than the authored channel-head area still plans a network. Without it, a test world came out riverless with nothing wrong and no message &mdash; the graph carved trenches and left them dry.</td></tr>
+<tr><td><code>Spawner Is Live When Only Its Height Is Wired</code></td><td>A spawner fed only its <code>Height</code> input resolves as live, and a spawner wired to nothing at all resolves as absent. Both halves in one check, because the fix for the first is the way to break the second.</td></tr>
+<tr><td><code>Water Walk Sees Interface Only Outputs</code></td><td>The water walk reaches the same terminals the evaluator does. It used to seed on a narrower base class, so a graph ending in a Weather, Lighting, Wind, Shader or Scatter output was evaluated in full and then had every water object swept away as unasked-for.</td></tr>
+<tr><td><code>Spawner Places Real Water Objects</code></td><td>The end-to-end one. The generator runs over a real <code>Terrain</code> &mdash; a regional slope, one trunk valley, two closed bowls &mdash; and the bodies it places must actually hold water. This is the report in its own terms: trenches with no river in them fail here.</td></tr>
+<tr><td><code>Lake Depth Gate Matches The Mask</code></td><td>The object side rejects exactly what the mask leaves dry. <code>Min Lake Depth</code> is a fraction of world height while lake objects are placed in metres, and the object side used to accept a basin on area alone &mdash; so a wide ankle-deep dimple the mask correctly left dry still got a lake dropped in it.</td></tr>
+</tbody>
+</table></div>
+<p>They live in <code>Core/Editor/Diagnostics/UCSelfTest.Hydrology.cs</code>, and the fourth builds its own landscape in code rather than loading a scene, so the suite carries the terrain it needs and cannot be broken by someone editing a test scene.</p>
+
 <h3 id="testing-the-install-without-opening-unity" data-title="Testing the install without opening Unity">Testing the install without opening Unity</h3>
 <p>Two ready-to-run scripts ship with the package. They start a headless editor, compile the
 whole project, run the self test, capture the log, and print a verdict in plain language.
@@ -9278,7 +9248,7 @@ and finding the first wrong one localises any fault to a single node.</p>
 </div>
 
 <div class="page">
-<div class="pagehead"><span class="of">Page 49 of 49</span>
+<div class="pagehead"><span class="of">Page 48 of 48</span>
 <h2 id="appendix-d--glossary" data-title="Appendix D — Glossary">Appendix D — Glossary</h2>
 </div>
 <!--BODY-->

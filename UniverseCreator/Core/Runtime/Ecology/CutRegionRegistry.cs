@@ -6,7 +6,7 @@
 //           deliberate no-op; this is what it now notifies.
 //
 //  WHY A SHARED REGISTRY AND NOT A REFERENCE. The road bridge calls
-//  NotifyCutRegion from Module 7 without holding a reference to the vegetation
+//  NotifyCutRegion from Module 6 without holding a reference to the vegetation
 //  system, and it should not have to hold one - a road does not depend on there
 //  being plants. A shared registry is the honest shape for a fact about the world
 //  that one system reports and another consumes.

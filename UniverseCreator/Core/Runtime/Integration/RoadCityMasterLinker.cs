@@ -1,12 +1,16 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
 //  File:    RoadCityMasterLinker.cs
-//  Purpose: STUB. Exposes Universe Creator's terrain data to Road & City Master
-//           (Module 7) through the IPCGDataProvider contract. The interface is
-//           real and final; the implementation lands in Module 7.
+//  Purpose: Exposes Universe Creator's terrain data to a path tool (Module 6)
+//           through the IPCGDataProvider contract. The provider half is LIVE: all
+//           six members do real work today -- height, normal and active bounds read
+//           the Module 1 chunk grid, tunnel open/close carve and heal it, and the
+//           cut-region notify feeds the vegetation bake. What is still only declared
+//           is the road-behaviour block below: units and constraints named for the
+//           consumer half, which nothing reads yet.
 //
 //  CRITICAL FRAMING: Universe Creator is one engine subsystem; Road & City Master
-//  is another, owned by Module 7. They communicate through a formal contract, not
+//  is another, owned by Module 6. They communicate through a formal contract, not
 //  by reaching into each other's internals. This class is the "provider" side of
 //  that contract — it publishes terrain surface data, chunk bounds, and
 //  heightfield queries that the path tool reads when laying splines.
@@ -157,8 +161,8 @@ namespace UniverseCreator.Integration
         // =====================================================================
         //  PROVIDER IMPLEMENTATION
         //
-        //  These resolve against the Module 1 chunk grid. Module 7 consumes them;
-        //  nothing here waits on Module 7 to exist.
+        //  These resolve against the Module 1 chunk grid. Module 6 consumes them;
+        //  nothing here waits on Module 6 to exist.
         // =====================================================================
 
         public float SampleHeight(float worldX, float worldZ)
@@ -187,7 +191,6 @@ namespace UniverseCreator.Integration
             // What there is now is vegetation work (V-23). A road cut is a fact about
             // the world that the road system is the only one who knows, and recording
             // it is what lets the next scatter bake keep trees off the carriageway.
-            // TerrainHealer will hook in alongside this.
             UniverseCreator.Ecology.CutRegionRegistry.Shared.Add(worldBounds);
         }
 

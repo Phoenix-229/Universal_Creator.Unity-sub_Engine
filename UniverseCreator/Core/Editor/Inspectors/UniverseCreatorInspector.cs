@@ -249,6 +249,15 @@ namespace UniverseCreator.Editor.Inspectors
 
             GUILayout.FlexibleSpace();
 
+            // Always reachable from the world object, whether or not a graph is assigned:
+            // this bar draws before the no-graph early return, so a brand-new world can
+            // still open the manual. Opens the HTML reader's copy off disk.
+            if (GUILayout.Button(UCIcons.Content("Action_Help", "Open the Universe Creator manual", "Manual"),
+                                 EditorStyles.miniButton, GUILayout.Height(18)))
+            {
+                UniverseCreator.Editor.UCManualLauncher.Open();
+            }
+
             if (uc.IsGenerating)
             {
                 GUILayout.Label("Generating...", EditorStyles.miniLabel);
@@ -505,20 +514,44 @@ namespace UniverseCreator.Editor.Inspectors
 
             EditorGUI.indentLevel++;
 
-            IntSlider("Chunks Per Side", "uc.chunkCountPerSide", ref uc.chunkCountPerSide, 1, 15,
-                      "Odd values only - the grid needs one centre chunk to recentre around.");
+            // Chunk SIZE is authored; the count is derived from it and the world size.
+            // Type 1000 and get 1 km tiles - the count follows, it is not a second dial.
+            FloatSlider("Chunk Size (m)", "uc.chunkSizeMeters", ref uc.chunkSizeMeters, 50f,
+                        Mathf.Max(50f, uc.worldSizeKm * 1000f), "F0",
+                        "Metres per tile - the authored value. Chunk count follows from this and world size.");
+            uc.ValidateSettings();
+            ReadOnlyRow("Chunks Per Side", uc.chunkCountPerSide + " (derived from world size / chunk size)");
+
+            // Hybrid streaming toggle. On by default; only engages when the world is
+            // bigger than the resident window, so a small world stays whole and pays
+            // nothing whether this is ticked or not.
+            Toggle("Stream At Runtime", ref uc.streamingEnabled,
+                   "On: a large world streams a window around the player in play mode. "
+                   + "It only engages when the world is bigger than the resident window - "
+                   + "a small world stays whole either way. Untick to force whole-world at "
+                   + "runtime (only safe if it fits in memory).");
+            bool worldFits = (uc.chunkCountPerSide - 1) / 2 <= uc.GetStreamRadius();
+            ReadOnlyRow("Runtime Mode", !uc.streamingEnabled || worldFits
+                        ? "Whole world (no streaming - world fits the window)"
+                        : "Streaming window (world larger than resident window)");
+
+            // High-LOD ring and resident window are runtime streaming, sized against the
+            // resident window - 'the 25' - not the whole-world subdivision.
+            IntSlider("Resident Window", "uc.residentWindowPerSide", ref uc.residentWindowPerSide, 1,
+                      UniverseCreatorObject.MaxResidentWindowPerSide,
+                      "Tiles per side kept loaded around the player at runtime. Odd only, not tied to world size.");
             IntSlider("High-LOD Ring", "uc.highLODRingSize", ref uc.highLODRingSize, 1,
-                      Mathf.Max(1, uc.chunkCountPerSide),
-                      "Side length of the full-fidelity centre square.");
+                      Mathf.Max(1, uc.residentWindowPerSide),
+                      "Side length of the full-fidelity centre square of the resident window.");
             IntSlider("Buffer Ring Width", "uc.bufferRingWidth", ref uc.bufferRingWidth, 0, 3,
                       "Extra rings generated ahead of the camera so streaming never shows a seam.");
             FloatSlider("Recentre Threshold", "uc.recenterThreshold", ref uc.recenterThreshold, 0f, 1f, "F2",
                         "Fraction of a chunk the player may cross before the grid shifts.");
 
             EditorGUILayout.Space(2);
-            InfoRow(string.Format("Chunk size: {0:F1} m   |   {1} high-LOD + {2} low-LOD + {3} buffer",
-                                  uc.GetChunkSize(), uc.GetHighLODChunkCount(),
-                                  uc.GetLowLODChunkCount(), uc.GetBufferChunkCount()));
+            InfoRow(string.Format("Chunk size: {0:F0} m   |   {1} tiles total   |   resident {2} + buffer {3}",
+                                  uc.GetChunkSize(), uc.chunkCountPerSide * uc.chunkCountPerSide,
+                                  uc.residentWindowPerSide * uc.residentWindowPerSide, uc.GetBufferChunkCount()));
 
             EditorGUI.indentLevel--;
         }
@@ -1266,7 +1299,9 @@ namespace UniverseCreator.Editor.Inspectors
             uc.maxHeightMeters = 600f;
             uc.resolution = 257;
             uc.worldOriginOffset = Vector2.zero;
-            uc.chunkCountPerSide = 5;
+            uc.chunkSizeMeters = 1000f;      // 1 km tiles; count derives from world size
+            uc.residentWindowPerSide = 5;    // 'the 25' resident streaming window
+            uc.streamingEnabled = true;      // hybrid: engages only on worlds bigger than the window
             uc.highLODRingSize = 3;
             uc.bufferRingWidth = 1;
             uc.recenterThreshold = 0.5f;

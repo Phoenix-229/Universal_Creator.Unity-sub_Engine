@@ -289,32 +289,58 @@ namespace UniverseCreator.Editor.GraphUI
         /// <summary>
         /// Wires a field widget to the async regeneration path. The value is stored
         /// on every change so nothing is lost, but a regeneration is only queued on
-        /// commit - Enter, focus-out, or the end of a drag. That is what stops a
-        /// slider drag from firing one full generation per pixel moved.
+        /// commit - Enter, focus-out, or the end of a drag - AND only when the value
+        /// actually changed since focus was gained. That is what stops a slider drag
+        /// from firing one full generation per pixel moved, and - the bug this guard
+        /// fixes - stops merely clicking into a field to place the cursor and clicking
+        /// away again from regenerating the whole world for nothing. Clicking a node,
+        /// focusing a field, and leaving it untouched now costs zero generations.
         /// </summary>
         private void Commit<T>(BaseField<T> field, Action<T> apply)
         {
+            // Per-field: did the value actually change since this field gained focus?
+            // RegisterValueChangedCallback only fires when newValue != previousValue, so
+            // this flag is true only after a genuine edit, never on a bare focus/click.
+            bool dirtySinceFocus = false;
+
+            field.RegisterCallback<FocusInEvent>(_ => dirtySinceFocus = false);
+
             field.RegisterValueChangedCallback(evt =>
             {
                 apply(evt.newValue);
                 Node.version++;
                 owner.MarkGraphDirty();
+                dirtySinceFocus = true;
             });
 
-            field.RegisterCallback<FocusOutEvent>(_ => owner.QueueRegenerate(Node));
+            field.RegisterCallback<FocusOutEvent>(_ =>
+            {
+                if (!dirtySinceFocus) return;   // clicked in and out, changed nothing
+                dirtySinceFocus = false;
+                owner.QueueRegenerate(Node);
+            });
 
             field.RegisterCallback<KeyDownEvent>(evt =>
             {
                 if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
                 {
-                    owner.QueueRegenerate(Node);
+                    if (dirtySinceFocus)
+                    {
+                        dirtySinceFocus = false;
+                        owner.QueueRegenerate(Node);
+                    }
                     evt.StopPropagation();
                 }
             });
 
             // A slider commits when the pointer is released, which is the drag
-            // equivalent of focus-out.
-            field.RegisterCallback<PointerCaptureOutEvent>(_ => owner.QueueRegenerate(Node));
+            // equivalent of focus-out - but only regenerate if the drag moved the value.
+            field.RegisterCallback<PointerCaptureOutEvent>(_ =>
+            {
+                if (!dirtySinceFocus) return;
+                dirtySinceFocus = false;
+                owner.QueueRegenerate(Node);
+            });
 
             // Keep clicks inside a field from starting a node drag.
             field.RegisterCallback<PointerDownEvent>(evt => evt.StopPropagation());

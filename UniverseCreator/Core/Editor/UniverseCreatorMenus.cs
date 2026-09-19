@@ -26,7 +26,7 @@ namespace UniverseCreator.Editor
         private const string PrefResolution = "UniverseCreator.DefaultResolution";
         private const string PrefWorldSizeKm = "UniverseCreator.DefaultWorldSizeKm";
         private const string PrefMaxHeight = "UniverseCreator.DefaultMaxHeight";
-        private const string PrefChunksPerSide = "UniverseCreator.DefaultChunksPerSide";
+        private const string PrefChunkSize = "UniverseCreator.DefaultChunkSizeMeters";
         private const string PrefAutoRegen = "UniverseCreator.DefaultAutoRegenerate";
         private const string PrefBuildHierarchy = "UniverseCreator.BuildFullHierarchy";
 
@@ -444,7 +444,7 @@ namespace UniverseCreator.Editor
             new SystemChild("ChunkManager",     typeof(ChunkManager)),
 
             new SystemChild("RoadCityMasterLinker", typeof(RoadCityMasterLinker),
-                            "RoadMasterLinker"),   // Module 7 bridge; legacy alias per RM-00
+                            "RoadMasterLinker"),   // Module 6 bridge; legacy alias per RM-00
         };
 
         /// <summary>
@@ -675,7 +675,7 @@ namespace UniverseCreator.Editor
             creator.resolution = EditorPrefs.GetInt(PrefResolution, 257);
             creator.worldSizeKm = EditorPrefs.GetFloat(PrefWorldSizeKm, 4f);
             creator.maxHeightMeters = EditorPrefs.GetFloat(PrefMaxHeight, 600f);
-            creator.chunkCountPerSide = EditorPrefs.GetInt(PrefChunksPerSide, 5);
+            creator.chunkSizeMeters = EditorPrefs.GetFloat(PrefChunkSize, 1000f);
             creator.autoRegenerate = EditorPrefs.GetBool(PrefAutoRegen, true);
             creator.ValidateSettings();
         }
@@ -712,6 +712,12 @@ namespace UniverseCreator.Editor
         private static void OpenGeometryDebugWindow()
         {
             GeometryDebugWindow.OpenWindow();
+        }
+
+        [MenuItem("Window/Universe Creator/Open Manual", false, 2019)]
+        private static void OpenManual()
+        {
+            UCManualLauncher.Open();
         }
 
         [MenuItem("Window/Universe Creator/About", false, 2020)]
@@ -795,8 +801,8 @@ namespace UniverseCreator.Editor
                                    "Side length of a new world.");
                     PrefFloatField(PrefMaxHeight, "Max Height (m)", 600f, 10f, 5000f,
                                    "Metres a heightmap value of 1.0 maps to.");
-                    PrefIntField(PrefChunksPerSide, "Chunks Per Side", 5, 1, 15,
-                                 "Virtual grid size. 5 gives the 25-chunk layout.");
+                    PrefFloatField(PrefChunkSize, "Chunk Size (m)", 1000f, 50f, 10000f,
+                                   "Metres per tile. Chunk count derives from world size / this. 1000 = 1 km tiles.");
 
                     EditorGUILayout.Space(8);
 
@@ -817,7 +823,7 @@ namespace UniverseCreator.Editor
                         EditorPrefs.DeleteKey(PrefResolution);
                         EditorPrefs.DeleteKey(PrefWorldSizeKm);
                         EditorPrefs.DeleteKey(PrefMaxHeight);
-                        EditorPrefs.DeleteKey(PrefChunksPerSide);
+                        EditorPrefs.DeleteKey(PrefChunkSize);
                         EditorPrefs.DeleteKey(PrefAutoRegen);
                         EditorPrefs.DeleteKey(PrefBuildHierarchy);
                     }

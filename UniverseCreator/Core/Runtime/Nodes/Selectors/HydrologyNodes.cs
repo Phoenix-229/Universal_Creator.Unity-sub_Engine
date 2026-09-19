@@ -120,18 +120,52 @@ namespace UniverseCreator.Nodes.Selectors
             if (solve == null) return mask;
             if (stop != null && stop.StopRequested) return null;
 
+            return StampNetwork(mask, solve, channelHeadArea, baseWidth, widthExponent,
+                                maxWidth, seaLevel, maxChannels, stop) ? mask : null;
+        }
+
+        /// <summary>
+        /// Draws the whole traced network into a chunk mask. Returns false only when the
+        /// solve was cancelled.
+        /// </summary>
+        /// <remarks>
+        /// Shared with the Hydrology Spawner, whose River Mask port has to be the SAME
+        /// network this node emits. Traced twice from two copies of this loop, the
+        /// spawned river OBJECTS would sit somewhere other than the channel the graph
+        /// carved - water beside its own trench, which is the one failure the whole
+        /// water chain exists to avoid. One tracing, two callers.
+        /// </remarks>
+        internal static bool StampNetwork(Matrix mask, WorldDrainage solve, float channelHeadArea,
+                                          float baseWidth, float widthExponent, float maxWidth,
+                                          float seaLevel, int maxChannels, StopToken stop)
+        {
             System.Func<bool> cancel = null;
             if (stop != null) cancel = delegate { return stop.StopRequested; };
 
             Matrix world = solve.height;
             int resX = solve.resX;
-            float headArea = Mathf.Max(solve.cellArea, channelHeadArea);
+
+            // The authored figure, measured against the world it is about to be applied
+            // to. A quarter of a square kilometre is the right real-world channel head
+            // and the wrong threshold for a world smaller than one catchment: nothing
+            // clears it, TraceChannels returns nothing, and the River Mask comes back
+            // blank while every field on the node looks correctly filled in. The rescale
+            // rule lives with the constants it rescales, in RiverNetworkPlanner, and the
+            // river OBJECT planner calls the same one - so the courses that get water are
+            // the courses this mask drew. Fully qualified rather than imported: this is
+            // the one reach across into the terrain layer from here, and naming it says
+            // so at the call site.
+            float resolvedHeadArea =
+                UniverseCreator.TerrainSystem.RiverNetworkPlanner.ResolveChannelHeadArea(
+                    solve.accum, solve.cellArea, channelHeadArea);
+
+            float headArea = Mathf.Max(solve.cellArea, resolvedHeadArea);
 
             List<List<int>> channels = Hydrology.TraceChannels(
                 solve.dir, solve.accum, resX, solve.resZ,
-                solve.CellsForArea(channelHeadArea), Mathf.Max(1, maxChannels), cancel);
+                solve.CellsForArea(resolvedHeadArea), Mathf.Max(1, maxChannels), cancel);
 
-            if (stop != null && stop.StopRequested) return null;
+            if (stop != null && stop.StopRequested) return false;
 
             Vector2 solvePixel = world.PixelSize;
             float sea = Mathf.Clamp01(seaLevel);
@@ -139,17 +173,21 @@ namespace UniverseCreator.Nodes.Selectors
             float originX = world.worldPos.x;
             float originZ = world.worldPos.z;
 
+            // Reused across channels so a world-wide network does not allocate two lists
+            // per course.
+            List<Vector2> points = new List<Vector2>();
+            List<float> widths = new List<float>();
+
             for (int c = 0; c < channels.Count; c++)
             {
-                if (stop != null && stop.StopRequested) return null;
+                if (stop != null && stop.StopRequested) return false;
 
                 List<int> channel = channels[c];
 
-                // XZ only: a course is a plan-view line. Its elevation is whatever the
-                // ground under it turns out to be, which River Carve then cuts.
-                Vector2 previous = Vector2.zero;
-                float previousWidth = 0f;
-                bool have = false;
+                points.Clear();
+                widths.Clear();
+
+                float carried = 0f;
 
                 for (int p = 0; p < channel.Count; p++)
                 {
@@ -162,19 +200,62 @@ namespace UniverseCreator.Nodes.Selectors
                     float grown = Mathf.Pow(Mathf.Max(1f, catchment / headArea), widthExponent);
                     float width = Mathf.Min(baseWidth * grown, cap);
 
+                    // Running maximum, for the reason HydrologyGenerator grades its river
+                    // nodes the same way: D8 turns on whole cells, so a course point can
+                    // round to a cell just off the thread of the channel and report less
+                    // catchment than the reach above it. A river does not lose its
+                    // watershed halfway down, and honouring the dip would pinch the mask
+                    // to a thread and reopen it - a width that stutters along the course.
+                    if (width > carried) carried = width;
+
+                    // XZ only: a course is a plan-view line. Its elevation is whatever the
+                    // ground under it turns out to be, which River Carve then cuts.
                     // Inverse of Matrix.PixelToWorld for a local array index.
-                    Vector2 here = new Vector2(originX + (i % resX) * solvePixel.x,
-                                               originZ + (i / resX) * solvePixel.y);
-
-                    if (have) StampReach(mask, previous, previousWidth, here, width);
-
-                    previous = here;
-                    previousWidth = width;
-                    have = true;
+                    points.Add(new Vector2(originX + (i % resX) * solvePixel.x,
+                                           originZ + (i / resX) * solvePixel.y));
+                    widths.Add(carried);
                 }
+
+                SmoothCourse(points);
+
+                for (int p = 1; p < points.Count; p++)
+                    StampReach(mask, points[p - 1], widths[p - 1], points[p], widths[p]);
             }
 
-            return mask;
+            return true;
+        }
+
+        /// <summary>
+        /// Takes the corners off a traced course: one pass of a three-point moving
+        /// average over the interior points, endpoints held.
+        /// </summary>
+        /// <remarks>
+        /// D8 flow directions can only turn in 45 degree steps, so a course crossing
+        /// ground that falls at any other angle is forced to approximate it by
+        /// alternating between two of the eight - a staircase. Stamped literally that
+        /// reads as a river running in zigzags, which is the second half of the reported
+        /// "zigzag" fault and is an artefact of the direction set, not of the terrain.
+        ///
+        /// Real channels do not have corners: flow has momentum, and a bend tighter than
+        /// a few channel widths is cut off rather than followed. Averaging three
+        /// consecutive points is the mildest correction that removes a staircase, and it
+        /// moves a point by at most two thirds of a solve cell - well inside the corridor
+        /// River Carve re-seats the bed within, so the course cannot be nudged out of the
+        /// low ground it was traced along. The filter reads the ORIGINAL neighbours, not
+        /// its own output, so it stays a single pass and cannot drift.
+        /// </remarks>
+        private static void SmoothCourse(List<Vector2> points)
+        {
+            if (points.Count < 3) return;
+
+            Vector2 previous = points[0];
+
+            for (int i = 1; i < points.Count - 1; i++)
+            {
+                Vector2 here = points[i];
+                points[i] = (previous + here + points[i + 1]) / 3f;
+                previous = here;
+            }
         }
 
         /// <summary>
@@ -196,6 +277,18 @@ namespace UniverseCreator.Nodes.Selectors
             Vector2 pixel = mask.PixelSize;
             float mppX = Mathf.Max(1e-4f, pixel.x);
             float mppZ = Mathf.Max(1e-4f, pixel.y);
+
+            // A channel cannot be drawn narrower than the grid it is drawn on. Where the
+            // real width falls under one pixel the capsule passes BETWEEN pixel centres
+            // and paints nothing, so consecutive reaches each leave a single isolated
+            // pixel and the trench arrives as a dotted line - the reported "not
+            // continuous but zigzag hole". Flooring the coverage radius at half a pixel
+            // makes the thinnest channel one continuous pixel wide, which is also the
+            // narrowest thing a heightfield of this resolution can physically hold. The
+            // real width still decides everything above that floor, so no river is
+            // widened; only unrepresentable ones are made continuous.
+            float minHalf = 0.5f * Mathf.Max(mppX, mppZ);
+            if (halfMax < minHalf) halfMax = minHalf;
 
             float originX = mask.worldPos.x;
             float originZ = mask.worldPos.z;
@@ -236,7 +329,7 @@ namespace UniverseCreator.Nodes.Selectors
                     }
 
                     float half = Mathf.Lerp(widthA, widthB, t) * 0.5f;
-                    if (half <= 1e-4f) continue;
+                    if (half < minHalf) half = minHalf;
 
                     float offX = worldX - (a.x + along.x * t);
                     float offZ = worldZ - (a.y + along.y * t);
@@ -313,6 +406,35 @@ namespace UniverseCreator.Nodes.Selectors
 
             if (stop != null && stop.StopRequested) return null;
 
+            // WHERE THE VALLEY FLOOR ACTUALLY IS.
+            //
+            // The mask is stamped from a drainage solve a few hundred cells across, so
+            // a traced centreline is only accurate to one solve cell - twenty metres or
+            // more on a normal world. On open ground that error is invisible. On a
+            // hillside it puts the line up the slope from the low ground it is meant to
+            // follow, and cutting a fixed depth below THAT grooves the hillside: a
+            // channel perched on a slope with its downhill shoulder standing over it
+            // like a ridge. That is the reported "rivers on the sides of hills, banks
+            // like a hill instead of a valley".
+            //
+            // Water does not do that. A channel occupies the lowest ground in its own
+            // CROSS-SECTION - the line across the flow - so the bed is seated on that
+            // line and the solve's positional error stops mattering.
+            //
+            // The cross-section is a line, not a box. This used to take the minimum over
+            // a square window, which also reached UP- and DOWN-stream: a pool a bank
+            // width downstream then set the bed here, dragging the profile into flat
+            // steps, and the window's own corners printed the axis-aligned rectangular
+            // footprints around every channel. A line across the flow has neither fault,
+            // and costs less because it is only read where the mask is wet.
+            int corridor = Mathf.Clamp(Mathf.RoundToInt(bankWidth / mpp), 1, 64);
+
+            // The mask at the corridor's own scale. The raw mask is a hard stamp whose
+            // gradient is meaningless between cells; blurred, it is a smooth ridge whose
+            // structure gives the direction across the channel at every wet cell.
+            Matrix maskSmooth = MatrixOperations.GaussianBlur(river, sigma);
+            if (stop != null && stop.StopRequested) return null;
+
             float power = Mathf.Max(0.2f, profilePower);
             float flatten = Mathf.Clamp01(bedFlattening);
 
@@ -332,7 +454,12 @@ namespace UniverseCreator.Nodes.Selectors
                     // thalweg, 0 at the bank. Raising it to a power sets the profile.
                     float profile = Mathf.Pow(w, power);
 
-                    float bed = Mathf.Lerp(src.arr[i], smoothed.arr[i], flatten * w);
+                    // Seated on the valley floor, then flattened along it. Taking the
+                    // lowest ground across the channel first is what stops a hillside
+                    // course from being cut as a perched groove: bed is the low ground,
+                    // wherever on the cross-section that turns out to be.
+                    float floorHere = LowestAcross(src, maskSmooth, x, z, resX, resZ, corridor);
+                    float bed = Mathf.Lerp(floorHere, smoothed.arr[i], flatten * w);
                     float cut = bed - depth * profile;
 
                     float value = Mathf.Min(dst.arr[i], cut);
@@ -341,8 +468,15 @@ namespace UniverseCreator.Nodes.Selectors
                     {
                         // Levees sit on the shoulder: strongest where the mask is
                         // partial, absent in the channel itself.
+                        //
+                        // Capped at the ground that was here, because this is the one
+                        // place the carve could RAISE terrain. A levee that climbs above
+                        // untouched ground is the ridge-beside-the-channel fault: real
+                        // levees are deposited from the channel's own spoil and stand
+                        // above the FLOODPLAIN, never above the hillside behind them.
+                        // Off by default; this keeps it honest when turned on.
                         float shoulder = w * (1f - w) * 4f;
-                        value += leveeHeight * shoulder;
+                        value = Mathf.Min(src.arr[i], value + leveeHeight * shoulder);
                     }
 
                     dst.arr[i] = Mathf.Clamp01(value);
@@ -350,6 +484,90 @@ namespace UniverseCreator.Nodes.Selectors
             }
 
             return dst;
+        }
+
+        /// <summary>
+        /// Lowest ground on the line ACROSS the channel through (x, z), out to
+        /// <paramref name="radius"/> pixels either side. Returns the cell's own height
+        /// when no cross direction can be read.
+        /// </summary>
+        /// <remarks>
+        /// Clamped at the edges rather than wrapped: a chunk's neighbour is a different
+        /// matrix, so the line is measured against the ground this chunk has.
+        /// </remarks>
+        private static float LowestAcross(Matrix src, Matrix mask, int x, int z,
+                                          int resX, int resZ, int radius)
+        {
+            float low = src.arr[z * resX + x];
+
+            float dx, dz;
+            if (!CrossDirection(mask, x, z, resX, resZ, out dx, out dz)) return low;
+
+            for (int k = 1; k <= radius; k++)
+            {
+                float ox = dx * k;
+                float oz = dz * k;
+
+                int ax = Mathf.Clamp(x + Mathf.RoundToInt(ox), 0, resX - 1);
+                int az = Mathf.Clamp(z + Mathf.RoundToInt(oz), 0, resZ - 1);
+                float a = src.arr[az * resX + ax];
+                if (a < low) low = a;
+
+                int bx = Mathf.Clamp(x - Mathf.RoundToInt(ox), 0, resX - 1);
+                int bz = Mathf.Clamp(z - Mathf.RoundToInt(oz), 0, resZ - 1);
+                float b = src.arr[bz * resX + bx];
+                if (b < low) low = b;
+            }
+
+            return low;
+        }
+
+        /// <summary>
+        /// Unit vector across the channel at (x, z), from the mask's structure tensor.
+        /// False when the mask is featureless there and no cross-section exists.
+        /// </summary>
+        /// <remarks>
+        /// A plain gradient will not do. The mask ridges along the thalweg, so its
+        /// gradient vanishes exactly on the centreline - the one place the seat matters
+        /// most - and picking an axis to fall back on is what puts axis-aligned edges
+        /// back into the result. The structure tensor sums g outer g over a window, and
+        /// the two banks' gradients are antiparallel, so they reinforce there instead of
+        /// cancelling. Its principal axis is the cross-section; flow runs perpendicular
+        /// to it. Undirected by construction, which is why both signs are sampled above.
+        /// </remarks>
+        private static bool CrossDirection(Matrix mask, int x, int z, int resX, int resZ,
+                                           out float dx, out float dz)
+        {
+            dx = 0f;
+            dz = 0f;
+            if (mask == null || resX < 3 || resZ < 3) return false;
+
+            float jxx = 0f, jxz = 0f, jzz = 0f;
+
+            for (int oz = -1; oz <= 1; oz++)
+            {
+                int cz = Mathf.Clamp(z + oz, 1, resZ - 2);
+
+                for (int ox = -1; ox <= 1; ox++)
+                {
+                    int cx = Mathf.Clamp(x + ox, 1, resX - 2);
+                    int c = cz * resX + cx;
+
+                    float gx = mask.arr[c + 1] - mask.arr[c - 1];
+                    float gz = mask.arr[c + resX] - mask.arr[c - resX];
+
+                    jxx += gx * gx;
+                    jxz += gx * gz;
+                    jzz += gz * gz;
+                }
+            }
+
+            if (jxx + jzz < 1e-10f) return false;
+
+            float angle = 0.5f * Mathf.Atan2(2f * jxz, jxx - jzz);
+            dx = Mathf.Cos(angle);
+            dz = Mathf.Sin(angle);
+            return true;
         }
     }
 
@@ -508,9 +726,14 @@ namespace UniverseCreator.Nodes.Selectors
         /// The flood fill is iterative over an explicit stack rather than recursive: a
         /// single basin can cover most of the grid, and recursion would overflow the
         /// worker thread's stack long before it finished.
+        ///
+        /// Shared with the Hydrology Spawner for the same reason River Network Trace's
+        /// stamp is: the basins this finds are the basins the spawner places Lake
+        /// objects in. A second copy of the fill would drift from this one and put a
+        /// lake where no basin was flooded.
         /// </remarks>
-        private static float[] LakeSurface(WorldDrainage solve, float floor, float sea,
-                                           float minArea, StopToken stop)
+        internal static float[] LakeSurface(WorldDrainage solve, float floor, float sea,
+                                            float minArea, StopToken stop)
         {
             int resX = solve.resX;
             int resZ = solve.resZ;

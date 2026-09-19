@@ -134,8 +134,10 @@ namespace UniverseCreator.Nodes.Outputs
 
         public int beachLayer = 3;
 
-        [Tooltip("Normalised height of the water plane.")]
-        public float seaLevel = 0.32f;
+        [Tooltip("Normalised height of the water plane. The world's one waterline - the " +
+                 "same default Ocean Level and the Hydrology Spawner use, so the beach " +
+                 "is painted where the water actually meets the land.")]
+        public float seaLevel = 0.35f;
 
         [Tooltip("How far above sea level the beach reaches, in normalised height.")]
         public float beachHeight = 0.012f;

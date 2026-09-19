@@ -116,7 +116,20 @@ namespace UniverseCreator.Editor.Diagnostics
             TestVolumeReachesTheRealBed();
             TestNodeReadoutsMatchTheCourse();
             TestLakeShapeAndSizeComeFromTheBasin();
+
+            // Module 2, in UCSelfTest.Hydrology.cs.
+            TestChannelHeadAreaRescalesToTheWorld();
+            TestSpawnerIsLiveWhenOnlyItsHeightIsWired();
+            TestWaterWalkSeesInterfaceOnlyOutputs();
+            TestSpawnerPlacesRealWaterObjects();
+            TestLakeDepthGateMatchesTheMask();
+            TestWaterfallsFormOnSteepReaches();
+            TestDownstreamWidthGrowsWithoutAuthoring();
+
             TestGraphHealsMissingNodeSlots();
+
+            // Module 6 path-tool seam (TerrainShapeApplier), in UCSelfTest.PathSeam.cs.
+            TestPathSeamShaping();
 
             // Module 3, in UCSelfTest.Ecology.cs.
             TestEcologyConstants();
@@ -2974,8 +2987,14 @@ namespace UniverseCreator.Editor.Diagnostics
             lakeCentres.Add(new Vector3(span * 0.25f,
                                         ground(span * 0.25f, centreZ), centreZ));
 
+            // Index-aligned with lakeCentres: the planner takes each lake's own reach,
+            // not one shared radius.
+            List<float> lakeRadii = new List<float>();
+            lakeRadii.Add(120f);
+
             List<RiverNetworkPlanner.PlannedRiver> plans =
-                RiverNetworkPlanner.PlanTrunkRivers(grid, 2, 3, 0f, lakeCentres, 120f, 60f);
+                RiverNetworkPlanner.PlanTrunkRivers(grid, 2, 3, 0f, lakeCentres, lakeRadii,
+                                                    60f, 0f);
 
             Check(plans != null && plans.Count > 0,
                   "the planner found no river at all on a valley that drains to one edge");
@@ -3010,7 +3029,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // Outlets are appended to the same list by the spawner, so the lake index is
             // the other half of what it trusts.
             List<RiverNetworkPlanner.PlannedRiver> outlets =
-                RiverNetworkPlanner.PlanLakeOutlets(grid, 2, 0f, lakeCentres, 120f, 60f);
+                RiverNetworkPlanner.PlanLakeOutlets(grid, 2, 0f, lakeCentres, lakeRadii, 60f);
 
             Check(outlets != null, "the lake-outlet planner returned null");
             if (outlets == null) return;

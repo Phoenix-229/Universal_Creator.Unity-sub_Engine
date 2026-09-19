@@ -115,8 +115,6 @@ namespace UniverseCreator.Editor.Inspectors
 
             using (new EditorGUI.IndentLevelScope())
             {
-                float span = owner.worldSizeKm * 1000f;
-
                 float km = EditorGUILayout.DelayedFloatField(
                     new GUIContent("World Size (km)", "World side length in kilometres."),
                     owner.worldSizeKm);
@@ -127,40 +125,66 @@ namespace UniverseCreator.Editor.Inspectors
                     layoutChanged = true;
                 }
 
-                // Odd counts only - an even grid has no single centre cell for the
-                // player to sit in, which the recentring logic depends on.
-                int side = EditorGUILayout.IntSlider(
-                    new GUIContent("Chunks Per Side", "Cells per axis in the virtual grid. Odd values only."),
-                    owner.chunkCountPerSide, 1, 15);
-                if (side != owner.chunkCountPerSide)
+                // CHUNK SIZE IS THE AUTHORED VALUE. The count is derived from it and the
+                // world size, so a tile stays the size the developer asked for whatever
+                // the world size - type 1000 and get 1 km tiles, not 800. This is the
+                // inversion the old inspector had backwards, which is why setting the size
+                // used to snap you back to a 25-chunk grid.
+                float wantSize = EditorGUILayout.DelayedFloatField(
+                    new GUIContent("Chunk Size (m)",
+                                   "Metres per tile - the authored value. The chunk count follows from " +
+                                   "this and the world size. 1000 = 1 km tiles."),
+                    owner.chunkSizeMeters);
+                if (wantSize > 0.01f && !Mathf.Approximately(wantSize, owner.chunkSizeMeters))
                 {
-                    RecordOwner("Change Chunk Count");
-                    owner.chunkCountPerSide = side;
+                    RecordOwner("Change Chunk Size");
+                    owner.chunkSizeMeters = wantSize;
                     layoutChanged = true;
                 }
 
-                // Chunk size is derived from span/count, so setting it solves for the
-                // count instead of storing a second source of truth that could drift.
-                float currentSize = owner.GetChunkSize();
-                float wantSize = EditorGUILayout.DelayedFloatField(
-                    new GUIContent("Chunk Size (m)",
-                                   "Metres per cell. Solves for the chunk count; the result snaps to an odd value."),
-                    currentSize);
-                if (wantSize > 0.01f && !Mathf.Approximately(wantSize, currentSize))
+                // Resident window - 'the 25'. The tiles kept loaded around the player at
+                // runtime. Fixed, not tied to world size, so a big world does not hold
+                // itself resident and crash a phone. Odd only.
+                int window = EditorGUILayout.IntSlider(
+                    new GUIContent("Resident Window",
+                                   "Tiles per side kept loaded around the player at runtime ('the 25'). " +
+                                   "Odd only. Not tied to world size."),
+                    owner.residentWindowPerSide, 1, UniverseCreatorObject.MaxResidentWindowPerSide);
+                if (window != owner.residentWindowPerSide)
                 {
-                    int solved = Mathf.Clamp(Mathf.RoundToInt(span / wantSize), 1, 15);
-                    if (solved % 2 == 0) solved++;
-                    if (solved != owner.chunkCountPerSide)
-                    {
-                        RecordOwner("Change Chunk Size");
-                        owner.chunkCountPerSide = solved;
-                        layoutChanged = true;
-                    }
+                    RecordOwner("Change Resident Window");
+                    owner.residentWindowPerSide = window;
+                    layoutChanged = true;
                 }
 
+                // Hybrid streaming toggle. On by default; only engages when the world is
+                // bigger than the resident window, so a small world stays whole regardless.
+                bool stream = EditorGUILayout.Toggle(
+                    new GUIContent("Stream At Runtime",
+                                   "On: a large world streams a window around the player in play mode. " +
+                                   "Engages only when the world is bigger than the resident window - a " +
+                                   "small world stays whole either way. Untick to force whole-world."),
+                    owner.streamingEnabled);
+                if (stream != owner.streamingEnabled)
+                {
+                    RecordOwner("Change Stream At Runtime");
+                    owner.streamingEnabled = stream;
+                    layoutChanged = true;
+                }
+
+                owner.ValidateSettings();
+
+                int total = owner.chunkCountPerSide * owner.chunkCountPerSide;
+                int resident = owner.residentWindowPerSide * owner.residentWindowPerSide;
+                bool fits = (owner.chunkCountPerSide - 1) / 2 <= owner.GetStreamRadius();
                 EditorGUILayout.LabelField(" ",
                     "Grid " + owner.chunkCountPerSide + " x " + owner.chunkCountPerSide +
-                    "  |  " + owner.GetChunkSize().ToString("F0") + " m per cell",
+                    " = " + total + " tiles  |  " + owner.GetChunkSize().ToString("F0") + " m each",
+                    EditorStyles.miniLabel);
+                EditorGUILayout.LabelField(" ",
+                    (!owner.streamingEnabled || fits
+                        ? "Runtime: whole world (fits the window, no streaming)"
+                        : "Runtime: streaming " + resident + " (+ buffer ring)") + "  |  whole world in editor",
                     EditorStyles.miniLabel);
 
                 int res = EditorGUILayout.DelayedIntField(
@@ -174,8 +198,8 @@ namespace UniverseCreator.Editor.Inspectors
                 }
 
                 int ring = EditorGUILayout.IntSlider(
-                    new GUIContent("High-LOD Ring", "Centre square held at full fidelity."),
-                    owner.highLODRingSize, 1, Mathf.Max(1, owner.chunkCountPerSide));
+                    new GUIContent("High-LOD Ring", "Centre square of the resident window held at full fidelity."),
+                    owner.highLODRingSize, 1, Mathf.Max(1, owner.residentWindowPerSide));
                 if (ring != owner.highLODRingSize)
                 {
                     RecordOwner("Change High-LOD Ring");

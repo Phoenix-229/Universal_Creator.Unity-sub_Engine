@@ -811,7 +811,7 @@ one `Height` out. That covers `Perlin Noise`, `Simplex Noise`, `Value Noise`,
 | Domain Warp Field | *(none)* | `Warp X`, `Warp Z` (Matrix) |
 | Tectonic Plate Seed | *(none)* | `Height`, `Boundary`, `Plate Id` (Matrix) |
 | Prevailing Wind | *(none)* | `Wind X`, `Wind Z` (Matrix) |
-| Hydrology Spawner | *(none)* | `Lake Mask`, `River Mask` (Matrix) |
+| Hydrology Spawner | `Height` (Matrix) | `Lake Mask`, `River Mask` (Matrix) |
 | Random Seed | *(none)* | `Seed` (**Scalar**) |
 | River Source Seed | `Height`, `Precipitation` (Matrix) | `Mask` (Matrix) |
 
@@ -964,9 +964,11 @@ pixel, `Wetness` darkens it, and `Override` lets a hand-painted mask win locally
 `Weather` and `Lighting Output` are the seams where the terrain graph hands biased fields to
 the three live Module-3 managers.
 
-`Hydrology Spawner` (a **Creator**, `Lake Mask` + `River Mask` out, no input) is where a
-hydrology branch begins — its two masks seed the `River Network Trace` / `Lake Fill` chain
-documented above.
+`Hydrology Spawner` (a **Creator**, `Height` in, `Lake Mask` + `River Mask` out) is where a
+procedural water branch begins. Feed it the terrain height that the water should follow. Its
+two masks describe the same lake basins and river courses used for the water bodies it spawns;
+they can be sent directly to the river and lake shaping nodes, or used to restrict `Lake Fill`
+while `River Network Trace` is used for an independently tuned network.
 
 #### Texture Graph nodes and their ports
 
@@ -1297,11 +1299,14 @@ down again.
 
 | Port | Dir | Type | Required | Wire it to |
 |---|---|---|---|---|
-| `Lake Mask` | out | Matrix | **effectively yes** | **Wire it, even though it is zero-filled.** Take it to any Output — a `Height Output`'s `Mask`, a `Blend`, a `Biome Splat Output` layer mask. It is the wire, not the data, that matters: it is how the graph learns this node is in use. See below |
-| `River Mask` | out | Matrix | no | Same story. One wired output is enough to switch the node on; wire the second only if something downstream reads it |
+| `Height` | in | Matrix | **yes** | The terrain height that the water should follow, normally the same settled height chain used by the river and lake nodes. Unwired, both mask outputs are empty |
+| `Lake Mask` | out | Matrix | — | The procedural lake footprint. Feed it to `Lake Fill`'s optional `Lake Mask`, a water wetness/splat mask, or any path that reaches an Output |
+| `River Mask` | out | Matrix | — | The procedural, width-graded river course. Feed it to `River Carve` and `River Fill`, or any path that reaches an Output |
 
-The node has **no inputs**. It reads the *settled terrain*, not the graph, because at
-graph-evaluation time the terrain does not exist yet.
+The `Height` input is part of the graph contract. The spawner solves that input for its masks;
+the main-thread water build uses the settled terrain and the same node settings to place the
+matching `UCWaterBody` objects. Keep the height source and water settings consistent across the
+spawner, `River Carve`, `River Fill`, `Lake Fill`, and `Water Bank Seat`.
 
 **The one rule that decides whether this node runs at all.** The spawner is skipped unless a
 path exists from it, forwards through the wires, to an Output node. `UCWaterSystemManager`
@@ -1310,12 +1315,12 @@ only spawners it reaches are run. A `Hydrology Spawner` sitting on the canvas wi
 outputs free is *unreachable*, and unreachable means never executed — no rivers, no lakes,
 no ocean, no error, no warning. It is the single most common reason this node "did nothing".
 
-The masks come out **zero-filled**, and that is not a bug — the node's real product is scene
-objects, not a matrix, and spawning `GameObject`s cannot happen on a worker thread. So
-`UniverseCreatorObject` runs it directly, on the main thread, *after the terrain has settled*
-(`ChunkManager.RunAfterSettle`) — spawning any earlier traced every river across the flat
-baseline and stacked every lake at one height. The masks exist so the ports can be wired at
-all, and wiring one is how you consent to the water.
+The masks are computed data, not placeholders: `Lake Mask` describes the basins selected by the
+spawner and `River Mask` describes the courses and widths selected by the spawner. Spawning
+`GameObject`s still cannot happen on a worker thread, so `UniverseCreatorObject` places the
+matching `UCWaterBody` objects on the main thread *after the terrain has settled*
+(`ChunkManager.RunAfterSettle`). The output wire is still required because reachability is how
+the water system decides which spawners to execute.
 
 Two more gates sit outside the graph and both are open by default, but check them when the
 wire is right and nothing appears:
@@ -1338,6 +1343,26 @@ The full wiring procedure, with the shader half as well, is
 | `Enable Distributaries` | on | Let a big river split into a delta where it meets the ocean |
 | `Max Distributaries` | 4 | Arms in that delta |
 | `Generate Ocean` | on | Spawn one world-sized sea at the world-edge falloff level, clipped at the shore. Off leaves the world land-locked |
+
+The spawner also exposes the solve settings that keep its masks and spawned bodies aligned:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Drainage Resolution` | 256 | Cells per side of the world drainage solve. Higher values cost more and refine routing, not the final chunk edge |
+| `Sea Level` | 0.35 | Normalised waterline. Rivers terminate here; basins at or below it are treated as sea rather than lakes |
+| `Channel Head Area` | 250,000 | Catchment area in square metres required for a permanent river channel. Lower this on small worlds |
+| `Max Channels` | 512 | Safety cap on traced river courses; it is not the requested river-object count |
+| `Min Lake Depth` | 0.002 | Minimum basin depth, normalised, before the lake mask accepts water |
+| `Depth Normalise` | 0.05 | Lake depth mapped to 1 in the spawner's lake mask calculation |
+| `Shore Softness` | 0.15 | Softness of the lake-mask shoreline |
+
+`Height` is required. With it unwired, both masks return an empty matrix and no useful water
+can be planned from this node. The masks are not zero-filled reachability tokens: `Lake Mask`
+is the basin water footprint and `River Mask` is the traced, width-graded course. They match
+the basins and courses used by the spawned `UCWaterBody` objects. Connect the same terrain
+height to this node that the rest of the water chain uses, then connect `Lake Mask` to
+`Lake Fill`'s optional restriction and `River Mask` to `River Carve` and `River Fill` when you
+want the graph's carved and filled water to match the spawned bodies exactly.
 
 Lakes and outlets are counted as a **fraction of chunks**, not as fixed numbers, because
 the number of basins a landscape supports scales with its area. At 8 % against 24 %, about
@@ -1922,9 +1947,9 @@ The standard vegetation gate: height 200–1400 m, slope 0–28°, all combined.
 
 ### Hydrology selectors
 
-#### Read this first: the water family is nine nodes, in three graphs' worth of jobs
+#### Read this first: the water family is ten nodes, in three graphs' worth of jobs
 
-Water is not one node and it is not one chain. Nine nodes touch water, they live in three
+Water is not one node and it is not one chain. Ten nodes touch water, they live in three
 different categories, and they do three different jobs. Wiring one and expecting water is the
 single most common mistake, so here is the whole family on one page before the detail.
 
@@ -2673,10 +2698,10 @@ produced correct maps and nothing consumed them.
 >
 > **So how does water appear, if nothing outputs it?** Two things, and they are the whole
 > answer. First: a `Hydrology Spawner` must be **wired through to one of the Output nodes
-> above** — any of them, by any path. Its own outputs are zero-filled and change nothing
-> downstream, but the graph decides what to execute by walking backwards from every Output,
-> so an unwired spawner is unreachable and is never run at all. The wire is not carrying
-> data; it is granting permission. Second: the water's *material* comes from the Texture
+> above** — any of them, by any path. Its outputs carry the procedural lake and river masks,
+> but the graph still decides what to execute by walking backwards from every Output, so an
+> unwired spawner is unreachable and is never run at all. The wire both carries data and grants
+> permission. Second: the water's *material* comes from the Texture
 > Graph, through `Terrain Blend Final`'s `Water` input into `Shader Output`. Neither half
 > produces visible water without the other. The full procedure, with a checklist, is
 > [How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired);
@@ -4724,12 +4749,14 @@ the only node in the system that creates water objects. `River Carve`, `Lake Fil
 and `Ocean Level` do not create water — see
 [chapter 16](#16-selector-nodes).
 
-**Step 2. Wire one of its outputs through to an Output node.** This is the step people skip, and
-skipping it is silent.
+**Step 2. Feed its required `Height` input, then wire one of its outputs through to an Output
+node.** Both parts matter: without `Height` the spawner has no terrain to solve, and without a
+path to an Output the water system never runs it.
 
-The spawner's `Lake Mask` and `River Mask` come out **zero-filled**, so there is a natural
-instinct to leave them unconnected — the data is worthless, after all. But the graph does not
-decide what to run by looking at data; it decides by looking at **reachability.**
+The spawner's `Lake Mask` and `River Mask` are **real procedural masks**, not zero-filled
+reachability tokens. They describe the same basins and courses used for the spawned bodies, so
+they can drive the shaping chain directly. The graph still decides whether to run the node by
+looking at **reachability**:
 `UCWaterSystemManager` collects every `Output` node in the graph, walks the wires *backwards*
 from each, and runs only the `Hydrology Spawner`s that walk reaches. A spawner whose outputs go
 nowhere is never reached, therefore never executed: no rivers, no lakes, no ocean, and **no
@@ -4738,13 +4765,16 @@ error message**, because an unreachable node is a legitimate thing for a graph t
 So the wire is the consent. Any path to any Output will do:
 
 ```
-Hydrology Spawner ──Lake Mask──▶ Height Output (Mask input)
-Hydrology Spawner ──Lake Mask──▶ Blend ──▶ … ──▶ Height Output
-Hydrology Spawner ──River Mask──▶ Biome Splat Output (a layer mask)
+Height Source ──Height──▶ Hydrology Spawner
+Hydrology Spawner ──Lake Mask──▶ Lake Fill (Lake Mask)
+Hydrology Spawner ──River Mask──▶ River Carve (River Mask)
+Hydrology Spawner ──River Mask──▶ River Fill (River Mask)
+Hydrology Spawner ──Lake Mask──▶ … ──▶ Height Output (any reachable path)
 ```
 
-The zero mask changes nothing downstream — it multiplies to nothing, blends to nothing — so
-wiring it into a live chain is harmless. Its only job is to be reachable.
+Use the same `Height` source for `River Carve`, `River Fill`, and `Water Bank Seat` ordering as
+appropriate. The final output path can be the shaping chain itself, or any other valid route to
+an Output; the important point is that the spawner is reachable and its height input is live.
 
 **Step 3. Shape the ground for it (recommended, not required).** The spawner reads the *settled
 terrain* to decide where water goes, so a graph with river geometry already cut into it produces
@@ -6092,10 +6122,11 @@ walks backwards from every Output and runs only the spawners it reaches, so a sp
 the canvas with both `Lake Mask` and `River Mask` free is unreachable — and an unreachable node
 is a legitimate thing for a graph to contain, so nothing warns you.
 
-The confusing part is that both its outputs are **zero-filled by design**, which makes them look
-pointless to connect. They are: the wire carries nothing. It exists so the graph can see the node
-is in use. Wire either one into any live chain — a `Height Output`'s `Mask`, a `Blend`, a splat
-layer mask — and the zero multiplies away downstream while the node starts running.
+The confusing part is that the outputs are masks, not water objects. `Lake Mask` is the basin
+footprint and `River Mask` is the traced river course, so connect them to the corresponding
+shaping or texturing inputs. Also check the required `Height` input: without it the node has no
+terrain to solve and both masks are empty. At least one output must still reach an `Output` node
+so the water system considers the spawner reachable and executes it.
 
 In order, the rest of the causes:
 

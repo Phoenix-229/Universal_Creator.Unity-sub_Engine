@@ -8,7 +8,9 @@
 //           to translate OutputBag -> SetHeights/SetAlphamaps/SetHoles.
 // -----------------------------------------------------------------------------
 
+using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Integration;
 using UniverseCreator.Nodes;
 
 namespace UniverseCreator.TerrainSystem
@@ -74,14 +76,17 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public static bool ApplyOutputs(TerrainData data, OutputBag outputs, UniverseCreatorObject settings)
         {
-            return ApplyOutputs(data, outputs, settings, null, default(Bounds), 0f);
+            return ApplyOutputs(data, outputs, settings, null, default(Bounds), 0f, null);
         }
 
         /// <summary>
-        /// As ApplyOutputs, but folds manual sculpt edits back in on top of the
-        /// generated heights. Pass the world's override layer and the chunk's world
-        /// bounds; the deltas are added before the height write, so an edit survives
-        /// every subsequent graph re-run instead of being overwritten by it.
+        /// As ApplyOutputs, but folds a path tool's terrain shapings and the author's
+        /// manual sculpt edits back in on top of the generated heights, in that order.
+        /// Pass the world's override layer, the chunk's world bounds, and the shaping
+        /// requests (null if the world has no path tool); the shapings conform the
+        /// ground to roads and key dams into their valley walls, then the sculpt deltas
+        /// are added, both before the height write, so neither is overwritten by a
+        /// subsequent graph re-run.
         ///
         /// The height write goes through SetHeightsDelayLOD, which stages the new
         /// heightfield without rebuilding the LOD tree or pushing the GPU texture. That
@@ -98,7 +103,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public static bool ApplyOutputs(TerrainData data, OutputBag outputs, UniverseCreatorObject settings,
                                         TerrainOverrideLayer overrides, Bounds chunkWorldBounds,
-                                        float metresPerSample)
+                                        float metresPerSample, IReadOnlyList<TerrainShapeRequest> shapeRequests)
         {
             if (data == null || outputs == null) return false;
 
@@ -119,6 +124,20 @@ namespace UniverseCreator.TerrainSystem
                 if (settings != null && metresPerSample > 0f)
                     WaterCarveRegistry.ApplyAll(settings, outputs.heightmap,
                                                 chunkWorldBounds, metresPerSample);
+
+                // A PATH TOOL'S SHAPINGS, BETWEEN THE DIG AND THE SCULPT.
+                //
+                // The same seat in the order as the water carve, for the same reason:
+                // a road conforms to ground the river has already cut, so an embankment
+                // beside a river blends down to the carved bank instead of to ground
+                // that no longer exists - and the hand sculpt below still lands on top
+                // of the road. Re-derived from the request on every apply exactly as the
+                // carve is, so a regenerate re-conforms the road rather than wiping it,
+                // and a withdrawn request leaves nothing behind on the next rebuild.
+                // Null on a world with no path tool, and then this costs nothing.
+                if (settings != null && metresPerSample > 0f && shapeRequests != null)
+                    TerrainShapeApplier.ApplyAll(shapeRequests, outputs.heightmap,
+                                                 chunkWorldBounds, metresPerSample, settings.maxHeightMeters);
 
                 // Manual edits are re-applied here rather than after the write,
                 // because reading the heights back out of TerrainData to patch them

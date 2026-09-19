@@ -9,7 +9,7 @@
 //  resolve against the real grid today, so this inspector proves it by sampling
 //  the terrain under the scene view pivot and showing the answer. If that readout
 //  says "no chunk manager", the bridge is genuinely not wired and the road module
-//  will get zeros - which is worth finding here rather than in Module 7.
+//  will get zeros - which is worth finding here rather than in Module 6.
 //
 //  The road behaviour fields are declared only and are drawn disabled.
 //
@@ -90,7 +90,7 @@ namespace UniverseCreator.Editor.Inspectors
 
         /// <summary>
         /// Samples the live provider at the scene view pivot. This is the whole
-        /// contract in four numbers - if these are right, Module 7 gets right
+        /// contract in four numbers - if these are right, Module 6 gets right
         /// answers; if they are zeros, it will not.
         /// </summary>
         private void DrawProbe(RoadCityMasterLinker linker)

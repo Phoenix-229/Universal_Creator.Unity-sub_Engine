@@ -29,6 +29,7 @@
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
+using UniverseCreator.Integration;
 using UniverseCreator.Nodes;
 
 namespace UniverseCreator.TerrainSystem
@@ -188,6 +189,18 @@ namespace UniverseCreator.TerrainSystem
         // not crossed into a new cell.
         private int appliedRingBoost = 0;
 
+        // Horizontal travel direction, normalised, in world XZ. Zero when near-stationary.
+        // Fast movers prefetch AHEAD along this rather than growing the window in every
+        // direction, so a jet's resident set does not balloon behind it where it will
+        // never look - the memory spike that would take a phone out. See UpdateSpeedAdaptive.
+        private Vector3 streamForward = Vector3.zero;
+
+        // Cells to keep resident ahead of the mover, along streamForward, on top of the
+        // base window. Set from speed in UpdateSpeedAdaptive; the applied copy lets a
+        // change re-classify without a cell crossing, exactly like appliedRingBoost.
+        private int prefetchAheadCells = 0;
+        private int appliedPrefetchAhead = 0;
+
         // Last focus position, for measuring speed when the mover has no physics body.
         private Vector3 lastFocusPos;
         private bool hasLastFocusPos;
@@ -220,6 +233,26 @@ namespace UniverseCreator.TerrainSystem
         // PumpCompleted runs once the queue drains. Without it a run whose last cell
         // was superseded would retire with nothing written and never re-weld.
         private bool settleStitchPending;
+
+        // Which step of the end-of-world settle we are on, advanced ONE per pump so no
+        // single pump runs the whole finishing pass on the main thread. 0 = not settling.
+        //
+        // WHY THIS EXISTS (the 96% hang)
+        // ------------------------------
+        // The settle used to run every step - stitch, slice map, carver re-fit (which
+        // re-solves every river), hydrology spawn - in the one pump where the queue
+        // drained. GetProgress reads done/pool.Count, so on 25 tiles the bar reached
+        // 24/25 = 96% and then FROZE there: the main thread was inside that one blocking
+        // pump doing all the end-of-world work with no repaint and no progress report, so
+        // the whole finishing pass was billed invisibly to "the last chunk". Splitting it
+        // one phase per pump lets the view repaint and the bar advance 96 -> 100 between
+        // steps, and bounds each pump's main-thread cost to a single phase.
+        private int settlePhase;
+        private const int SettlePhaseStitch     = 1;   // weld the final grid
+        private const int SettlePhaseSliceMap   = 2;   // refresh the slice/section map
+        private const int SettlePhaseCarvers    = 3;   // re-fit water to settled ground
+        private const int SettlePhaseAfter      = 4;   // fire the armed one-shot (hydrology)
+        private const int SettlePhaseCount      = 4;
 
         // A one-shot fired the moment the world next settles (see the drain block in
         // PumpCompleted). The regenerate path arms it via RunAfterSettle so the
@@ -270,6 +303,12 @@ namespace UniverseCreator.TerrainSystem
             { 
                 if (activeWorkers > 0 || pending.Count > 0 || setupDepth > 0 || IsRebuildingAll)
                     return true;
+
+                // A staged settle is still work: the phases run across pumps after the
+                // queue drains, so without this the driver would stop ticking mid-settle
+                // and the finishing phases (stitch/slice/carvers/hydrology) would stall
+                // until some unrelated event pumped again.
+                if (settlePhase > 0) return true;
 
                 for (int i = 0; i < pool.Count; i++)
                     if (pool[i].workerDone && !pool[i].applied) return true;
@@ -345,14 +384,31 @@ namespace UniverseCreator.TerrainSystem
         {
             if (setupDepth > 0) return -1f;
             if (pool.Count == 0) return 1f;
-            
+
             int busy = activeWorkers + pending.Count;
             for (int i = 0; i < pool.Count; i++)
                 if (pool[i].workerDone && !pool[i].applied) busy++;
-                
+
             int done = pool.Count - busy;
             if (done < 0) done = 0;
-            return (float)done / pool.Count;
+            float baked = (float)done / pool.Count;
+
+            // The finishing settle is real work the bar must not skip. Every chunk being
+            // baked used to read as 100% while the settle (stitch/slice/carvers/hydrology)
+            // still ran synchronously - the frozen "96%" the user saw was actually the bar
+            // parked at the last pre-settle value while that pass blocked the thread. Now
+            // the settle is staged one phase per pump, so map the phases onto the top slice
+            // of the bar: it keeps advancing 96 -> 100 as each phase completes, and never
+            // shows a full bar over a world that is still finishing.
+            if (settlePhase > 0)
+            {
+                float phaseFrac = (float)(settlePhase - 1) / SettlePhaseCount;   // 0..1 across phases
+                return Mathf.Lerp(0.96f, 1f, phaseFrac);
+            }
+
+            // No settle owed (settlePhase == 0): the fraction is honest as-is. Fully baked
+            // with no settle pending is a genuinely finished world, so 1f is correct here.
+            return baked;
         }
 
         /// <summary>
@@ -363,6 +419,17 @@ namespace UniverseCreator.TerrainSystem
         public string GetProgressLabel()
         {
             if (setupDepth > 0) return "Preparing terrain cells...";
+
+            // Name the finishing phase so the top of the bar reads as real work rather than
+            // a stall. This is the "96% hang" made legible: the user now sees welding /
+            // mapping / water-fitting / hydrology instead of a frozen number.
+            switch (settlePhase)
+            {
+                case SettlePhaseStitch:   return "Finishing - welding chunk seams...";
+                case SettlePhaseSliceMap: return "Finishing - mapping terrain sections...";
+                case SettlePhaseCarvers:  return "Finishing - fitting water to terrain...";
+                case SettlePhaseAfter:    return "Finishing - placing rivers and lakes...";
+            }
 
             int outstanding = activeWorkers + pending.Count;
             for (int i = 0; i < pool.Count; i++)
@@ -409,6 +476,19 @@ namespace UniverseCreator.TerrainSystem
         // someone else's tunnel.
         private int nextCarveId = 1;
 
+        // U-3: the tunnel/metro-portal holes this manager is holding open on behalf of a path tool's CutOpening
+        // requests, keyed by the request's sourceId so a withdrawn or moved request can find and fill its own hole.
+        // NOT serialised, and it lives and dies with `carves` above -- both are empty after a domain reload, so the
+        // next settle re-cuts every still-held opening straight from the request set, the same reversible-sync
+        // discipline the dam governance follows rather than persisting an edit. The value is the CarveTunnel handle;
+        // the box it was cut with is read back off the carve itself, so a moved mouth is caught without storing bounds
+        // twice.
+        private readonly Dictionary<string, int> openingCarves = new Dictionary<string, int>();
+
+        // Key snapshot reused by the tunnel reconcile, so syncing the holes each settle does not allocate a list just
+        // to iterate a dictionary it also edits.
+        private readonly List<string> openingReconcileKeys = new List<string>();
+
         // Parents every shell so the hierarchy stays readable and one SetActive can
         // hide the lot during debugging.
         private Transform shellRoot;
@@ -429,6 +509,11 @@ namespace UniverseCreator.TerrainSystem
             // previous one is not merely stale - it belongs to another terrain.
             bakeEcology = null;
             bakeEcologyResolved = false;
+
+            // Same for the shaping inbox: a rebind means a different world, whose inbox
+            // is a different component (or none). Re-found lazily on the next access.
+            shapeInbox = null;
+            shapeInboxResolved = false;
         }
 
         private UniverseCreatorObject Owner
@@ -437,6 +522,37 @@ namespace UniverseCreator.TerrainSystem
             {
                 if (owner == null) owner = GetComponentInParent<UniverseCreatorObject>();
                 return owner;
+            }
+        }
+
+        // The path-tool shaping inbox for this world, found once and cached like Owner.
+        // A find, never a create: a world with no path tool must not gain a component
+        // from being baked, so this stays null there and the shaping passes no-op.
+        private TerrainShapeInbox shapeInbox;
+        private bool shapeInboxResolved;
+
+        /// <summary>
+        /// The terrain shapings a path tool has left for this world, or null if there
+        /// is no inbox. Read by the bake and the re-cut to conform roads and key dams;
+        /// re-derived from the request each pass, never a stored edit, so it survives a
+        /// regenerate and a withdrawn request heals on the next rebuild. Latched only
+        /// once an owner exists to search from, so binding order cannot cache a false
+        /// miss before the world is wired up.
+        /// </summary>
+        private IReadOnlyList<TerrainShapeRequest> ShapeRequests
+        {
+            get
+            {
+                if (!shapeInboxResolved)
+                {
+                    UniverseCreatorObject o = Owner;
+                    if (o != null)
+                    {
+                        shapeInbox = TerrainShapeInbox.FindFor(o.gameObject);
+                        shapeInboxResolved = true;
+                    }
+                }
+                return shapeInbox != null ? shapeInbox.Requests : null;
             }
         }
 
@@ -539,6 +655,7 @@ namespace UniverseCreator.TerrainSystem
 
             IsRebuildingAll = true;
             settleStitchPending = true;
+            settlePhase = 0;   // a fresh build must settle from the top, not resume a stale phase
 
             // A rebuild is the moment the world is allowed to change its mind about
             // ecology: a committed inspector edit, a new preset, useEcology being
@@ -592,7 +709,7 @@ namespace UniverseCreator.TerrainSystem
                     if (c.go == null || !c.go.activeSelf) continue;
 
                     int ring = DualLODSystem.RingDistance(c.cell.x, c.cell.z, centreCell.x, centreCell.z);
-                    c.lod = o.ShouldRenderWholeWorld() ? LODLevel.High : DualLODSystem.Classify(ring, o.highLODRingSize, o.chunkCountPerSide);
+                    c.lod = o.ShouldRenderWholeWorld() ? LODLevel.High : DualLODSystem.Classify(ring, o.highLODRingSize, o.residentWindowPerSide);
                     QueueGenerate(o, c);
                 }
 
@@ -1489,6 +1606,13 @@ namespace UniverseCreator.TerrainSystem
             UniverseCreatorObject o = Owner;
             if (o == null || !built) return;
 
+            // Hybrid gate. A world that fits in the resident window, or one the developer
+            // ticked to stay whole, holds every cell resident even in play - there is no
+            // window to slide and no cell to park, so the whole per-frame LOD sweep would
+            // spend itself finding nothing changed. ApplyStreamWindow already put every
+            // cell live for this case at build; leaving it alone keeps it that way.
+            if (o.ShouldRenderWholeWorld()) return;
+
             // Speed-adaptive logic: scale vegetation density and widen high-LOD ring based
             // on current velocity. 20+ km/h (vehicles) and 80+ km/h (fast vehicles).
             UpdateSpeedAdaptive(o);
@@ -1498,11 +1622,15 @@ namespace UniverseCreator.TerrainSystem
             // A band change has to re-classify even when the centre cell has not moved.
             // Accelerating from rest inside one cell widens the ring without crossing any
             // boundary, so returning early here left the wider ring unapplied until the
-            // next crossing - which is precisely when it is already too late.
-            if (newCentre == centreCell && lodRingBoost == appliedRingBoost) return;
+            // next crossing - which is precisely when it is already too late. The prefetch
+            // depth is in the same test: speeding up inside one cell lengthens the forward
+            // strip, and that too must re-classify before the mover leaves the cell.
+            if (newCentre == centreCell && lodRingBoost == appliedRingBoost
+                && prefetchAheadCells == appliedPrefetchAhead) return;
 
             centreCell = newCentre;
             appliedRingBoost = lodRingBoost;
+            appliedPrefetchAhead = prefetchAheadCells;
 
             // The boost counts rings of radius, but Classify takes the side length of the
             // centre square, so one more ring is two more of side. Adding it raw made the
@@ -1532,7 +1660,12 @@ namespace UniverseCreator.TerrainSystem
                 // surface that is already correct - no bake, no allocation, no hitch.
                 // Destroying instead would return the memory but pay a full regeneration
                 // to come back, which is the stutter this whole system exists to avoid.
-                bool shouldBeLive = ring <= keepRadius;
+                //
+                // A cell is resident if it is inside the base window OR inside the forward
+                // prefetch strip - a fast mover keeps ground baked ahead of itself without
+                // holding a fat ring in every direction (which is the phone-OOM case).
+                bool shouldBeLive = ring <= keepRadius
+                                    || InForwardStrip(o, c, centreCell, keepRadius);
                 if (c.go.activeSelf != shouldBeLive)
                 {
                     SetChunkLive(c, shouldBeLive);
@@ -1544,7 +1677,7 @@ namespace UniverseCreator.TerrainSystem
 
                 if (!shouldBeLive) continue;
 
-                LODLevel next = DualLODSystem.Classify(ring, highSide, o.chunkCountPerSide);
+                LODLevel next = DualLODSystem.Classify(ring, highSide, o.residentWindowPerSide);
 
                 if (next != c.lod)
                 {
@@ -1576,6 +1709,32 @@ namespace UniverseCreator.TerrainSystem
                 streamWindowChanged = false;
                 StitchGrid();
             }
+        }
+
+        // Whether a cell falls inside the forward prefetch strip: ahead of the centre along
+        // the travel direction, within prefetchAheadCells of extra reach, and no wider than
+        // the base window to either side. This keeps ground baked in front of a fast mover
+        // without growing residency behind it or out to the flanks - the strip is a tongue
+        // in the heading direction, not a bigger ring. Returns false when stationary or when
+        // there is nothing to prefetch, so a walker's residency is exactly the base window.
+        private bool InForwardStrip(UniverseCreatorObject o, Chunk c, Coord centre, int keepRadius)
+        {
+            if (prefetchAheadCells <= 0 || streamForward == Vector3.zero) return false;
+
+            // Offset from centre to this cell, in cells (grid X/Z map to world X/Z).
+            int dx = c.cell.x - centre.x;
+            int dz = c.cell.z - centre.z;
+
+            // Along-track: how far ahead in the heading. Cross-track: lateral offset. The
+            // heading is already normalised and horizontal, so these are a dot and its
+            // perpendicular against the XZ components.
+            float along = dx * streamForward.x + dz * streamForward.z;
+            float cross = dx * streamForward.z - dz * streamForward.x;
+
+            if (along <= 0f) return false;                       // behind or beside: not ahead
+            if (along > keepRadius + prefetchAheadCells) return false;   // past the strip's reach
+            if (Mathf.Abs(cross) > keepRadius) return false;     // wider than the window: not in strip
+            return true;
         }
 
         // Set when a cell entered or left the streaming window this pass, so the grid is
@@ -1636,7 +1795,8 @@ namespace UniverseCreator.TerrainSystem
                    c.cell.z >= 0 && c.cell.z < side;
         }
 
-        // Adjusts LOD ring width and vegetation multiplier from how fast the focus moves.
+        // Adjusts LOD ring width, vegetation multiplier and directional prefetch from how
+        // fast the focus moves.
         //
         // WHY TWO BANDS AND NOT ONE
         // -------------------------
@@ -1654,6 +1814,18 @@ namespace UniverseCreator.TerrainSystem
         // to Classify, which counts the centre square's side. Mixing those two units is
         // what made the middle band a no-op.
         //
+        // SYMMETRIC BOOST vs DIRECTIONAL PREFETCH (the phone-crash fix)
+        // ------------------------------------------------------------
+        // A ring boost grows the resident window in EVERY direction: +2 turns a 5x5 (25)
+        // into 9x9 (81), most of it behind the mover where it will never be looked at. On
+        // a jet that is a memory spike big enough to OOM a phone. So the symmetric boost is
+        // capped hard on mobile (0 extra rings) and the speed is fed instead by prefetching
+        // cells AHEAD along the travel direction - a thin strip in front, not a fat ring all
+        // round. Desktop keeps the full symmetric boost (it has the memory and it smooths
+        // sharp turns); mobile relies on the forward strip, which is what a phone can afford
+        // and is where a fast mover is actually heading. Prefetch depth scales with speed so
+        // the ground is baked before the mover arrives, and is clamped so it cannot run away.
+        //
         // Density drops as the ring widens because the extra ring is more cells to fill:
         // the budget is spent on having ground ready rather than on foliage detail that
         // is a blur at that speed anyway.
@@ -1664,6 +1836,8 @@ namespace UniverseCreator.TerrainSystem
             {
                 currentVegetationDensityMultiplier = 1f;
                 lodRingBoost = 0;
+                prefetchAheadCells = 0;
+                streamForward = Vector3.zero;
                 hasLastFocusPos = false;
                 return;
             }
@@ -1678,6 +1852,11 @@ namespace UniverseCreator.TerrainSystem
             else if (cc != null) vel = cc.velocity;
 
             float speedKmh = vel.magnitude * 3.6f;
+
+            // Travel direction for the forward prefetch. Horizontal only - the grid is 2D,
+            // so a climb or dive must not tilt the strip off the plane it prefetches on.
+            Vector3 dir = vel; dir.y = 0f;
+            streamForward = dir.sqrMagnitude > 0.0001f ? dir.normalized : Vector3.zero;
 
             // Fall back to the positional delta when neither component reports motion.
             // A vehicle driven straight off its transform - or a kinematic body, or an
@@ -1702,26 +1881,61 @@ namespace UniverseCreator.TerrainSystem
                 // A teleport or a recentre is not travel, and would otherwise read as
                 // several thousand km/h and pin the ring boost at its maximum.
                 if (moved < 2000f) speedKmh = Mathf.Max(speedKmh, measuredSpeedKmh);
+
+                // Direction fallback: a transform-driven or kinematic mover reports no
+                // velocity, so take the heading from the step it actually made.
+                if (streamForward == Vector3.zero && step.sqrMagnitude > 0.0001f && moved < 2000f)
+                    streamForward = step.normalized;
             }
             lastFocusPos = here;
             hasLastFocusPos = true;
 
+            // Symmetric ring boost widens fidelity in all directions; the forward prefetch
+            // extends residency only along the heading. Mobile caps the symmetric boost so
+            // a fast mover cannot balloon the resident set in every direction (the OOM
+            // risk), and leans on the cheaper forward strip instead. Desktop keeps both.
+            bool mobile = Application.isMobilePlatform;
+
             if (speedKmh > 80f)
             {
                 currentVegetationDensityMultiplier = 0.25f;
-                lodRingBoost = 2;
+                lodRingBoost = mobile ? 0 : 2;
             }
             else if (speedKmh > 20f)
             {
                 currentVegetationDensityMultiplier = 0.5f;
-                lodRingBoost = 1;
+                lodRingBoost = mobile ? 0 : 1;
             }
             else
             {
                 currentVegetationDensityMultiplier = 1f;
                 lodRingBoost = 0;
             }
+
+            // How many cells ahead to keep resident, from speed and tile size. The mover
+            // must not cross a tile faster than it can be baked: a cell takes on the order
+            // of a stream interval plus the yield-gated apply to become ground, so prefetch
+            // roughly the distance covered in that lead time, in cells. Clamped so even a
+            // jet cannot request an unbounded strip. No heading, no prefetch.
+            if (streamForward == Vector3.zero || speedKmh <= 20f)
+            {
+                prefetchAheadCells = 0;
+            }
+            else
+            {
+                float tile = Mathf.Max(1f, o.GetChunkSize());
+                float leadSeconds = mobile ? 3.0f : 2.0f;   // phones bake slower; lead further
+                float metresAhead = (speedKmh / 3.6f) * leadSeconds;
+                int cells = Mathf.CeilToInt(metresAhead / tile);
+                prefetchAheadCells = Mathf.Clamp(cells, 1, MaxPrefetchAheadCells);
+            }
         }
+
+        // Ceiling on the forward prefetch strip, in cells. A hard bound so no speed can
+        // grow the resident set without limit: at 1 km tiles this is 4 km of ground held
+        // ahead, past which a mover is teleport-fast and the strip would cost more memory
+        // than it saves in avoided hitches.
+        private const int MaxPrefetchAheadCells = 4;
 
         /// <summary>
         /// Modules 3 & 4 (vegetation) multiply their density by this when placing foliage
@@ -1988,59 +2202,85 @@ namespace UniverseCreator.TerrainSystem
             // that as "done" both closed the progress item early and ran the settle
             // stitch against a grid whose bakes had not been dispatched yet.
             bool drained = activeWorkers == 0 && pending.Count == 0 && setupDepth == 0;
+            bool advancedSettle = false;
 
-            if (drained)
+            if (!drained)
             {
-                // SETTLE STITCH.
-                //
-                // The per-apply stitch above welds a cell against whatever had landed
-                // at that moment, and ApplyChunk overwrites the whole heightfield -
-                // including edge rows a previous pass had already averaged. So the
-                // last cell to land leaves its own seams welded but can have undone
-                // an earlier neighbour's, and a run that was superseded retires with
-                // wrote == false and skips the stitch entirely. Either way the grid
-                // could settle with an unwelded edge, which is the trench.
-                //
-                // One unconditional pass once nothing is in flight closes that: every
-                // cell now holds its final heights, so this weld is the one that
-                // sticks. This is what the ChunkManager inspector's Rebuild Cells
-                // button was doing by hand.
-                if (settleStitchPending || freed)
-                {
-                    StitchGrid();
-                    settleStitchPending = false;
-                }
-
-                if (freed) RefreshSliceMap();
-
-                // Water re-fits itself to the ground that just landed, but only when
-                // something actually landed. An idle pump drains every tick, and
-                // re-solving river courses on each of those would spend the whole edit
-                // loop fitting rivers to terrain that has not moved.
-                if (wrote || freed) SettleCarvers(o);
-
-                IsRebuildingAll = false;
-
-                // The world has settled - every cell now holds its final heights. Fire
-                // the one-shot the regenerate path armed for exactly this moment (the
-                // hydrology spawn, which must read the real surface). Cleared BEFORE the
-                // call so a rebuild the callback happens to trigger arms the next one
-                // cleanly rather than being wiped. The callback carves synchronously
-                // (ReapplyCarves), which does not touch the worker queue, so it cannot
-                // re-enter this async drain and cannot loop.
-                if (pendingAfterSettle != null)
-                {
-                    System.Action afterSettle = pendingAfterSettle;
-                    pendingAfterSettle = null;
-                    afterSettle();
-                    firedAfterSettle = true;
-                }
+                // Something is still in flight, so the grid is not final yet and owes
+                // itself a settle stitch whenever it does drain. A bake re-entering also
+                // cancels any settle already in progress - the ground it will change must
+                // be re-stitched and re-fitted from the top, not half-settled against the
+                // grid as it was a phase ago.
+                settleStitchPending = true;
+                settlePhase = 0;
             }
             else
             {
-                // Something is still in flight, so the grid is not final yet and owes
-                // itself a settle stitch whenever it does drain.
-                settleStitchPending = true;
+                // The queue has drained. Begin the settle only when real work landed this
+                // drain (or a stitch is owed) - an idle edit-mode pump drains every tick,
+                // and starting a settle on each would re-solve every river against ground
+                // that has not moved. Once begun, the phases run to completion across the
+                // following pumps regardless of those idle drains.
+                if (settlePhase == 0 && (wrote || freed || settleStitchPending))
+                    settlePhase = SettlePhaseStitch;
+
+                // ONE phase per pump. Each is a bounded piece of the old single blocking
+                // settle, so the view repaints and the progress bar advances 96 -> 100
+                // between them instead of freezing while the whole finishing pass runs.
+                switch (settlePhase)
+                {
+                    case SettlePhaseStitch:
+                        // SETTLE STITCH. The per-apply stitch welds a cell against whatever
+                        // had landed then, and ApplyChunk overwrites the whole heightfield
+                        // including edge rows a neighbour already averaged - so the last
+                        // cell can undo an earlier weld, and a superseded run retires
+                        // without stitching at all. One pass now that every cell holds its
+                        // final heights is the weld that sticks (the Rebuild Cells button
+                        // by hand). Unconditional: reaching this phase already means a
+                        // settle is owed.
+                        StitchGrid();
+                        settleStitchPending = false;
+                        settlePhase = SettlePhaseSliceMap;
+                        advancedSettle = true;
+                        break;
+
+                    case SettlePhaseSliceMap:
+                        RefreshSliceMap();
+                        settlePhase = SettlePhaseCarvers;
+                        advancedSettle = true;
+                        break;
+
+                    case SettlePhaseCarvers:
+                        // Water re-fits to the ground that just landed. Hoisted into its
+                        // own pump because it re-solves every river course and re-cuts the
+                        // chunks they cross - the single heaviest piece of the settle, and
+                        // the one that made the 96% freeze last as long as it did.
+                        SettleCarvers(o);
+                        settlePhase = SettlePhaseAfter;
+                        advancedSettle = true;
+                        break;
+
+                    case SettlePhaseAfter:
+                        IsRebuildingAll = false;
+
+                        // The world has settled - every cell holds its final heights. Fire
+                        // the one-shot the regenerate path armed for this moment (the
+                        // hydrology spawn, which must read the real surface). Cleared
+                        // BEFORE the call so a rebuild it triggers arms the next one
+                        // cleanly. The callback carves synchronously (ReapplyCarves), which
+                        // does not touch the worker queue, so it cannot re-enter this drain.
+                        if (pendingAfterSettle != null)
+                        {
+                            System.Action afterSettle = pendingAfterSettle;
+                            pendingAfterSettle = null;
+                            afterSettle();
+                            firedAfterSettle = true;
+                        }
+
+                        settlePhase = 0;   // settle complete
+                        advancedSettle = true;
+                        break;
+                }
             }
 
             // Reported so the edit-mode driver can repaint the Scene view. Writing
@@ -2049,8 +2289,10 @@ namespace UniverseCreator.TerrainSystem
             // it - which reads as the graph edit having done nothing - C-14. The
             // after-settle callback carves new water into the terrain, so it needs the
             // same repaint or the freshly spawned lakes/rivers would not show until a
-            // later nudge.
-            return wrote || firedAfterSettle;
+            // later nudge. advancedSettle keeps the pump reporting work while it steps
+            // through the finishing phases, so the driver keeps ticking and repainting
+            // until the settle is genuinely complete.
+            return wrote || firedAfterSettle || advancedSettle;
         }
 
         /// <summary>
@@ -2070,10 +2312,30 @@ namespace UniverseCreator.TerrainSystem
         /// </remarks>
         private void SettleCarvers(UniverseCreatorObject o)
         {
+            // U-3: bring the tunnel/portal holes into line with the CutOpening requests FIRST, above the water-carver
+            // early-out below -- a tunnel is not a water body, so a world with roads but no rivers must still get its
+            // holes cut and its withdrawn ones filled. This works the holes map and the shells only, so it stands apart
+            // from the height re-cut the `moved` flag drives and deliberately does not feed it.
+            ReconcileTunnelOpenings(ShapeRequests);
+
             List<IUCTerrainCarver> carvers = WaterCarveRegistry.For(o);
-            if (carvers.Count == 0) return;
+            if (carvers.Count == 0)
+            {
+                // U-4: no water bodies this pass. Still run the river publish, so a world whose last river was just
+                // deleted has its stale reach withdrawn from the publication rather than left claiming a river that is
+                // gone. With no carvers it finds nothing to deposit and only cleans up.
+                PublishRiverProfiles(o, carvers);
+                return;
+            }
 
             bool moved = false;
+
+            // A dam request raises and clips the level body it impounds. Reconcile that first,
+            // before the river re-fit below, so a reservoir whose level just changed has already
+            // re-dug its basin when the single ReapplyCarves at the end re-derives the terrain it
+            // sits in. Reversible: a body no longer matched by any request is released here and
+            // rebuilt to its authored self. The count folds into the same "something moved" flag.
+            if (DamReservoirReconciler.Reconcile(ShapeRequests, carvers) > 0) moved = true;
 
             for (int i = 0; i < carvers.Count; i++)
             {
@@ -2105,6 +2367,101 @@ namespace UniverseCreator.TerrainSystem
             }
 
             if (moved) ReapplyCarves();
+
+            // U-4: every river has now re-fitted to the ground that just settled, so publish each one's built profile
+            // -- per-station width, water-surface level and bed level in world space -- to the RiverProfilePublication
+            // on the world object, where a city or road tool reads it to bank the river UC actually cut. Placed last so
+            // the figures are the river as finally solved this pass; it shapes no ground and does not feed the `moved`
+            // re-cut above, so publishing after ReapplyCarves is correct.
+            PublishRiverProfiles(o, carvers);
+        }
+
+        /// <summary> U-4: publishes each live river's built profile -- per-station width, water-surface level and bed
+        /// level in world space -- to the world's <see cref="RiverProfilePublication"/>, so a city or road tool banks
+        /// the river UC actually cut instead of guessing a bed from a surface height sample. Reversible and settle-safe:
+        /// deposits a reach for every live river and withdraws any reach whose river is gone, touching only the
+        /// serialised publication -- it shapes no ground and does not feed the height re-cut. Creates the component only
+        /// when there is a river to publish, so a world with no rivers never gains it from a bake; a world whose last
+        /// river was deleted has its reaches cleared. Returns how many reaches it wrote or withdrew. </summary>
+        private int PublishRiverProfiles(UniverseCreatorObject o, List<IUCTerrainCarver> carvers)
+        {
+            if (o == null) return 0;
+
+            // The live rivers this pass, each already re-fitted to the settled ground by the loop above. A level body
+            // (lake, ocean, reservoir) is not a reach -- TryBuildRiverProfile returns false for it -- and is skipped.
+            // The id scheme lives here, in the one place that also builds the "still live" set the withdrawal reads, so a
+            // deposit and its later withdrawal can never key differently. GetEntityId is stable for the body's life; a
+            // reload re-keys on the first settle, which restates the same geometry under the new id and reaps the old.
+            List<RiverReachProfile> live = null;
+            HashSet<string> liveIds = null;
+
+            for (int i = 0; carvers != null && i < carvers.Count; i++)
+            {
+                UCWaterBody body = carvers[i] as UCWaterBody;
+                if (body == null) continue;
+
+                RiverReachProfile reach;
+                try
+                {
+                    if (!body.TryBuildRiverProfile(out reach)) continue;
+                }
+                catch (System.Exception e)
+                {
+                    // One malformed river must not stop the rest from publishing -- the guard the re-fit loop uses.
+                    Debug.LogError("Universe Creator: river profile publish failed on '" +
+                                   body.name + "'. " + e.Message, body);
+                    continue;
+                }
+
+                reach.sourceId = body.GetEntityId().GetHashCode().ToString();
+
+                if (live == null) { live = new List<RiverReachProfile>(); liveIds = new HashSet<string>(); }
+                live.Add(reach);
+                liveIds.Add(reach.sourceId);
+            }
+
+            // Find the publication without creating one, so the withdrawal path can run for a world whose last river was
+            // just deleted, and a world that never had a river does not gain an empty component from a bake.
+            RiverProfilePublication pub = RiverProfilePublication.FindFor(o.gameObject);
+
+            if (live == null)
+            {
+                // No rivers this pass. Clear a publication that still holds reaches; do nothing if there is none.
+                if (pub == null || pub.Count == 0) return 0;
+                int cleared = pub.Count;
+                pub.Clear();
+                return cleared;
+            }
+
+            // At least one river, so ensure the component exists on the world object -- the same object the inbox and
+            // the provider live on, so a tool that finds one finds all three.
+            if (pub == null) pub = RiverProfilePublication.FindOrCreateFor(o.gameObject);
+
+            int changed = 0;
+
+            // WITHDRAW rivers that are gone: any published reach whose id is not live this pass. Snapshot the ids first,
+            // because Withdraw edits the list -- the same discipline the tunnel reconcile follows.
+            List<string> stale = null;
+            IReadOnlyList<RiverReachProfile> current = pub.Reaches;
+            for (int i = 0; i < current.Count; i++)
+            {
+                RiverReachProfile r = current[i];
+                if (r != null && !string.IsNullOrEmpty(r.sourceId) && !liveIds.Contains(r.sourceId))
+                {
+                    if (stale == null) stale = new List<string>();
+                    stale.Add(r.sourceId);
+                }
+            }
+            if (stale != null)
+                for (int i = 0; i < stale.Count; i++)
+                    if (pub.Withdraw(stale[i])) changed++;
+
+            // DEPOSIT every live river. Deposit replaces a reach of the same id in place and bumps the version only when
+            // the geometry actually changed, so a river restated unchanged each settle neither stacks nor churns.
+            for (int i = 0; i < live.Count; i++)
+                if (pub.Deposit(live[i])) changed++;
+
+            return changed;
         }
 
         private void ApplyChunk(UniverseCreatorObject o, Chunk c)
@@ -2143,6 +2500,10 @@ namespace UniverseCreator.TerrainSystem
 
             Bounds applyBounds = ChunkWorldBounds(c);
 
+            // The shapings this world owes, resolved once for both the snapshot test
+            // below and the fold-in inside ApplyOutputs. Null on a world with no tool.
+            IReadOnlyList<TerrainShapeRequest> shapeRequests = ShapeRequests;
+
             // PRISTINE GROUND, CAPTURED BEFORE THE DIG.
             //
             // ApplyOutputs cuts the water channel into this very array, in place, and
@@ -2152,11 +2513,12 @@ namespace UniverseCreator.TerrainSystem
             // already made, and it cannot fill an abandoned channel back in at all.
             // That is what made ReapplyCarves a no-op in every case that mattered.
             //
-            // Only for cells a carver actually reaches. On a world with no water this
-            // is null everywhere and costs nothing; on a world with a river it holds
-            // the handful of cells the river crosses. ReapplyCarves releases it again
-            // as soon as no body reaches the cell.
+            // Only for cells a carver or a road shaping actually reaches. On a world
+            // with neither this is null everywhere and costs nothing; otherwise it
+            // holds the handful of cells a river or a road crosses. ReapplyCarves
+            // releases it again as soon as nothing reaches the cell.
             c.graphHeights = WaterCarveRegistry.CountAffecting(o, applyBounds) > 0
+                             || TerrainShapeApplier.Affects(shapeRequests, applyBounds)
                 ? CloneHeights(c.tile.outputs.heightmap)
                 : null;
 
@@ -2167,7 +2529,7 @@ namespace UniverseCreator.TerrainSystem
             // Manual sculpt edits are folded in here, so they ride on top of whatever
             // the graph just produced instead of being erased by it.
             TerrainBuilder.ApplyOutputs(c.data, c.tile.outputs, o,
-                                        o.overrideLayer, applyBounds, o.GetMetersPerPixel());
+                                        o.overrideLayer, applyBounds, o.GetMetersPerPixel(), shapeRequests);
 
             // Publish the welded boundary for neighbours that bake later, and re-weld
             // the neighbours already on screen so a late arrival cannot leave a stale
@@ -2479,7 +2841,7 @@ namespace UniverseCreator.TerrainSystem
 
 
         // =====================================================================
-        //  TUNNEL CARVING  (called by RoadCityMasterLinker, Module 7)
+        //  TUNNEL CARVING  (called by RoadCityMasterLinker, Module 6)
         // =====================================================================
 
         /// <summary>
@@ -2527,15 +2889,28 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Removes a carve by handle, re-fills the surface and drops its shell.</summary>
         public void ClearCarve(int handle)
         {
+            if (!RemoveCarve(handle)) return;
+
+            // Holes are subtractive-only: putting surface back means regenerating
+            // the affected cells from the graph. This is the public/inspector path,
+            // where a full regenerate is fine; the settle-safe tunnel reconcile
+            // re-stamps instead, because it runs inside the async drain and must not
+            // re-enter it.
+            if (Owner != null) RebuildAll();
+        }
+
+        /// <summary> Takes a carve out of the list and drops its shell, WITHOUT refilling the surface -- the caller
+        /// chooses how the ground comes back: <see cref="ClearCarve"/> regenerates from the graph, the tunnel reconcile
+        /// re-stamps. Returns false when the handle is unknown. Split out so the two removal paths share one body and
+        /// cannot drift on what "remove a carve" means. </summary>
+        private bool RemoveCarve(int handle)
+        {
             int index = IndexOfCarve(handle);
-            if (index < 0) return;
+            if (index < 0) return false;
 
             DestroyShell(carves[index]);
             carves.RemoveAt(index);
-
-            // Holes are subtractive-only: putting surface back means regenerating
-            // the affected cells from the graph.
-            if (Owner != null) RebuildAll();
+            return true;
         }
 
         /// <summary>Removes every carve.</summary>
@@ -2558,6 +2933,114 @@ namespace UniverseCreator.TerrainSystem
                 for (int i = 0; i < carves.Count; i++) list.Add(carves[i].bounds);
                 return list.AsReadOnly();
             }
+        }
+
+        // =====================================================================
+        //  TUNNEL OPENINGS  (U-3: the CutOpening half of the path-tool seam)
+        //
+        //  A path tool leaves CutOpening requests in the TerrainShapeInbox -- a
+        //  tunnel or metro portal at a stated mouth and bore. This brings the actual
+        //  holes into line with that set every settle, on the SAME carve mechanism
+        //  B-18 exposes (CarveTunnel and the shared RemoveCarve), never a second one:
+        //
+        //    * an opening that is held but has no hole yet is cut,
+        //    * a hole whose request was withdrawn is filled back in,
+        //    * a hole whose mouth or bore moved is re-cut to the new box.
+        //
+        //  The sourceId->handle map (openingCarves) is not serialised and lives with
+        //  `carves`, so after a domain reload both are empty and this re-cuts every
+        //  still-held opening from the request set -- the reversible-sync discipline
+        //  the dam reconcile follows, not a persisted edit. It works the holes map and
+        //  the shells, never the heightfield, so it is independent of the height
+        //  re-cut later in the settle and needs no ReapplyCarves to finish.
+        // =====================================================================
+
+        /// <summary> Brings the tunnel/portal holes into line with the <see cref="TerrainShapeKind.CutOpening"/>
+        /// requests the inbox holds: cuts a newly-held opening, fills a withdrawn one back in, and re-cuts a moved one.
+        /// Settle-safe -- withdrawal removes the carve and re-stamps (which puts the surface back) rather than calling
+        /// <see cref="ClearCarve"/>'s async RebuildAll, so it is safe to run from inside the settle pass. Returns how
+        /// many holes it opened or filled, a number a self test can read rather than a claim. </summary>
+        private int ReconcileTunnelOpenings(IReadOnlyList<TerrainShapeRequest> requests)
+        {
+            // Which sources are asking for a hole this pass, and the box each wants. Built only when there is something
+            // to track, so a world with no tunnels and none held walks the requests once and allocates nothing.
+            Dictionary<string, Bounds> held = null;
+            if (requests != null)
+            {
+                for (int i = 0; i < requests.Count; i++)
+                {
+                    TerrainShapeRequest r = requests[i];
+                    if (r == null || r.kind != TerrainShapeKind.CutOpening || !r.HasWork) { continue; }
+                    if (string.IsNullOrEmpty(r.sourceId)) { continue; }   // an anonymous cut cannot be tracked to withdraw
+                    if (held == null) { held = new Dictionary<string, Bounds>(); }
+                    held[r.sourceId] = r.opening;
+                }
+            }
+
+            if (openingCarves.Count == 0 && held == null) { return 0; }
+
+            int changed = 0;
+            bool filledOnly = false;   // a hole was filled with nothing to re-cut it: a trailing re-stamp is owed
+
+            // WITHDRAWALS AND MOVES first, so a moved opening frees its old box before the new one is cut and the two
+            // never briefly coexist. Snapshot the keys, because the map is edited inside the loop.
+            if (openingCarves.Count > 0)
+            {
+                openingReconcileKeys.Clear();
+                foreach (KeyValuePair<string, int> kv in openingCarves) { openingReconcileKeys.Add(kv.Key); }
+
+                for (int i = 0; i < openingReconcileKeys.Count; i++)
+                {
+                    string sourceId = openingReconcileKeys[i];
+                    int handle = openingCarves[sourceId];
+
+                    bool stillHeld = held != null && held.ContainsKey(sourceId);
+                    if (stillHeld && SameOpening(CarveBounds(handle), held[sourceId])) { continue; }  // unchanged
+
+                    // Withdrawn, moved, or the handle went stale (e.g. a debug Clear-all wiped the carve list). Take the
+                    // old hole out. A move is re-cut by the held loop below, since it is no longer mapped after this, and
+                    // that re-cut re-stamps the surface -- so only a pure withdrawal owes the trailing re-stamp.
+                    if (RemoveCarve(handle)) { changed++; if (!stillHeld) { filledOnly = true; } }
+                    openingCarves.Remove(sourceId);
+                }
+            }
+
+            // NEW AND MOVED openings: cut anything held that is not currently mapped. CarveTunnel re-stamps and builds
+            // its own shell, so the surface is opened here without the settle-unsafe RebuildAll.
+            if (held != null)
+            {
+                foreach (KeyValuePair<string, Bounds> kv in held)
+                {
+                    if (openingCarves.ContainsKey(kv.Key)) { continue; }   // already cut and unchanged
+                    openingCarves[kv.Key] = CarveTunnel(kv.Value);
+                    changed++;
+                }
+            }
+
+            // A pure withdrawal removed a carve and nothing above re-stamped after it. One RestampCarvesAll puts the
+            // surface back over every filled hole; it is self-inverse, so a chunk that no longer overlaps any carve is
+            // refilled solid. Gated so an unchanged pass, or one that only cut new holes, does no needless work.
+            if (filledOnly) { RestampCarvesAll(); }
+
+            return changed;
+        }
+
+        /// <summary> The world box a live carve was cut with, or a zero box when the handle is unknown -- which
+        /// <see cref="SameOpening"/> reads as "not the same opening", so a stale handle is re-cut rather than trusted.
+        /// </summary>
+        private Bounds CarveBounds(int handle)
+        {
+            int index = IndexOfCarve(handle);
+            return index >= 0 ? carves[index].bounds : default(Bounds);
+        }
+
+        /// <summary> True when two opening boxes match to within a centimetre in both centre and size, so a mouth that
+        /// has not really moved is not re-cut every settle for sub-millimetre float noise. </summary>
+        private static bool SameOpening(Bounds a, Bounds b)
+        {
+            const float eps = 0.01f;   // 1 cm, on both centre and extent
+            return (a.center - b.center).sqrMagnitude <= eps * eps
+                && (a.size - b.size).sqrMagnitude <= eps * eps;
         }
 
         // =====================================================================
@@ -2827,6 +3310,10 @@ namespace UniverseCreator.TerrainSystem
             float metresPerSample = o.GetMetersPerPixel();
             if (metresPerSample <= 0f) return 0;
 
+            // Resolved once for the whole pass: the same request set gates which cells
+            // are worth rewriting and is folded into each. Null on a world with no tool.
+            IReadOnlyList<TerrainShapeRequest> shapeRequests = ShapeRequests;
+
             int rewritten = 0;
 
             for (int i = 0; i < pool.Count; i++)
@@ -2839,8 +3326,11 @@ namespace UniverseCreator.TerrainSystem
                 // Nothing here now - but a body that used to be here and has just been
                 // deleted or moved away still needs its old channel filled back in, and
                 // the only record of where that was is c.graphHeights. Comparing the
-                // live heights against it is what catches it.
-                bool affected = WaterCarveRegistry.CountAffecting(o, bounds) > 0;
+                // live heights against it is what catches it. A road reaching this cell
+                // counts the same as a river: it too must be re-derived from pristine and
+                // re-conformed, and its scar filled back in once the road is withdrawn.
+                bool affected = WaterCarveRegistry.CountAffecting(o, bounds) > 0
+                                || TerrainShapeApplier.Affects(shapeRequests, bounds);
                 if (!affected && !ChunkDiffersFromGraph(c)) continue;
 
                 // FIRST CUT INTO A CELL NO BODY HAD REACHED BEFORE.
@@ -2871,6 +3361,12 @@ namespace UniverseCreator.TerrainSystem
                 float[,] heights = CloneHeights(c.graphHeights);
 
                 WaterCarveRegistry.ApplyAll(o, heights, bounds, metresPerSample);
+
+                // Same order as the full bake in ApplyOutputs: conform a path tool's roads
+                // after the dig, before the hand sculpt, so a re-cut reproduces exactly what
+                // a full regenerate would have written into this cell - no less, no more.
+                if (shapeRequests != null)
+                    TerrainShapeApplier.ApplyAll(shapeRequests, heights, bounds, metresPerSample, o.maxHeightMeters);
 
                 if (o.overrideLayer != null && !o.overrideLayer.IsEmpty)
                     o.overrideLayer.ApplyTo(heights, bounds, metresPerSample);
@@ -3454,6 +3950,11 @@ namespace UniverseCreator.TerrainSystem
                 HideWireframe(pool[i]);
             }
             pending.Clear();
+
+            // A staged settle in flight is abandoned with the work it was finishing; the
+            // next real build re-arms it from the top. Leaving it non-zero would let an
+            // idle pump resume welding a grid that a cancel just invalidated.
+            settlePhase = 0;
         }
 
         /// <summary>

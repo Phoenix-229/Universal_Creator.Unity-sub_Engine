@@ -325,7 +325,15 @@ namespace UniverseCreator
                     cursor = nz * resX + nx;
                 }
 
-                if (channel.Count > 2) channels.Add(channel);
+                // Two cells is one real reach and gets kept. Discarding it used to
+                // leave a GAP: the cells are already marked visited above, so no later
+                // source can retrace them, and a short connector between a side channel
+                // and the trunk it joins simply vanished from the network. Every such
+                // connector is a cell or two of missing trench in the middle of an
+                // otherwise continuous course - the reported "not continuous but zigzag
+                // hole". Only a single cell is dropped now, because one point has no
+                // reach to draw.
+                if (channel.Count > 1) channels.Add(channel);
             }
 
             return channels;

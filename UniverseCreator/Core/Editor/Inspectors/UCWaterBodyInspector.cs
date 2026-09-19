@@ -53,6 +53,12 @@ namespace UniverseCreator.Editor.Inspectors
         // drag, consumed by OnSceneGUI, so the rebuild happens once.
         private bool dragging;
 
+        // Set when a field changed but the edit is not yet committed (still typing, or
+        // mid-drag). Flushed to a single Rebuild once the text field is left / Enter is
+        // pressed / the drag ends. Keeps regeneration off the keystroke and off a bare
+        // selection - see the commit-gate in OnInspectorGUI.
+        private bool pendingRebuild;
+
         private UCWaterBody Body { get { return (UCWaterBody)target; } }
 
         // =====================================================================
@@ -125,11 +131,31 @@ namespace UniverseCreator.Editor.Inspectors
             bool changed = EditorGUI.EndChangeCheck();
             serializedObject.ApplyModifiedProperties();
 
-            // One commit check for the whole inspector rather than one per group.
-            // Every field goes through the same ApplyModifiedProperties, so the
-            // component has already been written by the time this runs.
+            // COMMIT-GATED REBUILD. EndChangeCheck flips true on every keystroke inside a
+            // text field and every pixel of a slider drag, so rebuilding here directly - as
+            // this used to - regenerated the whole river mid-typing and per drag-frame. That
+            // is the "it works on key stroke, not on focus-out" the user reported, and the
+            // spurious cost that made clicking a procedural body feel like it kicked off a
+            // generation. Instead we remember that something changed and flush the rebuild
+            // ONLY once the edit is committed: no text field is being edited
+            // (EditorGUIUtility.editingTextField is false, i.e. Enter or focus-out), and no
+            // drag is in progress (hotControl == 0). A bare selection changes nothing, so
+            // pendingRebuild is never set and selecting a body rebuilds nothing.
             if (changed && body.buildTrigger == UCWaterBody.BuildTrigger.Automatic)
+                pendingRebuild = true;
+
+            if (pendingRebuild && !EditorGUIUtility.editingTextField && GUIUtility.hotControl == 0)
+            {
+                pendingRebuild = false;
                 Rebuild(body);
+            }
+            else if (pendingRebuild)
+            {
+                // Still typing / dragging. Ask for another repaint so the flush above is
+                // re-evaluated the moment the edit commits, rather than waiting for some
+                // unrelated event to redraw the inspector.
+                Repaint();
+            }
 
             EditorGUILayout.Space(8);
             DrawActions(body);
@@ -355,7 +381,10 @@ namespace UniverseCreator.Editor.Inspectors
                 body.nodeWidthMetres[i] = newWidth;
 
                 EditorUtility.SetDirty(body);
-                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
+                // Per-node typing fires EndChangeCheck on EVERY keystroke. Do NOT rebuild here;
+                // arm the commit gate so the rebuild runs once the edit is committed
+                // (focus-out / Enter / slider release), never per character.
+                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) pendingRebuild = true;
             }
 
             // Grade either side, the way a road node reports it.
