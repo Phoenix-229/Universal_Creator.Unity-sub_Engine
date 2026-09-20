@@ -235,7 +235,6 @@ namespace UniverseCreator.TerrainSystem
             const float AmplitudeWidths = 3f;
             const float PhaseSkew = 0.25f;
             const float ClampToleranceMetres = 0.5f;
-            const int ClampSamples = 4;
 
             // The floodplain a meander lives on is roughly LEVEL across the flow, so a
             // loop may only slide to ground that is within tolerance of the centre in
@@ -295,29 +294,64 @@ namespace UniverseCreator.TerrainSystem
                 // of a real river, not a symmetric positional sine.
                 float wave = Mathf.Sin(phase + PhaseSkew * Mathf.Sin(phase));
 
-                float target = AmplitudeWidths * wLocal * amp * gradeGate * endWindow * wave;
+                // The loop's UNTAPERED peak amplitude - width, meander strength and grade,
+                // but NOT the end taper. The taper is applied last (below), deliberately
+                // AFTER the floodplain cap, so the cap's release never lands inside the
+                // taper ramp. This ordering is the whole trick: in the body the untapered
+                // amplitude is a large near-constant (three channel widths), so the cap
+                // holds flat at the belt all the way to the mouth, and the taper then scales
+                // that already-flat, already-capped value smoothly to zero.
+                float peakAmp = AmplitudeWidths * wLocal * amp * gradeGate;
 
-                // Stay on the floodplain. Scan from the full offset inward and take the
-                // largest whose ground stays within tolerance of the centre in EITHER
-                // direction: a loop may round a low bar or a low rise, but the moment the
-                // ground under it departs the level of the channel - up the valley side
-                // OR down a hill flank - that offset has left the floodplain and is
-                // refused. The band widens gently with the channel (a big river's
-                // floodplain really is wider) but never becomes a licence to climb or
-                // descend the slope.
                 float levelBand = ClampToleranceMetres + wLocal * 0.05f;
-                float allowed = 0f;
-                for (int s = 0; s < ClampSamples; s++)
-                {
-                    float trial = target * (1f - s / (float)ClampSamples);
-                    float gh = ground(p.x + side.x * trial, p.z + side.y * trial);
-                    if (Mathf.Abs(gh - gHere) <= levelBand) { allowed = trial; break; }
-                }
+
+                // How wide the LEVEL floodplain belt is here, measured to BOTH sides and
+                // the narrower kept - the loop swings both ways, and the belt is a property
+                // of the ground, not of which way this particular point happens to lean.
+                // Each side is marched outward and the band crossing INTERPOLATED, so the
+                // belt is a continuous function of the ground: no stepped snap between
+                // neighbours (the old four-fraction search), and a rise OR a fall out of
+                // the band ends the march, so the belt never licenses climbing the valley
+                // wall or sliding down a hill flank.
+                float reachOut = peakAmp * 1.5f + 1f;
+                float beltPlus = MarchLevelReach(ground, p, side, +1f, gHere, levelBand, reachOut);
+                float beltMinus = MarchLevelReach(ground, p, side, -1f, gHere, levelBand, reachOut);
+                float belt = Mathf.Min(beltPlus, beltMinus);
+
+                // Cap the AMPLITUDE against the belt with a smooth minimum, apply the end
+                // taper, THEN take the wave. Because the capped-and-tapered amplitude and
+                // the wave are each smooth functions of arc length, their product is smooth
+                // - a confined reach reads as a genuinely smaller, rounded meander belt,
+                // not a full-size loop clipped flat against the floodplain edge (which left
+                // the faceted corner the author saw). A loop that already fits is not
+                // shrunk: the smooth min equals the amplitude until it comes within a
+                // channel-scaled margin of the belt. The taper multiplies a value that is
+                // already flat through the body, so it eases the loops to zero at the mouth
+                // and head with no ramp-rate jump.
+                float mergeMargin = Mathf.Max(1f, wLocal * 0.1f);
+                float cappedAmp = Mathf.Max(0f, SmoothMin(peakAmp, belt, mergeMargin));
+                float allowed = cappedAmp * endWindow * wave;
 
                 moved[i] = new Vector3(p.x + side.x * allowed, p.y, p.z + side.y * allowed);
             }
 
             for (int i = 0; i < n; i++) points[i] = moved[i];
+
+            // Capping the AMPLITUDE against the floodplain (above) removes the confinement
+            // corner from the BODY of the meander - there the capped amplitude is smooth
+            // and amplitude x wave is a clean sine (measured second difference ~0.2 m).
+            // What it leaves is a small spike where the floodplain cap transition lands
+            // inside the END-TAPER: as endWindow sweeps the amplitude down toward the mouth,
+            // it crosses the belt cap, and the ramp RATE jumps over a point or two while the
+            // wave is near a crest. Reordering the taper to AFTER the cap (above) removes
+            // that release corner at its source, so this relax is now only a light
+            // denoiser for residual ground-sample jitter - it eases each point toward its
+            // neighbours' midpoint, doing nothing to the smooth body or to a free loop's
+            // amplitude (a point already at the midpoint does not move). Two passes: the
+            // fewest that clears the jitter, kept low deliberately so a real meander in the
+            // field is never smoothed down out of its own amplitude. Ends held - mouth and
+            // head stay where the fit put them.
+            Relax(points, 2);
         }
 
         /// <summary>
@@ -325,12 +359,67 @@ namespace UniverseCreator.TerrainSystem
         /// course, so a planform effect holds the head and the mouth exactly where the
         /// fit left them.
         /// </summary>
+        /// <remarks>
+        /// Smoothstepped, not linear. A linear ramp reaches full strength with a CORNER -
+        /// its slope jumps from the ramp rate to zero at the point it meets the flat - and
+        /// when it scales a meander amplitude that corner is a curvature spike in the path
+        /// a step or two in from the mouth, a small facet exactly where the loops are
+        /// meant to ease in. Smoothstep has zero slope at both ends, so the taper meets the
+        /// flat with no corner and the amplitude grows into the course smoothly.
+        /// </remarks>
         private static float EndTaper(int i, int n)
         {
             int fade = Mathf.Max(2, n / 12);
             float head = Mathf.Clamp01(i / (float)fade);
             float mouth = Mathf.Clamp01((n - 1 - i) / (float)fade);
-            return Mathf.Min(head, mouth);
+            return Mathf.SmoothStep(0f, 1f, Mathf.Min(head, mouth));
+        }
+
+        /// <summary>
+        /// A minimum with the corner rounded off over a width k - the polynomial smooth-min.
+        /// Equal to Mathf.Min(a, b) once the two are more than k apart, and eased between
+        /// them within k, so a value clamped against a limit approaches it without the sharp
+        /// break a hard min leaves. Used to fit a meander loop to its floodplain width: the
+        /// loop is its full amplitude while it fits and bends smoothly to the floodplain
+        /// edge as it runs out of room, instead of clipping to a flat top with faceted
+        /// corners. k of 0 falls back to the exact minimum.
+        /// </summary>
+        private static float SmoothMin(float a, float b, float k)
+        {
+            if (k <= 1e-4f) return Mathf.Min(a, b);
+            float h = Mathf.Clamp01(0.5f + 0.5f * (b - a) / k);
+            return Mathf.Lerp(b, a, h) - k * h * (1f - h);
+        }
+
+        /// <summary>
+        /// How far the level floodplain reaches from a point in one across-flow direction:
+        /// marches outward from the point until the ground first departs the given band
+        /// above or below the point's own level, and returns the interpolated distance to
+        /// that crossing. Marched a fixed number of small steps out to <paramref name="maxReach"/>;
+        /// if the ground never leaves the band the full reach is returned. The crossing is
+        /// interpolated between the last two samples so the reach is a continuous function
+        /// of the ground - the meander cap that reads it does not step between samples.
+        /// </summary>
+        private static float MarchLevelReach(GroundSampler ground, Vector3 p, Vector2 side,
+                                             float dir, float centreY, float band, float maxReach)
+        {
+            const int Steps = 24;
+            float step = maxReach / Steps;
+            float gPrev = centreY;
+            for (int s = 1; s <= Steps; s++)
+            {
+                float r = step * s;
+                float gh = ground(p.x + side.x * dir * r, p.z + side.y * dir * r);
+                if (Mathf.Abs(gh - centreY) > band)
+                {
+                    float dPrev = Mathf.Abs(gPrev - centreY);
+                    float dHere = Mathf.Abs(gh - centreY);
+                    float t = dHere > dPrev ? Mathf.InverseLerp(dPrev, dHere, band) : 0f;
+                    return step * ((s - 1) + Mathf.Clamp01(t));
+                }
+                gPrev = gh;
+            }
+            return maxReach;
         }
 
         // =====================================================================

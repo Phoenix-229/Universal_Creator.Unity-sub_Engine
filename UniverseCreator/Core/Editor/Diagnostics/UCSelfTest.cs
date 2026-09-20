@@ -113,6 +113,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestRiverValleyCorridorCaps();
             TestRiverValleySagsTheFloodplain();
             TestRiverFloodplainSoleIsFlat();
+            TestMeanderIsSmoothNotFaceted();
             TestValleyCorridorAccessor();
             TestVolumeReachesTheRealBed();
             TestNodeReadoutsMatchTheCourse();
@@ -1778,6 +1779,84 @@ namespace UniverseCreator.Editor.Diagnostics
                   "the wall overshot the hillside: ground 40 m out sits at " + wall + " m, "
                   + "above the untouched " + gentleY + " m. The sag lowers only - it may "
                   + "rise back TO the hillside but never above it");
+        }
+
+        /// <summary>
+        /// The meander is a smooth curve, not a run of straight facets.
+        /// </summary>
+        /// <remarks>
+        /// The floodplain clamp searches inward from the full loop offset for the largest
+        /// that stays level. When that search was only four steps, the offset could land on
+        /// just four fractions of the target, so two neighbouring points sitting on the
+        /// gently sloped edge of the floodplain snapped to DIFFERENT fractions and the loop
+        /// kinked between them - the "meander is not smooth" seen in-editor. On a symmetric
+        /// valley whose floor is level and whose sides rise gently (so the clamp bites but
+        /// never refuses outright), the lateral offset the meander applies must vary
+        /// smoothly point to point: the largest jump between neighbours is a small fraction
+        /// of the loop amplitude. A four-step clamp fails this; the fine clamp holds it.
+        /// </remarks>
+        private static void TestMeanderIsSmoothNotFaceted()
+        {
+            const float floorY = 100f;
+
+            // Level along the flow (+x), rising gently away from the centreline at z=400 so
+            // the meander belt runs onto a slope and the level-band clamp engages without
+            // refusing every offset (which would give a straight line and nothing to test).
+            RiverCourseSolver.GroundSampler valley = delegate (float x, float z)
+            {
+                return floorY + Mathf.Abs(z - 400f) * 0.08f;
+            };
+
+            int n = 160;
+            List<Vector3> pts = new List<Vector3>(n);
+            List<float> widths = new List<float>(n);
+            for (int i = 0; i < n; i++)
+            {
+                float x = 100f + i * 6f;                 // 6 m spacing, the mesh default
+                pts.Add(new Vector3(x, floorY, 400f));
+                widths.Add(40f);
+            }
+
+            RiverCourseSolver.Meander(pts, valley, widths, 1f, 0.08f, 40f);
+
+            // Lateral offset = how far each point moved off the original z=400 centreline.
+            // The floodplain here is only ~31 m to either side (0.08 slope, ~2.5 m band),
+            // so a 40 m river's loop (which wants ~120 m) is CONFINED and rides the
+            // floodplain edge - the case that showed facets in-editor.
+            float amplitude = 0f;
+            for (int i = 0; i < n; i++)
+                amplitude = Mathf.Max(amplitude, Mathf.Abs(pts[i].z - 400f));
+
+            Check(amplitude > 3f,
+                  "the meander barely moved (peak offset " + amplitude + " m on a 40 m "
+                  + "river): the fixture pinned the course straight, so a facet test on it "
+                  + "would pass on nothing");
+
+            // Curvature, not turn rate, is the facet test. A confined loop genuinely turns
+            // fast where it crosses the centreline - a real amplitude-30 sine at 6 m
+            // spacing moves ~10 m per step there, and that is the curve, not a fault. A
+            // FACET is a spike in the SECOND difference: the turn rate itself jumping,
+            // which is what a hard clip's corner or a stepped-clamp snap does and a smooth
+            // curve does not. For this sine the second difference sits near a quarter-metre;
+            // a hard clip spiked it above ten. 2 m sits well clear of both.
+            float maxCurv = 0f;
+            int maxAt = 0;
+            for (int i = 1; i < n - 1; i++)
+            {
+                float second = (pts[i + 1].z - 400f) - 2f * (pts[i].z - 400f) + (pts[i - 1].z - 400f);
+                if (Mathf.Abs(second) > maxCurv) { maxCurv = Mathf.Abs(second); maxAt = i; }
+            }
+
+            string near = "";
+            for (int i = Mathf.Max(0, maxAt - 2); i <= Mathf.Min(n - 1, maxAt + 2); i++)
+                near += " [" + i + "]=" + (pts[i].z - 400f).ToString("F2");
+
+            Check(maxCurv < 2f,
+                  "the meander kinks: the largest curvature (second difference of the "
+                  + "offset) is " + maxCurv + " m at point " + maxAt + " of " + n
+                  + ", against a peak offset of " + amplitude + " m. Offsets near it:" + near
+                  + ". A smooth loop turns gradually even where it turns fast; a curvature "
+                  + "spike is a clip corner or a clamp snap - the faceted meander");
         }
 
         // ---------------------------------------------------------------------
