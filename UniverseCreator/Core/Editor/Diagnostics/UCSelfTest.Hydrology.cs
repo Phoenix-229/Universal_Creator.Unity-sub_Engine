@@ -790,5 +790,124 @@ namespace UniverseCreator.Editor.Diagnostics
                 UnityEngine.Object.DestroyImmediate(go);
             }
         }
+
+        // =====================================================================
+        //  8. A course that ends inland joins the river it flows into (P4, spec 11.5d)
+        // =====================================================================
+
+        /// <summary>
+        /// A lake outlet is planned in its own pass and cannot see the trunk rivers'
+        /// cells, so one that flows into a river below it used to stop short and read as
+        /// two channels climbing over each other. ResolveInlandConfluences fixes that on
+        /// the one solved grid: any course still ending inland is walked on down the D8
+        /// flow graph, and the first cell owned by ANOTHER course is the confluence -
+        /// declared exactly the way a trunk tributary is (mouth=River, joinsPlanIndex=host,
+        /// the shared cell appended as the course's end).
+        /// </summary>
+        /// <remarks>
+        /// A real, deterministic grid rather than a solve, so the confluence is a fact of
+        /// the flow graph and not of a sampler's noise: a trunk runs south down column
+        /// x=2 (cells 2,7,12,17,22) and ends at the world edge; a short outlet sits at
+        /// x=0,z=2 (cells 10,11) whose mouth cell flows EAST (D8 dir 4) into the trunk's
+        /// cell 12. The outlet must come out joined to the trunk at cell 12; the trunk,
+        /// which reaches no other course, must be left exactly as it was - no false join.
+        /// A second run with the catchments swapped proves the hierarchy rule: the bigger
+        /// water is never made a tributary of the smaller.
+        /// </remarks>
+        private static void TestInlandCourseJoinsTheRiverItFlowsInto()
+        {
+            const int res = 5;
+            const float cell = 10f;
+
+            RiverNetworkPlanner.DrainageGrid g = new RiverNetworkPlanner.DrainageGrid();
+            g.resX = res;
+            g.resZ = res;
+            g.cellSizeX = cell;
+            g.cellSizeZ = cell;
+            g.origin = Vector3.zero;
+            g.ground = new float[res * res];       // flat; WorldOf's y is irrelevant here
+            g.filled = g.ground;
+            g.accum = new float[res * res];         // unused by the resolve, sized for safety
+            g.dir = new int[res * res];
+            for (int i = 0; i < g.dir.Length; i++) g.dir[i] = -1;   // outlet by default
+
+            // The outlet's mouth cell (x=0? no - x=1,z=2 = index 11) drains EAST into the
+            // trunk's column at cell 12. Only this one direction matters to the walk.
+            g.dir[11] = 4;                          // D8 index 4 = (dx=+1, dz=0), due east
+
+            // Trunk down column x=2. Larger catchment - it is the river, not the branch.
+            List<Vector3> trunkCourse = new List<Vector3>
+            {
+                g.WorldOf(2), g.WorldOf(7), g.WorldOf(12), g.WorldOf(17), g.WorldOf(22)
+            };
+            RiverNetworkPlanner.PlannedRiver trunk = new RiverNetworkPlanner.PlannedRiver
+            {
+                course = trunkCourse,
+                catchmentSquareMetres = 100000f,
+                mouth = RiverNetworkPlanner.MouthKind.Outflow
+            };
+
+            // Outlet at x=1,z=2, ending inland one cell short of the trunk.
+            List<Vector3> outletCourse = new List<Vector3> { g.WorldOf(10), g.WorldOf(11) };
+            RiverNetworkPlanner.PlannedRiver outlet = new RiverNetworkPlanner.PlannedRiver
+            {
+                course = outletCourse,
+                catchmentSquareMetres = 5000f,
+                mouth = RiverNetworkPlanner.MouthKind.Outflow
+            };
+
+            List<RiverNetworkPlanner.PlannedRiver> plans =
+                new List<RiverNetworkPlanner.PlannedRiver> { trunk, outlet };
+
+            RiverNetworkPlanner.ResolveInlandConfluences(g, plans);
+
+            Check(outlet.mouth == RiverNetworkPlanner.MouthKind.River
+                  && outlet.joinsPlanIndex == 0,
+                  "an outlet whose flow path runs into a trunk river was left ending inland "
+                  + "(mouth=" + outlet.mouth + ", joins=" + outlet.joinsPlanIndex + ") instead of "
+                  + "joining the trunk at index 0. Unjoined, the outlet and the river cross with no "
+                  + "confluence - the 'climb over each other' the author reported");
+
+            Vector3 end = outlet.course[outlet.course.Count - 1];
+            Vector3 conf = g.WorldOf(12);
+            Check(Mathf.Abs(end.x - conf.x) < 0.01f && Mathf.Abs(end.z - conf.z) < 0.01f,
+                  "the outlet joined but did not END on the shared confluence cell: its last point "
+                  + "is (" + end.x.ToString("0.#") + ", " + end.z.ToString("0.#") + ") not the trunk "
+                  + "cell (" + conf.x.ToString("0.#") + ", " + conf.z.ToString("0.#") + "). A join is a "
+                  + "shared point, not two ends that happen to be near each other");
+
+            Check(trunk.mouth == RiverNetworkPlanner.MouthKind.Outflow
+                  && trunk.joinsPlanIndex < 0,
+                  "the trunk, which reaches no other course, was given a false join (mouth="
+                  + trunk.mouth + ", joins=" + trunk.joinsPlanIndex + "). The resolve must only join a "
+                  + "course that actually flows into another, or ordinary rivers sprout phantom "
+                  + "confluences");
+
+            // Hierarchy rule: swap the catchments so the inland course is now the BIGGER
+            // water. It must NOT be made a tributary of the smaller - that is the trunk
+            // taking the wrong fork.
+            RiverNetworkPlanner.PlannedRiver bigTrunkSmallHost0 = new RiverNetworkPlanner.PlannedRiver
+            {
+                course = new List<Vector3> { g.WorldOf(2), g.WorldOf(7), g.WorldOf(12), g.WorldOf(17), g.WorldOf(22) },
+                catchmentSquareMetres = 3000f,        // now the SMALLER water
+                mouth = RiverNetworkPlanner.MouthKind.Outflow
+            };
+            RiverNetworkPlanner.PlannedRiver bigOutlet = new RiverNetworkPlanner.PlannedRiver
+            {
+                course = new List<Vector3> { g.WorldOf(10), g.WorldOf(11) },
+                catchmentSquareMetres = 90000f,       // now the LARGER water
+                mouth = RiverNetworkPlanner.MouthKind.Outflow
+            };
+            List<RiverNetworkPlanner.PlannedRiver> swapped =
+                new List<RiverNetworkPlanner.PlannedRiver> { bigTrunkSmallHost0, bigOutlet };
+
+            RiverNetworkPlanner.ResolveInlandConfluences(g, swapped);
+
+            Check(bigOutlet.joinsPlanIndex < 0
+                  && bigOutlet.mouth == RiverNetworkPlanner.MouthKind.Outflow,
+                  "a course carrying MORE land than the one it flows into was made a tributary of it "
+                  + "(joins=" + bigOutlet.joinsPlanIndex + "). The bigger water is the trunk; joining it "
+                  + "to the smaller inverts the hierarchy the whole network is built on");
+        }
     }
 }

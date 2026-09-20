@@ -543,6 +543,17 @@ namespace UniverseCreator.TerrainSystem
                     plannedOutlets++;
                 }
 
+                // JOIN THE COURSES THAT ENDED INLAND (spec 11.5d - real confluences).
+                // Trunk tributaries already declare their confluence, but a lake outlet is
+                // planned in its own call and cannot see the trunk cells, so one that flows
+                // into a river below it stops short and reads as two channels crossing. Now
+                // that trunks and outlets are both in `plans`, resolve those junctions on
+                // the one flow graph: any course still ending inland is joined to the course
+                // it actually flows into (a shared D8 cell), the same way a tributary is, so
+                // the junction machinery below connects them instead of letting them climb
+                // over each other. Runs before naming's spawn loop reads joinsPlanIndex.
+                RiverNetworkPlanner.ResolveInlandConfluences(drainage, plans);
+
                 // The largest catchment in THIS world anchors the size scale below.
                 float largestCatchment = 1f;
                 for (int i = 0; i < plans.Count; i++)

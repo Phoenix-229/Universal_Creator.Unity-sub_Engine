@@ -1162,6 +1162,117 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// Joins any course that ended inland to the course it actually flows into, so a
+        /// lake outlet (or a trunk that ran out on land) meets the river below it at a
+        /// real confluence instead of stopping short and reading as two channels that
+        /// climb over each other.
+        /// </summary>
+        /// <remarks>
+        /// A confluence is not guessed by nearest-endpoint: it is the point where one
+        /// flow path enters another, and on a solved grid that is a SHARED CELL on the D8
+        /// graph. The trunk tributaries already declare exactly this - AddTributaries sets
+        /// mouth=River, joinsPlanIndex=host and ends the branch on the host's own cell.
+        /// The only reason an outlet does not is that PlanLakeOutlets is a separate call
+        /// with its own <c>used</c> array, so it never learns which cells the trunks hold.
+        ///
+        /// This runs once the whole set is known. It marks every cell each course occupies
+        /// with that course's index, then for any course whose mouth is still Outflow
+        /// (ended inland, not at sea/lake/river) it walks the flow graph on from the mouth:
+        /// the first cell owned by ANOTHER course is where this water joins that one. The
+        /// walked cells are appended so the channel follows the real flow path to the
+        /// junction rather than a straight cut, and the join is declared the same way a
+        /// tributary's is, so the existing junction machinery builds it.
+        ///
+        /// Two real-drainage rules gate it, matching AddTributaries:
+        ///   - it may only join a course with an equal or larger catchment (the bigger
+        ///     water is the trunk; a smaller one joining would be the wrong hierarchy);
+        ///   - it may only join a course EARLIER in the list, which is also what lets the
+        ///     spawner - which builds parent before child - have the host already built
+        ///     when the joiner asks it for the edge point. Trunks and their tributaries
+        ///     are planned before outlets, so an outlet can always reach a trunk.
+        /// Nothing is invented: a course that reaches no other course on the graph is left
+        /// exactly as it was.
+        /// </remarks>
+        /// <param name="g">The solved grid the courses were planned on.</param>
+        /// <param name="plans">The full planned set, trunks/tributaries then outlets.</param>
+        public static void ResolveInlandConfluences(DrainageGrid g, List<PlannedRiver> plans)
+        {
+            if (g == null || plans == null || plans.Count < 2) return;
+
+            int count = g.Count;
+
+            // Cell -> owning plan index. The LOWEST index wins a shared cell, so a course
+            // is never recorded as joining itself and a branch cannot claim its trunk's
+            // cell out from under it. -1 is unowned ground.
+            int[] owner = new int[count];
+            for (int i = 0; i < count; i++) owner[i] = -1;
+
+            for (int p = 0; p < plans.Count; p++)
+            {
+                PlannedRiver plan = plans[p];
+                if (plan == null || plan.course == null) continue;
+
+                for (int k = 0; k < plan.course.Count; k++)
+                {
+                    Vector3 w = plan.course[k];
+                    int cell = g.CellAt(w.x, w.z);
+                    if (cell >= 0 && cell < count && owner[cell] < 0) owner[cell] = p;
+                }
+            }
+
+            for (int p = 0; p < plans.Count; p++)
+            {
+                PlannedRiver plan = plans[p];
+                if (plan == null || plan.course == null || plan.course.Count < 2) continue;
+
+                // Only a course that ended inland is unresolved. One that already reaches
+                // the sea, a lake, or a declared river is left alone.
+                if (plan.mouth != MouthKind.Outflow || plan.joinsPlanIndex >= 0) continue;
+
+                Vector3 mouth = plan.course[plan.course.Count - 1];
+                int at = g.CellAt(mouth.x, mouth.z);
+                if (at < 0) continue;
+
+                // Walk the flow graph on from the mouth. A flow path cannot revisit a
+                // cell, so Count is a hard backstop, never the real limit.
+                List<Vector3> extra = new List<Vector3>();
+                int host = -1;
+                int budget = count;
+
+                int step = g.DownstreamOf(at);
+                while (step >= 0 && budget-- > 0)
+                {
+                    int o = owner[step];
+                    if (o >= 0 && o != p) { host = o; extra.Add(g.WorldOf(step)); break; }
+
+                    // Still on this course's own cells (the mouth region) - keep walking
+                    // without drawing, so a course does not append its own tail.
+                    if (o != p) extra.Add(g.WorldOf(step));
+                    step = g.DownstreamOf(step);
+                }
+
+                if (host < 0) continue;                          // reached no other course
+
+                PlannedRiver hostPlan = plans[host];
+                if (hostPlan == null) continue;
+
+                // The bigger water is the trunk. A course carrying more land than the one
+                // it would join is the trunk itself, and joining it would inseminate the
+                // wrong hierarchy - so it is left to be resolved the other way (the host
+                // will already point at it, or it stays an inland outflow).
+                if (plan.catchmentSquareMetres > hostPlan.catchmentSquareMetres) continue;
+
+                // Append the walked cells so the channel follows the real flow path into
+                // the junction; the last appended point is the shared confluence cell,
+                // exactly as a tributary ends on its parent's cell.
+                for (int e = 0; e < extra.Count; e++) plan.course.Add(extra[e]);
+
+                plan.mouth = MouthKind.River;
+                plan.joinsPlanIndex = host;
+            }
+        }
+
+        /// <summary>
         /// Where a lake overflows: the first cell its own drainage reaches beyond the
         /// lake's footprint.
         ///
