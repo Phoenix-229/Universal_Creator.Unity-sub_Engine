@@ -102,6 +102,19 @@ namespace UniverseCreator.TerrainSystem
         // coastal trickles on the first pass, before the fallback relaxes it.
         public const float TrunkCatchmentMultiple = 4f;
 
+        // Hack's law exponent: channel length scales with catchment area as L proportional
+        // to A^h. The classic figure is 0.6; 0.57 is the modern best fit and the value used
+        // here. It is scale-invariant, so a tributary's length RELATIVE to the trunk it
+        // joins is (A_trib / A_trunk)^h from the two catchments alone - which is how a
+        // branch is bounded to a realistic fraction of its trunk rather than being allowed
+        // to run nearly the trunk's whole length and gouge the terrain.
+        public const float HackLengthExponent = 0.57f;
+
+        // A little headroom over the Hack estimate before a branch is trimmed, so ordinary
+        // scatter in the length-area relation is not clipped - only a branch that is
+        // genuinely trunk-sized is brought back to scale.
+        private const float TributaryLengthTolerance = 1.35f;
+
         // Two millimetres of residual fall per filled cell. Enough for D8 to have a
         // direction to pick across a flat the flood levelled off; far too small to
         // bend a slope that was really there.
@@ -109,6 +122,10 @@ namespace UniverseCreator.TerrainSystem
 
         // Under this a "river" is a puddle's outflow, not a course worth an object.
         private const float MinCourseMetres = 250f;
+
+        /// <summary>The minimum course length, exposed read-only so the self test can
+        /// assert the tributary length bound never clips a branch below it.</summary>
+        public static float MinCourseMetresForTest { get { return MinCourseMetres; } }
 
         // A lake's drain-out can legitimately be a short connecting reach between two
         // neighbouring lakes, so it is held to a lower floor than a trunk river - but
@@ -613,6 +630,7 @@ namespace UniverseCreator.TerrainSystem
 
             float minSpacing = Mathf.Max(seedSpacingMetres, 3f * g.CellSizeMetres);
             float parentLength = planned[parentIndex].lengthMetres;
+            float parentCatchment = Mathf.Max(1f, planned[parentIndex].catchmentSquareMetres);
 
             List<Vector3> taken = new List<Vector3>();
             int spawned = 0;
@@ -632,15 +650,21 @@ namespace UniverseCreator.TerrainSystem
                                               seedSpacingMetres, out branch);
                 if (trib == null) continue;
 
-                // A tributary longer than the river it joins reads as the trunk with the
-                // stem as its branch - the wrong hierarchy. Rather than drop the branch
-                // (which loses a join the network wanted), trim it from its SOURCE end:
-                // the mouth is the confluence and must stay put, so the excess comes off
-                // the head. What remains is a real, shorter tributary meeting the parent
-                // at the same point, which is what "some rivers join to form a bigger
-                // river" needs - more joins, not fewer.
-                if (trib.lengthMetres > parentLength)
-                    TrimToLengthFromSource(trib, parentLength);
+                // A tributary is SHORTER than its trunk in proportion to the land it
+                // drains - Hack's law, L proportional to A^h, scale-invariant - so the
+                // length it should have is the parent's length times (its catchment over
+                // the parent's)^h. A branch that traced far longer than that (the reported
+                // "tributary as long as a trunk" that gouges the terrain) is trimmed back
+                // to that estimate, plus a little tolerance for natural scatter. It is
+                // trimmed from its SOURCE end because the mouth is the confluence and must
+                // stay put: the excess comes off the head, leaving a real, shorter
+                // tributary meeting the parent at the same point - more realistic, not
+                // fewer joins. Never trimmed longer than the parent regardless, and never
+                // below MinCourseMetres so a valid branch is not clipped out of existence.
+                float maxLength = TributaryLengthBound(parentLength, parentCatchment,
+                                                       trib.catchmentSquareMetres);
+                if (trib.lengthMetres > maxLength)
+                    TrimToLengthFromSource(trib, maxLength);
                 if (trib.course == null || trib.course.Count < 2) continue;
 
                 trib.joinsPlanIndex = parentIndex;
@@ -648,6 +672,30 @@ namespace UniverseCreator.TerrainSystem
                 taken.Add(at);
                 spawned++;
             }
+        }
+
+        /// <summary>
+        /// The longest a tributary of the given catchment should be, for a trunk of the
+        /// given length and catchment, under Hack's law (L proportional to A^h).
+        /// </summary>
+        /// <remarks>
+        /// Hack's law is scale-invariant, so a tributary's length RELATIVE to its trunk is
+        /// (A_trib / A_trunk)^h - a branch draining a tenth of the trunk's land is about
+        /// 0.1^0.57 ~ 0.27 of its length, not nearly all of it. The bound is that estimate
+        /// times a small tolerance for natural scatter, never longer than the trunk itself
+        /// (a tributary longer than its trunk is the wrong hierarchy), and never shorter
+        /// than MinCourseMetres so a legitimate branch is not clipped out of existence.
+        /// Pure and public so the relation can be asserted directly in the self test.
+        /// </remarks>
+        public static float TributaryLengthBound(float parentLengthMetres,
+                                                 float parentCatchmentSquareMetres,
+                                                 float tributaryCatchmentSquareMetres)
+        {
+            float parentCatchment = Mathf.Max(1f, parentCatchmentSquareMetres);
+            float catchRatio = Mathf.Clamp01(tributaryCatchmentSquareMetres / parentCatchment);
+            float hackLength = parentLengthMetres * Mathf.Pow(catchRatio, HackLengthExponent);
+            return Mathf.Min(parentLengthMetres,
+                             Mathf.Max(MinCourseMetres, hackLength * TributaryLengthTolerance));
         }
 
         /// <summary>

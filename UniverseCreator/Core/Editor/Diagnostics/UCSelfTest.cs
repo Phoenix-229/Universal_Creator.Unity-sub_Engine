@@ -126,6 +126,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestWaterfallsFormOnSteepReaches();
             TestDownstreamWidthGrowsWithoutAuthoring();
             TestInlandCourseJoinsTheRiverItFlowsInto();
+            TestTributaryLengthFollowsHacksLaw();
 
             TestGraphHealsMissingNodeSlots();
 

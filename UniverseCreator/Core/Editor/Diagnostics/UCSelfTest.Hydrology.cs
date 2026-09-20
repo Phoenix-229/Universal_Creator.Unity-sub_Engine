@@ -909,5 +909,58 @@ namespace UniverseCreator.Editor.Diagnostics
                   + "(joins=" + bigOutlet.joinsPlanIndex + "). The bigger water is the trunk; joining it "
                   + "to the smaller inverts the hierarchy the whole network is built on");
         }
+
+        // =====================================================================
+        //  9. A tributary is bounded to Hack's-law length, not the whole trunk (P5)
+        // =====================================================================
+
+        /// <summary>
+        /// A tributary that traced nearly the length of the trunk it joins was the
+        /// reported "tributary as long as a river" that gouges the terrain. Real
+        /// tributaries are shorter than their trunk in proportion to the land they drain
+        /// (Hack's law, L proportional to A^h), so TributaryLengthBound caps a branch at
+        /// (A_trib / A_trunk)^h of the trunk length, plus a little tolerance, and never
+        /// longer than the trunk. This asserts that relation on the pure function.
+        /// </summary>
+        private static void TestTributaryLengthFollowsHacksLaw()
+        {
+            const float trunkLen = 4000f;
+            const float trunkCatch = 100000f;
+            const float h = RiverNetworkPlanner.HackLengthExponent;
+
+            // A branch draining a tenth of the trunk's land: ~0.1^0.57 ~ 0.27 of its
+            // length. It must be bounded well below the trunk, and near the Hack estimate
+            // (within the tolerance the bound allows), not left trunk-sized.
+            float tenth = RiverNetworkPlanner.TributaryLengthBound(trunkLen, trunkCatch, trunkCatch * 0.1f);
+            float hackTenth = trunkLen * Mathf.Pow(0.1f, h);
+
+            Check(tenth < trunkLen * 0.5f,
+                  "a tributary draining a tenth of its trunk's catchment was bounded to "
+                  + tenth.ToString("0") + " m against a " + trunkLen.ToString("0") + " m trunk - more "
+                  + "than half its length. Hack's law makes it about a quarter; a branch this long is "
+                  + "the reported trunk-sized tributary that gouges the ground");
+
+            Check(tenth >= hackTenth - 1f && tenth <= hackTenth * 1.5f,
+                  "the bound (" + tenth.ToString("0") + " m) is not near the Hack estimate ("
+                  + hackTenth.ToString("0") + " m) for a one-tenth-catchment branch. The length must "
+                  + "track A^h, not be clipped to an arbitrary figure");
+
+            // A branch nearly as large as its trunk stays nearly as long - the law is
+            // continuous, so a major tributary is not wrongly cut down.
+            float almost = RiverNetworkPlanner.TributaryLengthBound(trunkLen, trunkCatch, trunkCatch * 0.9f);
+            Check(almost > tenth && almost <= trunkLen,
+                  "a branch draining 90% of the trunk's land was bounded to " + almost.ToString("0")
+                  + " m, not between the small branch's " + tenth.ToString("0") + " m and the trunk's "
+                  + trunkLen.ToString("0") + " m. The bound must rise with catchment and never exceed "
+                  + "the trunk");
+
+            // Never trims a legitimate short branch out of existence: even a vanishing
+            // catchment keeps the minimum course length.
+            float tiny = RiverNetworkPlanner.TributaryLengthBound(trunkLen, trunkCatch, 1f);
+            Check(tiny >= RiverNetworkPlanner.MinCourseMetresForTest - 0.01f,
+                  "a tiny-catchment branch was bounded to " + tiny.ToString("0") + " m, under the "
+                  + "minimum course length. The bound must never clip a valid branch below the floor a "
+                  + "river object needs to exist at all");
+        }
     }
 }
