@@ -447,7 +447,7 @@ namespace UniverseCreator.Editor.Windows
             alphaCache.Clear();
 
             var bodies = UnityEngine.Object.FindObjectsByType<UniverseCreator.TerrainSystem.UCWaterBody>(
-                FindObjectsSortMode.None);
+                FindObjectsInactive.Exclude);
             if (bodies == null) { return; }
             foreach (var b in bodies)
             {

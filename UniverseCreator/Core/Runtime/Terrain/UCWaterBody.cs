@@ -2367,9 +2367,28 @@ namespace UniverseCreator.TerrainSystem
             // and a scene search per step would dominate the build.
             RefreshJoinCandidates();
 
+            RiverCourseSolver.GroundSampler groundFit = SampleGround;
+
+            // BOUNDED DE-BOW, always on. A course - drawn or D8-generated - is a set of
+            // sparse nodes with a Catmull-Rom curve through them, and that curve bows
+            // OUTSIDE the valley between two nodes: the river reads as running along a
+            // hillside instead of down the valley floor (the reported "flows on the
+            // inside of a hill"). A short lateral snap toward local low ground pulls the
+            // bow back onto the thalweg. The reach is only a few channel widths, so it
+            // corrects the bow but can NEVER jump the river into the next valley - which
+            // is what the 2 km fitToValley seek could do, and why the generator had to
+            // switch that off. This one is safe to leave on for every river, and gives a
+            // hand-placed river the same "never climb the bank" fit a generated one gets.
+            {
+                float debowReach = Mathf.Clamp(Mathf.Max(0.5f, widthMetres) * DebowWidths,
+                                                DebowMinMetres, DebowMaxMetres);
+                RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8);
+                RiverCourseSolver.Relax(result, 1);
+            }
+
             if (fitToValley || routeAroundHighGround)
             {
-                RiverCourseSolver.GroundSampler ground = SampleGround;
+                RiverCourseSolver.GroundSampler ground = groundFit;
 
                 if (fitToValley)
                 {
@@ -2532,6 +2551,18 @@ namespace UniverseCreator.TerrainSystem
                 depths[i] = Mathf.Max(0.1f, newD);
             }
         }
+
+        // Bounded de-bow (R2/R10). The lateral snap that pulls a bowed spline back onto
+        // the valley floor searches this many channel widths to each side - wide enough
+        // to catch the floodplain the river belongs in, far too short to reach the next
+        // valley over, so it can correct a bow but never relocate the river. Floored and
+        // capped in metres so a metre-wide brook still gets a usable search and a 200 m
+        // trunk does not sweep half a kilometre. Pull is below 1 so the correction eases
+        // in over the profile-smoothing passes rather than snapping in one build.
+        private const float DebowWidths = 3f;
+        private const float DebowMinMetres = 12f;
+        private const float DebowMaxMetres = 120f;
+        private const float DebowPull = 0.6f;
 
         // The width-to-depth ratio of an ordinary alluvial channel in an average valley.
         // Matches the generator's 18:1 so procedural and drawn rivers read the same.
@@ -3253,6 +3284,25 @@ namespace UniverseCreator.TerrainSystem
             if (shape != ShapeMode.RiverSpline && kind != WaterBodyKind.Ocean)
                 KeepLargestBody(wet, gx, gz);
 
+            // THE SEA REACHES ONLY WHAT THE SEA CAN REACH  (R11).
+            //
+            // An ocean is a world-sized flood plane culled by a per-vertex depth test:
+            // any point whose ground is below the sea surface reads wet. That floods a
+            // real coastline correctly - several bays are all one sea - but it ALSO
+            // floods a landlocked hollow that merely happens to sit below sea level, so a
+            // basin the sea has no path into still shows ocean water with no shore. Real
+            // water cannot teleport into a closed bowl.
+            //
+            // The open sea is the water touching the world edge (the ocean plane spans
+            // the whole world, so its own boundary is the coastline out to open water).
+            // Keep every wet cell the sea can walk to from that edge across other wet
+            // cells, and drop the rest. A hollow with no wet path to the edge is left dry
+            // here - to be filled by a LAKE instead, which is the correct body for water
+            // with no connection to the sea. Ocean only, and only when a real edge is wet,
+            // so a fully-enclosed inland sea the user placed on purpose is untouched.
+            if (kind == WaterBodyKind.Ocean)
+                KeepSeaConnected(wet, gx, gz);
+
             // A quad joins if any corner is wet, which is what makes the mesh reach
             // one cell past the waterline and gives the alpha fade room to work.
             int quads = 0;
@@ -3473,6 +3523,76 @@ namespace UniverseCreator.TerrainSystem
 
             for (int i = 0; i < n; i++)
                 if (wet[i] && region[i] != largest) wet[i] = false;
+        }
+
+        /// <summary>
+        /// Keeps only the wet cells the open sea can reach, and clears the rest. The open
+        /// sea is every wet cell on the lattice boundary; the flood spreads inward across
+        /// wet neighbours from all of them at once. A below-sea-level hollow with no wet
+        /// path to the edge is dropped, so the ocean shader never appears in a basin the
+        /// sea cannot flow into (R11). Ocean-only: called after the depth cull has set
+        /// <paramref name="wet"/>.
+        ///
+        /// If NO boundary cell is wet - a sea whose footprint sits entirely inland, which
+        /// is a deliberately placed enclosed body - nothing is connected and the mask is
+        /// left exactly as it was rather than emptied, so the placed body is not erased.
+        /// </summary>
+        private static void KeepSeaConnected(bool[] wet, int gx, int gz)
+        {
+            int n = gx * gz;
+            if (n <= 0) return;
+
+            bool[] reached = new bool[n];
+            int[] stack = new int[n];
+            int top = 0;
+
+            // Seed from every wet boundary cell - the whole edge is open water, because
+            // the ocean plane is sized to span the world.
+            for (int x = 0; x < gx; x++)
+            {
+                int bottom = x;                 // z = 0
+                int topRow = (gz - 1) * gx + x;  // z = gz-1
+                if (wet[bottom] && !reached[bottom]) { reached[bottom] = true; stack[top++] = bottom; }
+                if (wet[topRow] && !reached[topRow]) { reached[topRow] = true; stack[top++] = topRow; }
+            }
+            for (int z = 0; z < gz; z++)
+            {
+                int left = z * gx;              // x = 0
+                int right = z * gx + (gx - 1);  // x = gx-1
+                if (wet[left] && !reached[left]) { reached[left] = true; stack[top++] = left; }
+                if (wet[right] && !reached[right]) { reached[right] = true; stack[top++] = right; }
+            }
+
+            // No open-water edge at all: an enclosed placed sea. Leave it be.
+            if (top == 0) return;
+
+            while (top > 0)
+            {
+                int i = stack[--top];
+                int x = i % gx;
+                int z = i / gx;
+
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int nz = z + dz;
+                    if (nz < 0 || nz >= gz) continue;
+
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int nx = x + dx;
+                        if (nx < 0 || nx >= gx) continue;
+
+                        int ni = nz * gx + nx;
+                        if (!wet[ni] || reached[ni]) continue;
+
+                        reached[ni] = true;
+                        stack[top++] = ni;
+                    }
+                }
+            }
+
+            for (int i = 0; i < n; i++)
+                if (wet[i] && !reached[i]) wet[i] = false;
         }
 
         // ---------------------------------------------------------------------

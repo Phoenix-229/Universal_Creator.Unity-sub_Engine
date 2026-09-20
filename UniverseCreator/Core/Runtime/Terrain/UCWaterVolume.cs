@@ -498,6 +498,10 @@ namespace UniverseCreator.TerrainSystem
             // box for every body in the scene, refreshed on every scene-view repaint.
             if (UnityEditor.Selection.activeGameObject != gameObject) return;
 
+            // Off unless the developer asked for the debug bounds. Selecting a water
+            // body to edit it should not paint a box over the water it belongs to.
+            if (!UCWaterGizmos.ShowDebugBounds) return;
+
             Gizmos.color = new Color(0.2f, 0.6f, 0.9f, 0.35f);
             Gizmos.DrawWireCube(worldBounds.center, worldBounds.size);
 #endif

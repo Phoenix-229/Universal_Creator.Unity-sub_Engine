@@ -720,6 +720,8 @@ namespace UniverseCreator.TerrainSystem
             // Unity runs this for children of the selection too, and the sim usually
             // lives under the water system under the world root.
             if (UnityEditor.Selection.activeGameObject != gameObject) return;
+            // Same debug-only gate as the water volume box.
+            if (!UCWaterGizmos.ShowDebugBounds) return;
 #endif
             if (!originValid) return;
 
