@@ -220,6 +220,16 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Sag band beyond the bank, in local channel widths.</summary>
         public const float ValleyBandWidths = 1f;
 
+        /// <summary>Fraction of the beyond-bank band that is the flat floodplain SOLE, the
+        /// rest being the valley WALL that rises to meet the untouched hillside. A real
+        /// valley section is a broad near-level floor then a distinct wall, not one curved
+        /// scoop - so the sole is held flat across this fraction and only the wall fades
+        /// out. 0.6 puts most of the floor in the flat plain, which is the low-confinement
+        /// shape a meandering river builds; the wall's own steepness then comes from how
+        /// high the surrounding ground stands, so a confined reach gets a steep wall and an
+        /// open one a gentle wall with no per-reach flag.</summary>
+        public const float ValleySoleFraction = 0.6f;
+
         /// <summary>Dry height held between the floodplain and the water, in local
         /// channel depths.</summary>
         public const float ValleyFreeboardDepths = 0.5f;
@@ -716,10 +726,31 @@ namespace UniverseCreator.TerrainSystem
             float band = bevel + Mathf.Min(corridor, width * ValleyBandWidths);
             if (signed >= band) return current;
 
-            // Deepening across the bank, then fading out across the floodplain.
-            float shape = signed <= bevel
-                ? signed / bevel
-                : 1f - (signed - bevel) / Mathf.Max(1e-4f, band - bevel);
+            // A real valley section beyond the bank is not one curved scoop - it is a
+            // broad, near-level SOLE (the floodplain the river built by migrating across
+            // it) and then a distinct WALL that rises to meet the untouched hillside. The
+            // old shape faded linearly from the bank straight out to the band edge, which
+            // dug deepest right at the channel and barely touched the ground 30 m out: a
+            // bowl, not a plain. Split the beyond-bank band instead:
+            //
+            //   bank      : signed <= bevel        - ease up from the waterline (unchanged)
+            //   sole      : bevel..soleEnd         - held FULL, so the floor stays flat
+            //   wall      : soleEnd..band          - fade to nothing into the hillside
+            //
+            // The wall's own steepness is not set here and needs no per-reach flag: the
+            // floor sits at one elevation (the floodplain), so where the surrounding
+            // ground stands high the wall is tall over the same run - a confined, steep
+            // valley - and where it stands low the wall is short and gentle. The terrain
+            // decides, which is the real-world behaviour.
+            float soleEnd = bevel + ValleySoleFraction * Mathf.Max(1e-4f, band - bevel);
+
+            float shape;
+            if (signed <= bevel)
+                shape = signed / bevel;                                  // bank ramp
+            else if (signed <= soleEnd)
+                shape = 1f;                                              // flat sole
+            else
+                shape = 1f - (signed - soleEnd) / Mathf.Max(1e-4f, band - soleEnd); // wall
 
             shape = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(shape));
 

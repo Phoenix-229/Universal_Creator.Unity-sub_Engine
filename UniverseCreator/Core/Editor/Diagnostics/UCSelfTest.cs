@@ -112,6 +112,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestRiverPlannerJunctionsAreOrdered();
             TestRiverValleyCorridorCaps();
             TestRiverValleySagsTheFloodplain();
+            TestRiverFloodplainSoleIsFlat();
             TestValleyCorridorAccessor();
             TestVolumeReachesTheRealBed();
             TestNodeReadoutsMatchTheCourse();
@@ -1734,6 +1735,49 @@ namespace UniverseCreator.Editor.Diagnostics
                   "a 5 m stream cut a floodplain, moving ground to " + untouched + " m from "
                   + gentleY + " m. A headwater stream runs in the notch it has; floodplains "
                   + "belong to rivers with the discharge to widen one");
+        }
+
+        /// <summary>
+        /// The floodplain is a FLAT sole then a wall, not a curved scoop.
+        /// </summary>
+        /// <remarks>
+        /// The sag digging deepest at the channel and fading out with distance made a bowl:
+        /// a river reads as sitting in the bottom of a dish, and the "floodplain" tilts the
+        /// whole way to the hillside. A real river builds a broad near-level floor by
+        /// migrating across it, and the ground only climbs again at the valley wall. Two
+        /// probes inside the sole must land at the SAME elevation (flat), and a probe out
+        /// in the wall band must stand distinctly higher (the ground rising to meet the
+        /// untouched hillside). Both sole probes sit past 18 m out, where the corridor
+        /// CEILING no longer reaches, so the flatness is the sag's own doing and not the
+        /// cap holding two points to the same line.
+        /// </remarks>
+        private static void TestRiverFloodplainSoleIsFlat()
+        {
+            const float surfaceY = 100f;
+            const float gentleY = surfaceY + 6f;
+
+            WaterCarveLayer on = MakeValleyLayer(surfaceY, 90f, 40f, 4f, true);
+
+            float half = 20f;   // half of the 40 m width
+            float soleNear = on.HeightAt(400f, 400f + half + 20f, gentleY);
+            float soleFar  = on.HeightAt(400f, 400f + half + 28f, gentleY);
+            float wall     = on.HeightAt(400f, 400f + half + 40f, gentleY);
+
+            Check(Mathf.Abs(soleNear - soleFar) < 0.25f,
+                  "the floodplain sole is not flat: ground 20 m out sits at " + soleNear
+                  + " m and 28 m out at " + soleFar + " m. A river builds a level floor by "
+                  + "migrating across it; a sole that tilts is the old bowl-shaped scoop");
+
+            Check(wall > soleFar + 0.5f,
+                  "the valley wall does not rise: ground 40 m out sits at " + wall + " m, "
+                  + "no higher than the sole at " + soleFar + " m. Beyond the floodplain the "
+                  + "ground must climb to meet the untouched hillside, or there is no wall "
+                  + "and the flat floor runs to the horizon");
+
+            Check(wall < gentleY + 1e-3f,
+                  "the wall overshot the hillside: ground 40 m out sits at " + wall + " m, "
+                  + "above the untouched " + gentleY + " m. The sag lowers only - it may "
+                  + "rise back TO the hillside but never above it");
         }
 
         // ---------------------------------------------------------------------
