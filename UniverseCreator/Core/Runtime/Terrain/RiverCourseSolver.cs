@@ -237,6 +237,14 @@ namespace UniverseCreator.TerrainSystem
             const float ClampToleranceMetres = 0.5f;
             const int ClampSamples = 4;
 
+            // The floodplain a meander lives on is roughly LEVEL across the flow, so a
+            // loop may only slide to ground that is within tolerance of the centre in
+            // EITHER direction. A one-sided guard (climb only) let a loop walk downhill
+            // at full amplitude - three widths for a trunk - which is how a channel ends
+            // up flowing on the SIDE of a hill instead of along its floor. The tolerance
+            // grows a little with the channel so a wide river's genuinely broad
+            // floodplain is not pinched to the headwater's, but stays a small band.
+
             int n = points.Count;
             float gradeCut = Mathf.Max(0.002f, maxGrade);
 
@@ -290,14 +298,20 @@ namespace UniverseCreator.TerrainSystem
                 float target = AmplitudeWidths * wLocal * amp * gradeGate * endWindow * wave;
 
                 // Stay on the floodplain. Scan from the full offset inward and take the
-                // largest that does not rise more than the tolerance above the centre:
-                // a loop may round a low bar but never climb the valley side.
+                // largest whose ground stays within tolerance of the centre in EITHER
+                // direction: a loop may round a low bar or a low rise, but the moment the
+                // ground under it departs the level of the channel - up the valley side
+                // OR down a hill flank - that offset has left the floodplain and is
+                // refused. The band widens gently with the channel (a big river's
+                // floodplain really is wider) but never becomes a licence to climb or
+                // descend the slope.
+                float levelBand = ClampToleranceMetres + wLocal * 0.05f;
                 float allowed = 0f;
                 for (int s = 0; s < ClampSamples; s++)
                 {
                     float trial = target * (1f - s / (float)ClampSamples);
                     float gh = ground(p.x + side.x * trial, p.z + side.y * trial);
-                    if (gh <= gHere + ClampToleranceMetres) { allowed = trial; break; }
+                    if (Mathf.Abs(gh - gHere) <= levelBand) { allowed = trial; break; }
                 }
 
                 moved[i] = new Vector3(p.x + side.x * allowed, p.y, p.z + side.y * allowed);
