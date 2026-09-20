@@ -3612,9 +3612,16 @@ namespace UniverseCreator.TerrainSystem
                 {
                     float u = across > 1 ? (j / (float)(across - 1)) * 2f - 1f : 0f;
 
-                    // Extend the water mesh slightly past the carved width to ensure it intersects 
-                    // the terrain perfectly and prevents gaps/holes in the banks.
-                    float extendWidth = halfWidth[i] + feather;
+                    // The CARVE is the authority: its waterline sits at halfWidth[i] (the
+                    // same solvedWidths the trench was dug with), so the water surface must
+                    // meet that line, not sail past it. Extend by only a hairline seal so
+                    // the plane still bites the rising bank and leaves no gap - never the
+                    // full bank feather, which is what made the shader "surpass the carve
+                    // with much". The seal is a small fraction of the local half-width so a
+                    // wide river does not balloon either, floored so a metre-wide brook is
+                    // still sealed and capped so it can never exceed the feather.
+                    float seal = Mathf.Min(feather, Mathf.Max(0.12f, halfWidth[i] * 0.08f));
+                    float extendWidth = halfWidth[i] + seal;
 
                     // Channel cross-section. exponent 2 is the parabola a natural
                     // stream cuts; 4 is a flat bed with steep banks; 1 is a shallow V.
