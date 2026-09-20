@@ -73,7 +73,8 @@ namespace UniverseCreator.TerrainSystem
         /// bottom of the trench it is near.
         /// </summary>
         public static void SnapToValley(List<Vector3> points, GroundSampler ground,
-                                        float searchMetres, float strength, int samples)
+                                        float searchMetres, float strength, int samples,
+                                        float deadbandMetres = 0f)
         {
             if (points == null || points.Count < 2 || ground == null) return;
 
@@ -82,6 +83,18 @@ namespace UniverseCreator.TerrainSystem
 
             float pull = Mathf.Clamp01(strength);
             if (pull <= 1e-4f) return;
+
+            // A point is only pulled sideways when the valley floor it finds is lower
+            // than where it already sits by MORE than this deadband - i.e. only when the
+            // point has genuinely climbed a bank. On natural terrain there is almost
+            // always SOME marginally lower cell within reach, so without a deadband every
+            // point drifts toward the nearest micro-dip and a course that was already
+            // seated on the thalweg (a D8-planned river, or a carefully drawn one) is
+            // dragged into a serrated wander off its own line. With it, a well-seated
+            // point stays exactly on its planned position and only a real hillside bow is
+            // corrected. Zero (the default) keeps the original always-pull behaviour for
+            // the wide fitToValley seek, where moving toward any lower ground is intended.
+            float dead = Mathf.Max(0f, deadbandMetres);
 
             int half = Mathf.Clamp(samples, 2, 32);
             int n = points.Count;
@@ -106,8 +119,9 @@ namespace UniverseCreator.TerrainSystem
                 dir.Normalize();
                 Vector2 side = new Vector2(-dir.y, dir.x);
 
+                float hereHeight = ground(p.x, p.z);
                 float bestOffset = 0f;
-                float bestHeight = ground(p.x, p.z);
+                float bestHeight = hereHeight;
 
                 for (int s = -half; s <= half; s++)
                 {
@@ -125,6 +139,17 @@ namespace UniverseCreator.TerrainSystem
                         bestHeight = h;
                         bestOffset = offset;
                     }
+                }
+
+                // Deadband: only correct a point that has genuinely climbed a bank -
+                // the floor it found must be lower than where it sits by more than the
+                // deadband. A point already on (or within the deadband of) the local low
+                // is left exactly where the planner/designer put it, so a seated course
+                // keeps its planned line instead of drifting into every micro-dip.
+                if (hereHeight - bestHeight <= dead)
+                {
+                    moved[i] = p;
+                    continue;
                 }
 
                 float take = bestOffset * pull;

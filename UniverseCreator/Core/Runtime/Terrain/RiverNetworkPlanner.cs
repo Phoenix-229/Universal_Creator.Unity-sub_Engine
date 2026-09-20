@@ -112,8 +112,12 @@ namespace UniverseCreator.TerrainSystem
 
         // A little headroom over the Hack estimate before a branch is trimmed, so ordinary
         // scatter in the length-area relation is not clipped - only a branch that is
-        // genuinely trunk-sized is brought back to scale.
-        private const float TributaryLengthTolerance = 1.35f;
+        // genuinely trunk-sized is brought back to scale. Held to 10%: the author's pass
+        // found tributaries running too long, and 35% headroom let a branch reach most of
+        // the trunk's length. Hack's law (L ~ A^0.57) is the real bound; this is just the
+        // scatter margin around it, so a tight margin keeps branches to a realistic
+        // fraction of the trunk without inventing a length from nowhere.
+        private const float TributaryLengthTolerance = 1.1f;
 
         // Two millimetres of residual fall per filled cell. Enough for D8 to have a
         // direction to pick across a flat the flood levelled off; far too small to

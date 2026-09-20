@@ -498,11 +498,17 @@ namespace UniverseCreator.TerrainSystem
                 }
         }
 
-        // Smoothing strength and passes for the de-facet low-pass. Two gentle passes take
-        // the sampling facets and region-break creases out of the valley while leaving the
-        // low-frequency valley shape (which the maths already made smooth) essentially
-        // untouched. Kept small on purpose: a strong blur would eat the bank the dig cut.
-        private const int ValleySmoothPasses = 2;
+        // Smoothing strength and passes for the de-facet low-pass. Three gentle passes
+        // take the sampling facets and region-break creases out of the valley while
+        // leaving the low-frequency valley shape (which the maths already made smooth, and
+        // which the re-tessellated centreline now keeps polygon-free) essentially
+        // untouched. Kept bounded on purpose: it is deepening-only and dry-bank-only, so
+        // it can never eat the wetted channel or raise ground into a wall - but a third
+        // pass rounds the "joined stones" creases the two-pass window still left on coarse
+        // terrain, where a heightmap post is ~4 m and a single bank spans only a post or
+        // two. A stronger per-pass blur would instead flatten the bank the dig cut, so the
+        // extra smoothing is bought with another gentle pass, not a higher strength.
+        private const int ValleySmoothPasses = 3;
         private const float ValleySmoothStrength = 0.5f;
 
         /// <summary>

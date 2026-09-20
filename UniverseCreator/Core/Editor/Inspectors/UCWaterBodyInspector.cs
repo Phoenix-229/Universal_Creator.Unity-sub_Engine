@@ -570,7 +570,20 @@ namespace UniverseCreator.Editor.Inspectors
                 // safe by name, so the control is not shown for them. The mutation is
                 // flushed and the serialized view re-synced so the apply at the end of
                 // OnInspectorGUI does not revert it (same pattern as the shape dropdown).
-                if (!ocean && HydrologyGenerator.IsGeneratedBodyName(body.name))
+                // The lock is offered to any body a regeneration could move, not only
+                // one whose name still matches the generated scheme: a generated body
+                // the author renamed, or wired to a node, is exactly the one that most
+                // needs the protection, and gating on the name alone loses it the moment
+                // it is renamed. The real signals are - it is already saved (so it can be
+                // released), it re-fits on regenerate, it is linked to a graph node, or
+                // its name still matches. Any one of them means this is a procedural body
+                // the generator owns and the bake/lock applies.
+                bool canManagePlacement = !ocean &&
+                    (body.placementSaved ||
+                     body.onRegenerate == UCWaterBody.ProceduralResponse.RefitAutomatically ||
+                     body.IsGraphLinked ||
+                     HydrologyGenerator.IsGeneratedBodyName(body.name));
+                if (canManagePlacement)
                 {
                     EditorGUILayout.Space(2);
                     if (body.placementSaved)
@@ -639,6 +652,17 @@ namespace UniverseCreator.Editor.Inspectors
             }
 
             EditorGUILayout.HelpBox(message, type);
+
+            // The connection tick the author asked to SEE: a read-only confirmation that
+            // this body is node-joined to another (ocean outlet -> river, river -> lake,
+            // two courses merged). It reads the real join reference, so a tick here means
+            // the plumbing is genuinely wired, not that we hope it is.
+            using (new EditorGUI.DisabledScope(true))
+                EditorGUILayout.ToggleLeft(
+                    body.IsConnected
+                        ? "Connected to another body:  " + body.ConnectionSummary
+                        : "Not connected to another body",
+                    body.IsConnected);
         }
 
         // =====================================================================

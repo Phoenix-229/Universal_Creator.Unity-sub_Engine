@@ -6,8 +6,11 @@ namespace UniverseCreator.Editor.Windows
 {
     public class UCTopographicMapWindow : EditorWindow
     {
-        public enum MapViewMode { Topography, Satellite, Terrain }
-        private MapViewMode viewMode = MapViewMode.Topography;
+        // WorldMap = the real surface a satellite would see (painted material colour +
+        // relief hillshade + vegetation + water), merging the old Satellite and Terrain
+        // views into one physical map. Topography = the elevation heat map.
+        public enum MapViewMode { WorldMap, Topography }
+        private MapViewMode viewMode = MapViewMode.WorldMap;
 
         private Texture2D mapTexture;
         private Rect mapRect;
@@ -50,6 +53,11 @@ namespace UniverseCreator.Editor.Windows
             new Dictionary<TerrainData, Color[]>();
         private readonly Dictionary<TerrainData, float[,,]> alphaCache =
             new Dictionary<TerrainData, float[,,]>();
+        // Average diffuse colour per layer texture - the material's real from-above colour.
+        // Keyed by the texture itself, so it is shared across every layer and terrain and
+        // computed once per texture per map build.
+        private readonly Dictionary<Texture2D, Color> textureAverageCache =
+            new Dictionary<Texture2D, Color>();
 
         // Opened via the World (UniverseCreatorInspector) rather than the top menu
         public static void ShowWindow()
@@ -441,15 +449,12 @@ namespace UniverseCreator.Editor.Windows
                         {
                             c = GetHeatMapColor(heights[i], trueMin, trueMax);
                         }
-                        else if (viewMode == MapViewMode.Satellite)
+                        else // MapViewMode.WorldMap
                         {
-                            // The real painted surface, straight from the terrain's splat layers.
-                            c = surfaceCols[i];
-                        }
-                        else if (viewMode == MapViewMode.Terrain)
-                        {
-                            // Real surface, shaded by a simple hillshade from the neighbouring heights so
-                            // relief reads without inventing colour.
+                            // The real painted surface (sampled from the layer textures),
+                            // shaded by a simple hillshade from the neighbouring heights so
+                            // relief reads without inventing colour - a satellite photo
+                            // carries its own relief the same way.
                             float shade = 1f;
                             if (x > 0 && y > 0)
                             {
@@ -478,13 +483,13 @@ namespace UniverseCreator.Editor.Windows
                                 : new Color(0.18f, 0.42f, 0.14f);
                             float amount = viewMode == MapViewMode.Topography
                                 ? vegetation01[i] * 0.45f
-                                : vegetation01[i] * 0.75f;
+                                : vegetation01[i] * 0.85f;
                             c = Color.Lerp(c, green, amount);
                         }
 
 
                         // Draw contours every 50m for Topography and Terrain
-                        if ((viewMode == MapViewMode.Topography || viewMode == MapViewMode.Terrain) && x > 0 && y > 0)
+                        if ((viewMode == MapViewMode.Topography || viewMode == MapViewMode.WorldMap) && x > 0 && y > 0)
                         {
                             float hLeft = heights[y * mapWidth + (x - 1)];
                             float hDown = heights[(y - 1) * mapWidth + x];
@@ -517,6 +522,7 @@ namespace UniverseCreator.Editor.Windows
             mapWaters.Clear();
             layerColorCache.Clear();
             alphaCache.Clear();
+            textureAverageCache.Clear();
 
             mapRivers.Clear();
             mapTrees.Clear();
@@ -777,11 +783,65 @@ namespace UniverseCreator.Editor.Windows
             cols = new Color[layers != null ? layers.Length : 0];
             for (int i = 0; i < cols.Length; i++)
             {
-                string n = layers[i] != null ? layers[i].name : string.Empty;
-                cols[i] = ColorForLayerName(n);
+                // A real satellite shows the actual painted material, so sample the layer's
+                // own diffuse texture average colour - that IS what the ground looks like
+                // from above. The name is only a fallback for a layer whose texture cannot
+                // be read (compressed/unreadable import), because a name like "Ground" says
+                // nothing about whether the texture is green grass or brown soil.
+                Color sampled;
+                if (layers[i] != null && TryAverageTextureColor(layers[i].diffuseTexture, out sampled))
+                {
+                    // Fold in the layer's diffuse tint (URP terrain layers can tint the
+                    // texture), so a green-tinted rock still reads the way it renders.
+                    Color tint = layers[i].diffuseRemapMax == Vector4.zero
+                        ? Color.white
+                        : (Color)layers[i].diffuseRemapMax;
+                    cols[i] = new Color(sampled.r * tint.r, sampled.g * tint.g, sampled.b * tint.b, 1f);
+                }
+                else
+                {
+                    string n = layers[i] != null ? layers[i].name : string.Empty;
+                    cols[i] = ColorForLayerName(n);
+                }
             }
             layerColorCache[td] = cols;
             return cols;
+        }
+
+        // The average colour of a terrain-layer diffuse texture - the material's real
+        // from-above colour. Reads the smallest mip so the average is cheap and no per-texel
+        // walk of a 2k texture is needed. Returns false when the texture is null or its
+        // pixels cannot be read (unreadable import, unsupported format), so the caller can
+        // fall back to the name. Cached per texture across every layer and terrain.
+        private bool TryAverageTextureColor(Texture2D tex, out Color avg)
+        {
+            avg = Color.white;
+            if (tex == null) { return false; }
+            if (textureAverageCache.TryGetValue(tex, out avg)) { return avg.a > 0.5f; }
+
+            Color result;
+            bool ok = false;
+            try
+            {
+                // Prefer the smallest mip: one GetPixels call over a handful of texels.
+                int mip = Mathf.Max(0, tex.mipmapCount - 1);
+                Color[] px = tex.GetPixels(mip);
+                if (px != null && px.Length > 0)
+                {
+                    float r = 0f, g = 0f, b = 0f;
+                    for (int i = 0; i < px.Length; i++) { r += px[i].r; g += px[i].g; b += px[i].b; }
+                    float inv = 1f / px.Length;
+                    result = new Color(r * inv, g * inv, b * inv, 1f);
+                    ok = true;
+                }
+                else { result = Color.white; }
+            }
+            catch { result = Color.white; }
+
+            // a<0.5 marks "unreadable" in the cache so we do not retry the GetPixels throw.
+            avg = ok ? result : new Color(1f, 1f, 1f, 0f);
+            textureAverageCache[tex] = avg;
+            return ok;
         }
 
         // A from-above colour for a splat layer, decided by its name -- the real painted material, mapped to

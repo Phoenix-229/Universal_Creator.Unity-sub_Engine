@@ -124,12 +124,18 @@ namespace UniverseCreator.TerrainSystem
             // what limits it, which is a limit of the terrain rather than of arithmetic.
             int desiredLakes = node.targetLakeCount > 0 ? node.targetLakeCount : maxLakes;
 
-            // Drain-out rivers, on the same "fraction of the world's chunks" basis as the
-            // lakes and rounded the same way. There can never be more outlets than lakes,
-            // because each one is a lake's overflow.
-            int desiredOutlets = Mathf.Clamp(
-                Mathf.RoundToInt(totalChunks * Mathf.Clamp01(node.lakeOutletChunkPercentage)),
-                0, desiredLakes);
+            // Drain-out rivers. Real hydrology: a lake fed by any catchment MUST overflow
+            // somewhere - a lake with an inflow and no outlet does not exist unless it is
+            // endorheic (loses all its water to evaporation/seepage, which is the rare
+            // desert case). So every lake that physically spills gets its own outlet river:
+            // the target is the full lake count, and PlanLakeOutlets keeps only the lakes
+            // that genuinely spill onto open ground (it rejects a sill sitting in other
+            // water, and a basin with no overflow). The old fraction-of-chunks cap starved
+            // most lakes of any river at all (the author's "Lake 1 has no river") - it is
+            // replaced by the physical rule. lakeOutletChunkPercentage is kept only as an
+            // optional floor: if the author set it higher than the lake count would give,
+            // it still cannot exceed the number of lakes (an outlet IS a lake's overflow).
+            int desiredOutlets = desiredLakes;
             int outletsToSpawn = desiredOutlets - currentOutlets;
 
             // Reconcile the procedural set DOWN to the target, keeping the lowest-lying
@@ -314,6 +320,59 @@ namespace UniverseCreator.TerrainSystem
             // hierarchy without opening it.
             List<string> bodyLines = new List<string>();
 
+            // --- Spawn the ocean (T10) FIRST (author's order: ocean -> lakes -> rivers) ---
+            // The sea is the base level of the world's drainage: every lake sits in a basin
+            // above it and every river ends at it or in a lake, so it is placed before them.
+            // One world-sized, flat sea, standing at the datum resolved above - the same
+            // node.seaLevel the graph's masks stamp against, so the coast forms exactly
+            // where the graph says the land drops below the waterline. It does NOT
+            // dig: BuildLevelBody culls every vertex whose ground is at or above the
+            // surface, so the sea shows only where the land is already below sea level and
+            // any higher ground reads as shore or island - coastline and islands follow
+            // the real landscape, with no rectangle stamped into the terrain.
+            if (oceanToSpawn)
+            {
+                int highestOceanIndex = 0;
+                foreach (UCWaterBody b in proceduralOceans)
+                {
+                    int oi; TryParseTrailingIndex(b.name, "Ocean", out oi);
+                    if (oi > highestOceanIndex) highestOceanIndex = oi;
+                }
+
+                // The one sea level resolved above - not a second computation.
+                float seaLevel = seaLevelMetres;
+
+                GameObject oceanGo = new GameObject($"Ocean {highestOceanIndex + 1}");
+                oceanGo.transform.SetParent(waterRoot);
+                oceanGo.layer = uc.waterLayer;
+
+                UCWaterBody ocean = oceanGo.AddComponent<UCWaterBody>();
+                ocean.SetKindOnce(WaterBodyKind.Ocean);
+                // Same object a hand-placed ocean is, then the manager defaults - identical
+                // to the create menu (see WaterPresets / T15).
+                WaterPresets.ApplyDefaults(ocean);
+                WaterPresets.ApplyManagerDefaults(ocean);
+                // A pure flood surface: no dig, so no square hole and no shore bevel - the
+                // waterline is cut by the depth test alone (T22). Islands emerge from the
+                // cull, so no island mask is needed either.
+                ocean.digTerrain = false;
+                // Hold when the graph regenerates, so a sea the user moved is not refit.
+                ocean.onRegenerate = UCWaterBody.ProceduralResponse.HoldPlacement;
+
+                // Cover the whole playable world; the cull trims the rest, so oversizing
+                // is harmless while undersizing would leave a dry gap at the world edge.
+                ocean.sizeMetres = new Vector2(bounds.size.x, bounds.size.z);
+                // surfaceY = transform.position.y + surfaceOffsetMetres, so place the
+                // object so the water plane lands exactly on the computed sea level.
+                ocean.transform.position = new Vector3(bounds.center.x,
+                                                       seaLevel - ocean.surfaceOffsetMetres,
+                                                       bounds.center.z);
+                ocean.Rebuild();
+                ReportIfDry(ocean, oceanGo.name);
+                bodyLines.Add("    " + oceanGo.name + " - ocean, surface "
+                              + ocean.SurfaceWorldY().ToString("0.##") + " m");
+            }
+
             for (int i = 0; i < lakeCenters.Count && lakesMade < lakesToSpawn; i++)
             {
                 Vector3 centerPoint = lakeCenters[i];
@@ -381,57 +440,6 @@ namespace UniverseCreator.TerrainSystem
                               + lake.SurfaceWorldY().ToString("0.##") + " m, "
                               + Mathf.RoundToInt(lakeArea) + " m^2, "
                               + (fillLevel - centerPoint.y).ToString("0.##") + " m deep");
-            }
-
-            // --- Spawn the ocean (T10) ---
-            // One world-sized, flat sea, standing at the datum resolved above - the same
-            // node.seaLevel the graph's masks stamp against, so the coast forms exactly
-            // where the graph says the land drops below the waterline. It does NOT
-            // dig: BuildLevelBody culls every vertex whose ground is at or above the
-            // surface, so the sea shows only where the land is already below sea level and
-            // any higher ground reads as shore or island - coastline and islands follow
-            // the real landscape, with no rectangle stamped into the terrain.
-            if (oceanToSpawn)
-            {
-                int highestOceanIndex = 0;
-                foreach (UCWaterBody b in proceduralOceans)
-                {
-                    int oi; TryParseTrailingIndex(b.name, "Ocean", out oi);
-                    if (oi > highestOceanIndex) highestOceanIndex = oi;
-                }
-
-                // The one sea level resolved above - not a second computation.
-                float seaLevel = seaLevelMetres;
-
-                GameObject oceanGo = new GameObject($"Ocean {highestOceanIndex + 1}");
-                oceanGo.transform.SetParent(waterRoot);
-                oceanGo.layer = uc.waterLayer;
-
-                UCWaterBody ocean = oceanGo.AddComponent<UCWaterBody>();
-                ocean.SetKindOnce(WaterBodyKind.Ocean);
-                // Same object a hand-placed ocean is, then the manager defaults - identical
-                // to the create menu (see WaterPresets / T15).
-                WaterPresets.ApplyDefaults(ocean);
-                WaterPresets.ApplyManagerDefaults(ocean);
-                // A pure flood surface: no dig, so no square hole and no shore bevel - the
-                // waterline is cut by the depth test alone (T22). Islands emerge from the
-                // cull, so no island mask is needed either.
-                ocean.digTerrain = false;
-                // Hold when the graph regenerates, so a sea the user moved is not refit.
-                ocean.onRegenerate = UCWaterBody.ProceduralResponse.HoldPlacement;
-
-                // Cover the whole playable world; the cull trims the rest, so oversizing
-                // is harmless while undersizing would leave a dry gap at the world edge.
-                ocean.sizeMetres = new Vector2(bounds.size.x, bounds.size.z);
-                // surfaceY = transform.position.y + surfaceOffsetMetres, so place the
-                // object so the water plane lands exactly on the computed sea level.
-                ocean.transform.position = new Vector3(bounds.center.x,
-                                                       seaLevel - ocean.surfaceOffsetMetres,
-                                                       bounds.center.z);
-                ocean.Rebuild();
-                ReportIfDry(ocean, oceanGo.name);
-                bodyLines.Add("    " + oceanGo.name + " - ocean, surface "
-                              + ocean.SurfaceWorldY().ToString("0.##") + " m");
             }
 
             // --- Rivers (T17) and lake drain-out rivers (spec 2.2) ---
@@ -665,16 +673,22 @@ namespace UniverseCreator.TerrainSystem
                         float share = Mathf.Clamp01(drained / mouthCatchment);
                         float nodeWidth = river.widthMetres * Mathf.Pow(share, WidthAreaExponent);
 
-                        // Floored at the narrowest channel that gets built at all, and
-                        // capped at the body's own width: the mouth is the widest the
-                        // river gets, and the estuary flare below is the one exception.
+                        // Floored at the SOURCE stream, not at the river-object minimum:
+                        // the node taper is where the river is allowed to thin to the rill
+                        // it starts as (~0.3 m), while the body/mask stay at
+                        // MinRiverWidthMetres so the course still exists. Capped at the
+                        // body's own width - the mouth is the widest the river gets, and
+                        // the estuary flare below is the one exception.
                         river.nodeWidthMetres[p] =
-                            Mathf.Clamp(nodeWidth, MinRiverWidthMetres, river.widthMetres);
+                            Mathf.Clamp(nodeWidth, SourceStreamWidthMetres, river.widthMetres);
 
                         // Same width-to-depth ratio as the body, so a headwater reach is
-                        // shallow as well as narrow instead of a narrow slot cut deep.
+                        // shallow as well as narrow instead of a narrow slot cut deep. The
+                        // floor is the source stream's ~0.2 m, so the depth tapers with the
+                        // width all the way to the head instead of stopping at 0.4 m.
                         river.nodeDepthMetres[p] =
-                            Mathf.Clamp(river.nodeWidthMetres[p] / WidthToDepthRatio, 0.4f, 8f);
+                            Mathf.Clamp(river.nodeWidthMetres[p] / WidthToDepthRatio,
+                                        SourceStreamDepthMetres, 8f);
                     }
 
                     // A river widens where it meets the sea - the estuary. Over the last
@@ -895,9 +909,22 @@ namespace UniverseCreator.TerrainSystem
         /// inside 40-80 m while their tributaries stay honestly smaller.</summary>
         private const float TrunkMinWidthMetres = 40f;
 
-        /// <summary>Nothing narrower than this gets built as a river object.</summary>
-        /// <remarks>Shared with the spawner's River Mask - see BigRiverWidthMetres.</remarks>
+        /// <summary>Nothing narrower than this gets built as a river OBJECT (a whole
+        /// course, mask and body). Shared with the spawner's River Mask - see
+        /// BigRiverWidthMetres - so it governs whether a course exists at all.</summary>
         internal const float MinRiverWidthMetres = 4f;
+
+        /// <summary>
+        /// The width and depth a channel has at its SOURCE - the first-order stream where
+        /// water first collects, before any tributary joins it. A real river is not one
+        /// width: it begins as a rill you can step across (~0.3 m wide, ~0.2 m deep) and
+        /// grows every time more land drains through it. These floor the PER-NODE taper
+        /// only - the river object's own width (its mouth, what the mask stamps) still
+        /// floors at MinRiverWidthMetres, so the course still exists as a river while its
+        /// headwater reach thins honestly to a stream instead of stopping at 4 m.
+        /// </summary>
+        private const float SourceStreamWidthMetres = 0.3f;
+        private const float SourceStreamDepthMetres = 0.2f;
 
         /// <summary>Alluvial channels are roughly this many times wider than deep.</summary>
         private const float WidthToDepthRatio = 18f;

@@ -1124,6 +1124,45 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// True when this body is node-connected to another body downstream or upstream
+        /// - the join reference the inspector tick-box sets. This is the plumbing the
+        /// author asked to SEE confirmed: an ocean outlet that meets a river, a river
+        /// that feeds a lake, two courses that merge. Connection is a real reference,
+        /// not a guess, so we report it exactly as it stands.
+        /// </summary>
+        public bool IsConnected
+        {
+            get
+            {
+                // Authored joins (river->river set on the node, lake outlet) OR the
+                // auto-connect the descent walk found (a mouth arriving at an ocean or
+                // lake). Both are real references the build acts on, so both count.
+                return joinDownstreamTo != null || joinUpstreamFrom != null ||
+                       autoJoinDownstream != null;
+            }
+        }
+
+        /// <summary>
+        /// A short one-line reading of who this body is joined to, for the inspector
+        /// tick: "&lt;- Lake 2   -&gt; Ocean 1". Empty when nothing is connected. Reads
+        /// the authored join first and falls back to the auto-connect the walk found, so
+        /// a river that ran itself into the sea reads its true destination.
+        /// </summary>
+        public string ConnectionSummary
+        {
+            get
+            {
+                string up = joinUpstreamFrom != null ? joinUpstreamFrom.name : null;
+                UCWaterBody downBody = joinDownstreamTo != null ? joinDownstreamTo : autoJoinDownstream;
+                string down = downBody != null ? downBody.name : null;
+                if (up == null && down == null) return string.Empty;
+                if (up != null && down != null) return "← " + up + "   → " + down;
+                if (up != null) return "← " + up;
+                return "→ " + down;
+            }
+        }
+
+        /// <summary>
         /// Translates the fields above into a dig the terrain build can apply, then
         /// re-cuts it into whatever terrain is already on screen.
         ///
@@ -2382,7 +2421,8 @@ namespace UniverseCreator.TerrainSystem
             {
                 float debowReach = Mathf.Clamp(Mathf.Max(0.5f, widthMetres) * DebowWidths,
                                                 DebowMinMetres, DebowMaxMetres);
-                RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8);
+                RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8,
+                                               DebowDeadbandMetres);
                 RiverCourseSolver.Relax(result, 1);
             }
 
@@ -2456,6 +2496,48 @@ namespace UniverseCreator.TerrainSystem
             // the surface solve that follows re-reads depth from these.
             if (autoHydraulicGeometry)
                 ApplyHydraulicGeometry(result, widths, depths);
+
+            // RE-TESSELLATE THE FITTED PLANFORM. Everything above - the valley seek, the
+            // descent walk and especially Meander - moves the resampled POINTS sideways
+            // but leaves them at pointSpacingMetres, so a bend is a run of short straight
+            // chords with a corner at every point: the "polygonal meander" and the
+            // faceted valley the author saw in the editor. A Relax only rounds the jitter,
+            // it does not turn chords into a curve. So the moved planform is run back
+            // through the SAME centripetal Catmull-Rom used on the authored nodes and
+            // resampled to the final spacing - now the curve passes smoothly THROUGH each
+            // moved point instead of cornering at it. Both the carve and the surface mesh
+            // read this one array (solvedPoints), so both follow the smooth curve; nothing
+            // forks. Width and depth are carried onto the new points by nearest-position
+            // sampling (the same method the descent walk uses), so the per-node hydraulic
+            // sizing above is preserved. Skipped when nothing moved the planform off its
+            // already-smooth resample (no meander, no valley fit, no walk), because a
+            // second tessellation of an already-smooth line would only round its own ends.
+            bool planformWasMoved = meander || fitToValley || routeAroundHighGround;
+            if (planformWasMoved && result.Count >= 3)
+            {
+                Polyline moved = new Polyline();
+                for (int i = 0; i < result.Count; i++)
+                    moved.Add(result[i], i < widths.Count ? widths[i] : widthMetres);
+
+                Polyline curved = SplineOperations.TessellateCatmullRom(
+                    moved, Mathf.Max(0.25f, pointSpacingMetres * 0.5f));
+                Polyline respaced = SplineOperations.Resample(
+                    curved, Mathf.Max(0.5f, pointSpacingMetres), true);
+
+                if (respaced != null && respaced.Count >= 2)
+                {
+                    List<Vector3> smoothPts = new List<Vector3>(respaced.Count);
+                    for (int i = 0; i < respaced.Count; i++) smoothPts.Add(respaced.PointAt(i));
+
+                    List<float> smoothW = new List<float>(smoothPts.Count);
+                    List<float> smoothD = new List<float>(smoothPts.Count);
+                    ResampleSeriesAlong(result, widths, depths, smoothPts, smoothW, smoothD);
+
+                    result = smoothPts;
+                    widths = smoothW;
+                    depths = smoothD;
+                }
+            }
 
             return result;
         }
@@ -2563,6 +2645,16 @@ namespace UniverseCreator.TerrainSystem
         private const float DebowMinMetres = 12f;
         private const float DebowMaxMetres = 120f;
         private const float DebowPull = 0.6f;
+
+        // De-bow only fires where a point has genuinely climbed a bank: the valley floor
+        // it finds must sit at least this far below it. Below this it is treated as
+        // already on the floor and left on its planned line. Without it, de-bow chased
+        // the nearest micro-dip on every point and forced the seated course into an
+        // unnatural serrated wander (the author's "forced meanders / weird water corners"
+        // on procedural rivers). Set to a channel-depth scale so a point that is merely
+        // in the bed's own roughness is not "corrected", but one perched a channel above
+        // the floor is. Real physical threshold, not a tuning knob pulled from nowhere.
+        private const float DebowDeadbandMetres = 1.0f;
 
         // The width-to-depth ratio of an ordinary alluvial channel in an average valley.
         // Matches the generator's 18:1 so procedural and drawn rivers read the same.
@@ -2993,6 +3085,14 @@ namespace UniverseCreator.TerrainSystem
             surfaceObject.transform.localPosition = Vector3.zero;
             surfaceObject.transform.localRotation = Quaternion.identity;
             surfaceObject.transform.localScale = Vector3.one;
+
+#if UNITY_EDITOR
+            // The surface is a rebuilt child, not a thing the author edits. A click in
+            // the scene must land on the water BODY that owns the fields, so we take the
+            // surface out of scene picking - the parent stays selectable, the mesh does
+            // not intercept the click.
+            UnityEditor.SceneVisibilityManager.instance.DisablePicking(surfaceObject, false);
+#endif
 
             mesh = new Mesh();
             mesh.name = "UC Water Mesh";
