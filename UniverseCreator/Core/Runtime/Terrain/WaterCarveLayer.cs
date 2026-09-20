@@ -425,6 +425,22 @@ namespace UniverseCreator.TerrainSystem
             float narrowest = NarrowestFeatureMetres();
             int ss = Mathf.Clamp(Mathf.CeilToInt(2f * mps / Mathf.Max(0.5f, narrowest)), 1, 3);
 
+            // The dig is computed into a scratch window first, then a bounded low-pass
+            // rounds the DRY bank/valley cells before the result is written back. Why:
+            // HeightAt is a smooth continuous surface, but sampled one point per
+            // heightmap post (~4 m) with distinct bank/sole/wall regions, the discrete
+            // result reads faceted - the reported "valley like joined stones". A low-pass
+            // over the sampled field is the honest correction: it removes the sampling
+            // facets and the region-break creases without changing the underlying shape
+            // the maths already got right. The WETTED BED is excluded (see the eligible
+            // test) so a channel keeps its solved depth, and the pass is deepening-only
+            // so it can never raise ground into a wall the terrain did not have.
+            int ww = x1 - x0 + 1;
+            int wh = z1 - z0 + 1;
+            float[] dugBuf = new float[ww * wh];
+            float[] origBuf = new float[ww * wh];
+            bool[] eligible = new bool[ww * wh];
+
             for (int lz = z0; lz <= z1; lz++)
             {
                 float wz = chunkWorldBounds.min.z + lz * mps;
@@ -458,12 +474,108 @@ namespace UniverseCreator.TerrainSystem
                         }
                     }
 
+                    int w = (lz - z0) * ww + (lx - x0);
+                    dugBuf[w] = dug;
+                    origBuf[w] = existing;
+                    // Eligible for the de-facet pass only where the dig actually lowered
+                    // the ground AND the sample is on the DRY side of the waterline (the
+                    // bank, floodplain and valley wall). The wetted bed is left exactly as
+                    // solved so the river keeps its depth.
+                    eligible[w] = dug < existing - 1e-3f && IsDryBankSample(wx, wz);
+                }
+            }
+
+            SmoothValleyWindow(dugBuf, origBuf, eligible, ww, wh);
+
+            for (int lz = z0; lz <= z1; lz++)
+                for (int lx = x0; lx <= x1; lx++)
+                {
+                    int w = (lz - z0) * ww + (lx - x0);
                     // Only ever assigned, never accumulated. Two applications of the
                     // same dig to the same terrain give the same answer, which is
                     // what makes the order of chunk builds irrelevant.
-                    heights[lz, lx] = Mathf.Clamp01(dug * invMax);
+                    heights[lz, lx] = Mathf.Clamp01(dugBuf[w] * invMax);
+                }
+        }
+
+        // Smoothing strength and passes for the de-facet low-pass. Two gentle passes take
+        // the sampling facets and region-break creases out of the valley while leaving the
+        // low-frequency valley shape (which the maths already made smooth) essentially
+        // untouched. Kept small on purpose: a strong blur would eat the bank the dig cut.
+        private const int ValleySmoothPasses = 2;
+        private const float ValleySmoothStrength = 0.5f;
+
+        /// <summary>
+        /// Bounded low-pass over the dry bank/valley cells of a dug window, in place.
+        /// Each eligible cell is eased toward the mean of its four neighbours (which may
+        /// be untouched ground, so the crease where the valley meets the hillside is what
+        /// gets rounded), then clamped so it never rises above the original terrain -
+        /// deepening only, exactly like the dig itself. Ineligible cells (the wetted bed,
+        /// and untouched ground) are read as neighbours but never written, so the channel
+        /// keeps its solved depth and no ground outside the dig is disturbed.
+        /// </summary>
+        private static void SmoothValleyWindow(float[] dug, float[] orig, bool[] eligible,
+                                               int ww, int wh)
+        {
+            if (dug == null || ww < 3 || wh < 3) return;
+
+            bool any = false;
+            for (int i = 0; i < eligible.Length; i++) if (eligible[i]) { any = true; break; }
+            if (!any) return;
+
+            float[] src = new float[dug.Length];
+
+            for (int pass = 0; pass < ValleySmoothPasses; pass++)
+            {
+                System.Array.Copy(dug, src, dug.Length);
+
+                for (int z = 0; z < wh; z++)
+                {
+                    for (int x = 0; x < ww; x++)
+                    {
+                        int i = z * ww + x;
+                        if (!eligible[i]) continue;
+
+                        // Four-neighbour mean, edges falling back to the cell itself so a
+                        // window-border cell is not dragged by a neighbour that is not there.
+                        float left  = x > 0      ? src[i - 1]  : src[i];
+                        float right = x < ww - 1 ? src[i + 1]  : src[i];
+                        float down  = z > 0      ? src[i - ww] : src[i];
+                        float up    = z < wh - 1 ? src[i + ww] : src[i];
+
+                        float mean = (left + right + down + up) * 0.25f;
+                        float eased = Mathf.Lerp(src[i], mean, ValleySmoothStrength);
+
+                        // Deepening only: never lift a bank above the ground the terrain
+                        // actually had there.
+                        dug[i] = Mathf.Min(orig[i], eased);
+                    }
                 }
             }
+        }
+
+        /// <summary>
+        /// True when a world sample is on the DRY side of this body's waterline - the
+        /// bank, floodplain or valley wall - and within the dig's reach. False in the
+        /// wetted channel/basin (so the de-facet pass leaves the bed's depth alone) and
+        /// false for an ocean, whose bevel-only shape is already smooth and has no valley.
+        /// Mirrors the region split at the top of <see cref="HeightAt"/>.
+        /// </summary>
+        private bool IsDryBankSample(float worldX, float worldZ)
+        {
+            if (!enabled || !HasShape || bevelOnly) return false;
+
+            if (isCourse)
+            {
+                float signed, s, d, r;
+                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r)) return false;
+                return signed > 0f;
+            }
+
+            if (!IsIsland(worldX, worldZ))
+                return RingSignedDistance(worldX, worldZ) > 0f;
+
+            return false;
         }
 
         /// <summary>

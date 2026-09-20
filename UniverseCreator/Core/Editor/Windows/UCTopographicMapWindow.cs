@@ -23,6 +23,27 @@ namespace UniverseCreator.Editor.Windows
         private struct MapWater { public float surfaceY; public float floorY; public Bounds plan; }
         private readonly List<MapWater> mapWaters = new List<MapWater>();
 
+        // Real rivers, read from the placed spline bodies. A river's bounding box is not its
+        // shape, so it cannot go in mapWaters (which tests a footprint); instead its world
+        // course and half-width are kept and stamped as a line onto the water mask, so the
+        // map shows the river where the channel actually runs. Width tapers along the course
+        // the same way the channel does, so a river reads narrow at its head and wide at its
+        // mouth on the map exactly as on the ground.
+        private struct MapRiver { public List<Vector3> course; public float halfWidth; }
+        private readonly List<MapRiver> mapRivers = new List<MapRiver>();
+
+        // Real vegetation, read from the terrains' own tree instances and detail (grass)
+        // density - not invented from height or slope. Tree world positions are stamped as
+        // canopy, and a per-terrain detail-density grid gives ground cover, so the map shows
+        // green where the tool actually planted it.
+        private struct MapTrees { public List<Vector2> xz; }
+        private readonly List<MapTrees> mapTrees = new List<MapTrees>();
+        private struct MapDetail
+        {
+            public Terrain terrain; public int[] density; public int res; // summed over all layers
+        }
+        private readonly List<MapDetail> mapDetails = new List<MapDetail>();
+
         // Averaged colour per splat layer, keyed off the layer name (readable-texture-free), cached per
         // terrain data so the satellite view is one lookup per pixel.
         private readonly Dictionary<TerrainData, Color[]> layerColorCache =
@@ -304,6 +325,9 @@ namespace UniverseCreator.Editor.Windows
             // Per pixel: is this point under a real water body, and how deep (0..1) for the water shading.
             bool[] waterMask = new bool[mapWidth * mapHeight];
             float[] waterDepth01 = new float[mapWidth * mapHeight];
+            // Per pixel vegetation strength (0..1), read from the terrain's real detail density
+            // and trees. Trees are stamped after the sampling loop; detail is sampled here.
+            float[] vegetation01 = new float[mapWidth * mapHeight];
 
             float viewWidth = bounds.size.x / zoom;
             float viewDepth = bounds.size.z / zoom;
@@ -350,6 +374,9 @@ namespace UniverseCreator.Editor.Windows
                             float span = Mathf.Max(0.5f, surf - floor);
                             waterDepth01[wi] = Mathf.Clamp01((surf - height) / span);
                         }
+
+                        // Real ground-cover vegetation, sampled from the terrain's detail grid.
+                        vegetation01[wi] = VegetationAt(worldX, worldZ);
                     }
                     else
                     {
@@ -360,6 +387,34 @@ namespace UniverseCreator.Editor.Windows
 
             maxTerrainHeight = trueMax;
             minTerrainHeight = trueMin;
+
+            // Stamp the real rivers as water lines onto the mask. Done after sampling so a
+            // river reads as water in every view mode, over whatever ground it crosses, at
+            // the width the channel actually has. Pixels-per-metre converts the world
+            // half-width to a stamp radius, floored at one pixel so the thinnest brook still
+            // draws a continuous line rather than a dotted one.
+            float pxPerMetreX = mapWidth / Mathf.Max(0.0001f, viewWidth);
+            float pxPerMetreZ = mapHeight / Mathf.Max(0.0001f, viewDepth);
+            float pxPerMetre = Mathf.Min(pxPerMetreX, pxPerMetreZ);
+            for (int r = 0; r < mapRivers.Count; r++)
+            {
+                MapRiver river = mapRivers[r];
+                int radius = Mathf.Max(1, Mathf.RoundToInt(river.halfWidth * pxPerMetre));
+                StampRiver(river.course, radius, viewMinX, viewMinZ, viewMaxX, viewMaxZ,
+                           mapWidth, mapHeight, waterMask, waterDepth01);
+            }
+
+            // Stamp the real trees as canopy onto the vegetation strength. A tree covers a
+            // small radius; overlapping canopies saturate to full green, which is how a
+            // wood reads on a map versus a scattered stand.
+            int treeRadius = Mathf.Max(1, Mathf.RoundToInt(3f * pxPerMetre)); // ~3 m canopy
+            for (int g = 0; g < mapTrees.Count; g++)
+            {
+                List<Vector2> xz = mapTrees[g].xz;
+                for (int k = 0; k < xz.Count; k++)
+                    StampTree(xz[k], treeRadius, viewMinX, viewMinZ, viewMaxX, viewMaxZ,
+                              mapWidth, mapHeight, vegetation01);
+            }
 
             for (int y = 0; y < mapHeight; y++)
             {
@@ -410,7 +465,24 @@ namespace UniverseCreator.Editor.Windows
                             c = surfaceCols[i] * shade;
                             c.a = 1f;
                         }
-                        
+
+                        // Real vegetation over the land (never over water): blend toward a
+                        // natural green by the ground-cover strength, so trees and grass the
+                        // tool planted show on the map. In the topographic view it is a lighter
+                        // touch - that view is about elevation - and in satellite/terrain it is
+                        // stronger, because those are what a from-above photo would show.
+                        if (!waterMask[i] && vegetation01[i] > 0f)
+                        {
+                            Color green = viewMode == MapViewMode.Topography
+                                ? new Color(0.25f, 0.45f, 0.20f)
+                                : new Color(0.18f, 0.42f, 0.14f);
+                            float amount = viewMode == MapViewMode.Topography
+                                ? vegetation01[i] * 0.45f
+                                : vegetation01[i] * 0.75f;
+                            c = Color.Lerp(c, green, amount);
+                        }
+
+
                         // Draw contours every 50m for Topography and Terrain
                         if ((viewMode == MapViewMode.Topography || viewMode == MapViewMode.Terrain) && x > 0 && y > 0)
                         {
@@ -446,16 +518,204 @@ namespace UniverseCreator.Editor.Windows
             layerColorCache.Clear();
             alphaCache.Clear();
 
+            mapRivers.Clear();
+            mapTrees.Clear();
+            mapDetails.Clear();
+
             var bodies = UnityEngine.Object.FindObjectsByType<UniverseCreator.TerrainSystem.UCWaterBody>(
                 FindObjectsInactive.Exclude);
-            if (bodies == null) { return; }
-            foreach (var b in bodies)
+            if (bodies != null)
             {
-                if (b == null || !b.IsLevelBody) { continue; }
-                Bounds plan;
-                if (!b.TryGetPlanBounds(out plan)) { continue; }
-                float surf = b.SurfaceWorldY();
-                mapWaters.Add(new MapWater { surfaceY = surf, floorY = plan.min.y, plan = plan });
+                foreach (var b in bodies)
+                {
+                    if (b == null) { continue; }
+
+                    if (b.IsLevelBody)
+                    {
+                        Bounds plan;
+                        if (!b.TryGetPlanBounds(out plan)) { continue; }
+                        float surf = b.SurfaceWorldY();
+                        mapWaters.Add(new MapWater { surfaceY = surf, floorY = plan.min.y, plan = plan });
+                    }
+                    else
+                    {
+                        // A river spline. Its world course draws the line; its width sets how
+                        // thick to stamp it. Half-width, because the stamp reaches each side.
+                        List<Vector3> course = b.PreviewCourseWorld();
+                        if (course == null || course.Count < 2) { continue; }
+                        mapRivers.Add(new MapRiver
+                        {
+                            course = course,
+                            halfWidth = Mathf.Max(1f, b.widthMetres * 0.5f)
+                        });
+                    }
+                }
+            }
+
+            GatherVegetation();
+        }
+
+        // Reads the real vegetation off every active terrain: the tree instances the tool
+        // planted, and the summed detail (grass) density grid. Nothing is guessed from the
+        // shape of the land - a pixel is vegetated only where the terrain actually carries
+        // a tree or a detail cell.
+        private void GatherVegetation()
+        {
+            Terrain[] terrains = Terrain.activeTerrains;
+            if (terrains == null) { return; }
+
+            foreach (Terrain t in terrains)
+            {
+                if (t == null || t.terrainData == null) { continue; }
+                TerrainData td = t.terrainData;
+                Vector3 pos = t.transform.position;
+                Vector3 size = td.size;
+
+                // Trees. normalizedPosition is 0..1 over the terrain; lift to world XZ.
+                TreeInstance[] trees = td.treeInstances;
+                if (trees != null && trees.Length > 0)
+                {
+                    var xz = new List<Vector2>(trees.Length);
+                    for (int i = 0; i < trees.Length; i++)
+                    {
+                        Vector3 np = trees[i].position;
+                        xz.Add(new Vector2(pos.x + np.x * size.x, pos.z + np.z * size.z));
+                    }
+                    mapTrees.Add(new MapTrees { xz = xz });
+                }
+
+                // Detail (grass) density, summed over every detail layer into one grid, so a
+                // cell reads vegetated if any grass type grows there. Read once per terrain.
+                int res = td.detailResolution;
+                int layers = td.detailPrototypes != null ? td.detailPrototypes.Length : 0;
+                if (res > 0 && layers > 0)
+                {
+                    int[] sum = new int[res * res];
+                    for (int l = 0; l < layers; l++)
+                    {
+                        int[,] layer = td.GetDetailLayer(0, 0, res, res, l);
+                        for (int dz = 0; dz < res; dz++)
+                            for (int dx = 0; dx < res; dx++)
+                                sum[dz * res + dx] += layer[dz, dx];
+                    }
+                    mapDetails.Add(new MapDetail { terrain = t, density = sum, res = res });
+                }
+            }
+        }
+
+        // Is this world point vegetated, and how strongly (0..1)? Detail density gives the
+        // ground-cover strength; trees are added by the stamp pass. Returns 0 off-vegetation.
+        private float VegetationAt(float worldX, float worldZ)
+        {
+            for (int i = 0; i < mapDetails.Count; i++)
+            {
+                MapDetail d = mapDetails[i];
+                if (d.terrain == null || d.terrain.terrainData == null) { continue; }
+                Vector3 pos = d.terrain.transform.position;
+                Vector3 size = d.terrain.terrainData.size;
+
+                float u = (worldX - pos.x) / Mathf.Max(0.0001f, size.x);
+                float v = (worldZ - pos.z) / Mathf.Max(0.0001f, size.z);
+                if (u < 0f || u > 1f || v < 0f || v > 1f) { continue; }
+
+                int cx = Mathf.Clamp(Mathf.FloorToInt(u * d.res), 0, d.res - 1);
+                int cz = Mathf.Clamp(Mathf.FloorToInt(v * d.res), 0, d.res - 1);
+                int dens = d.density[cz * d.res + cx];
+                if (dens <= 0) { return 0f; }
+
+                // Detail density is a small integer count per cell; a handful already reads as
+                // full ground cover on a map, so it saturates quickly rather than linearly.
+                return Mathf.Clamp01(dens / 4f);
+            }
+            return 0f;
+        }
+
+        // Rasterises one river course onto the water mask: walks each segment, converts the
+        // endpoints to pixels, and stamps a filled disc of the given radius along the line.
+        // The disc gives the channel its width; walking the whole segment (not just its ends)
+        // keeps the line continuous however far apart the course points are. Depth is set to
+        // a mid value so the river reads as clearly wet without pretending to be deep.
+        private static void StampRiver(List<Vector3> course, int radius,
+                                       float viewMinX, float viewMinZ, float viewMaxX, float viewMaxZ,
+                                       int mapWidth, int mapHeight, bool[] waterMask, float[] waterDepth01)
+        {
+            for (int s = 0; s < course.Count - 1; s++)
+            {
+                Vector3 a = course[s];
+                Vector3 b = course[s + 1];
+
+                float ax = Mathf.InverseLerp(viewMinX, viewMaxX, a.x) * (mapWidth - 1);
+                float az = Mathf.InverseLerp(viewMinZ, viewMaxZ, a.z) * (mapHeight - 1);
+                float bx = Mathf.InverseLerp(viewMinX, viewMaxX, b.x) * (mapWidth - 1);
+                float bz = Mathf.InverseLerp(viewMinZ, viewMaxZ, b.z) * (mapHeight - 1);
+
+                // Step along the segment in pixel space, one step per pixel of its length, so
+                // no gap opens between two discs however the segment is angled.
+                int steps = Mathf.Max(1, Mathf.CeilToInt(Mathf.Max(Mathf.Abs(bx - ax), Mathf.Abs(bz - az))));
+                for (int t = 0; t <= steps; t++)
+                {
+                    float f = t / (float)steps;
+                    int px = Mathf.RoundToInt(Mathf.Lerp(ax, bx, f));
+                    int pz = Mathf.RoundToInt(Mathf.Lerp(az, bz, f));
+                    StampDisc(px, pz, radius, mapWidth, mapHeight, waterMask, waterDepth01, 0.5f);
+                }
+            }
+        }
+
+        // Fills a disc of the given radius on the water mask, clamped to the map. The depth
+        // is written only where a river is stamped onto dry ground; where a river crosses a
+        // lake or the sea the existing deeper value is kept, so a confluence does not draw a
+        // shallow scar across the body it joins.
+        private static void StampDisc(int cx, int cz, int radius, int mapWidth, int mapHeight,
+                                      bool[] waterMask, float[] waterDepth01, float depth01)
+        {
+            int r2 = radius * radius;
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                int pz = cz + dz;
+                if (pz < 0 || pz >= mapHeight) { continue; }
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int px = cx + dx;
+                    if (px < 0 || px >= mapWidth) { continue; }
+                    if (dx * dx + dz * dz > r2) { continue; }
+
+                    int i = pz * mapWidth + px;
+                    if (!waterMask[i])
+                    {
+                        waterMask[i] = true;
+                        waterDepth01[i] = depth01;
+                    }
+                }
+            }
+        }
+
+        // Adds one tree's canopy to the vegetation strength: a filled disc that ACCUMULATES,
+        // so overlapping canopies build toward full cover (a wood) while a lone tree is a
+        // faint dot. Clamped to 1.
+        private static void StampTree(Vector2 xz, int radius,
+                                      float viewMinX, float viewMinZ, float viewMaxX, float viewMaxZ,
+                                      int mapWidth, int mapHeight, float[] vegetation01)
+        {
+            float fx = Mathf.InverseLerp(viewMinX, viewMaxX, xz.x) * (mapWidth - 1);
+            float fz = Mathf.InverseLerp(viewMinZ, viewMaxZ, xz.y) * (mapHeight - 1);
+            int cx = Mathf.RoundToInt(fx);
+            int cz = Mathf.RoundToInt(fz);
+
+            int r2 = radius * radius;
+            for (int dz = -radius; dz <= radius; dz++)
+            {
+                int pz = cz + dz;
+                if (pz < 0 || pz >= mapHeight) { continue; }
+                for (int dx = -radius; dx <= radius; dx++)
+                {
+                    int px = cx + dx;
+                    if (px < 0 || px >= mapWidth) { continue; }
+                    if (dx * dx + dz * dz > r2) { continue; }
+
+                    int i = pz * mapWidth + px;
+                    vegetation01[i] = Mathf.Clamp01(vegetation01[i] + 0.6f);
+                }
             }
         }
 
