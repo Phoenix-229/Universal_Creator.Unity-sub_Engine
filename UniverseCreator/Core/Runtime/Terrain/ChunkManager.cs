@@ -259,7 +259,15 @@ namespace UniverseCreator.TerrainSystem
         // hydrology spawn reads the FINAL surface instead of the flat baseline the
         // async bake starts from - rivers can only trace a real downhill, and lakes
         // can only find the real low ground, once the heights actually exist.
-        private System.Action pendingAfterSettle;
+        //
+        // A QUEUE, not a single action (freeze Fix A). The finishing pass used to run
+        // the whole hydrology spawn + carve fold-in + sea-level re-bake in ONE pump, so
+        // the Scene view froze for the entire finish (the ~30 s modal). The regenerate
+        // path now arms the finish as SEVERAL ordered steps and SettlePhaseAfter runs
+        // exactly ONE per pump, so the view repaints and the progress bar advances
+        // between each heavy step. A fresh arming clears the queue, so a burst of
+        // regenerates still finishes once, from the last one.
+        private readonly Queue<System.Action> pendingAfterSettle = new Queue<System.Action>();
 
         // The per-cell hysteresis gate on the heightmap pixel error (L-49/L-50). Owns
         // the decision of WHEN to write Terrain.heightmapPixelError - the maths of the
@@ -744,9 +752,29 @@ namespace UniverseCreator.TerrainSystem
         /// carve path (ReapplyCarves), which cannot re-enter the async bake, so it can
         /// never re-arm itself into a loop.
         /// </remarks>
-        public void RunAfterSettle(System.Action action)
+        public void RunAfterSettle(params System.Action[] steps)
         {
-            pendingAfterSettle = action;
+            // A fresh arming replaces whatever a previous regenerate left waiting, so a
+            // burst of regenerates finishes once - from the last one - not once each.
+            pendingAfterSettle.Clear();
+            if (steps == null) return;
+            foreach (System.Action step in steps)
+                if (step != null) pendingAfterSettle.Enqueue(step);
+        }
+
+        /// <summary>
+        /// Appends one more step to the after-settle queue WITHOUT clearing what is
+        /// already waiting. Meant to be called from inside a running after-settle step
+        /// so a long job can spread itself over several pumps - it spawns one small
+        /// batch, then re-arms its own next batch here. The pump's count check runs
+        /// after the step returns, so a step that appends keeps the settle in its
+        /// one-per-pump phase and the view repaints between batches (§15: ocean and
+        /// lakes one at a time, not all in a single freezing tick). Never clears, so it
+        /// cannot drop the reapply/sea-level steps still queued behind it.
+        /// </summary>
+        public void EnqueueAfterSettle(System.Action step)
+        {
+            if (step != null) pendingAfterSettle.Enqueue(step);
         }
 
         /// <summary>
@@ -2264,20 +2292,26 @@ namespace UniverseCreator.TerrainSystem
                         IsRebuildingAll = false;
 
                         // The world has settled - every cell holds its final heights. Fire
-                        // the one-shot the regenerate path armed for this moment (the
-                        // hydrology spawn, which must read the real surface). Cleared
-                        // BEFORE the call so a rebuild it triggers arms the next one
-                        // cleanly. The callback carves synchronously (ReapplyCarves), which
-                        // does not touch the worker queue, so it cannot re-enter this drain.
-                        if (pendingAfterSettle != null)
+                        // the finish the regenerate path armed for this moment (the
+                        // hydrology spawn, which must read the real surface), but ONE step
+                        // per pump (freeze Fix A) - the spawn, the carve fold-in and the
+                        // sea-level re-bake are each their own step, so the view repaints
+                        // between them instead of freezing for the whole finish. Dequeued
+                        // BEFORE the call so a rebuild a step triggers arms the next finish
+                        // cleanly. The steps carve synchronously (ReapplyCarves), which
+                        // does not touch the worker queue, so they cannot re-enter this
+                        // drain. The phase HOLDS until the queue empties.
+                        if (pendingAfterSettle.Count > 0)
                         {
-                            System.Action afterSettle = pendingAfterSettle;
-                            pendingAfterSettle = null;
-                            afterSettle();
+                            System.Action step = pendingAfterSettle.Dequeue();
+                            step();
                             firedAfterSettle = true;
+                            advancedSettle = true;
+                            // Stay in SettlePhaseAfter: the next pump runs the next step.
+                            if (pendingAfterSettle.Count > 0) break;
                         }
 
-                        settlePhase = 0;   // settle complete
+                        settlePhase = 0;   // settle complete - queue drained
                         advancedSettle = true;
                         break;
                 }

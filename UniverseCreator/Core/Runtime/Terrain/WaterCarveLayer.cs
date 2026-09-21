@@ -79,9 +79,46 @@ namespace UniverseCreator.TerrainSystem
         public List<float> courseDepths = new List<float>();
         public List<float> courseSurfaceY = new List<float>();
 
+        // ---- Confining banks (§14: the gorge wall) --------------------------
+        //
+        //  The carve is cut-only everywhere else, on purpose: raising ground would
+        //  build a dam around every pond. This is the one deliberate exception, and
+        //  it is river-course only and gated hard so it can never be that dam.
+        //
+        //  Where a reach runs across a steep slope, the low bank sits BELOW the
+        //  water and there is nothing to hold the river in - the reported hanging
+        //  water. Real rivers on such ground run in a confined gorge whose wall
+        //  stands above the water. courseConfineY carries, per node, the elevation
+        //  the low bank must be RAISED to (water surface + freeboard), or a value at
+        //  or below the surface to mean "no confinement here". It is filled by
+        //  UCWaterBody only where the measured cross-valley angle surpasses the
+        //  threshold AND a bank is genuinely below the water - never otherwise.
+
+        /// <summary>Set true to let a river raise a confining bank on a steep cross
+        /// slope (§14). Off by default so the carve stays cut-only unless a river
+        /// actually needs a gorge wall to hold its water.</summary>
+        public bool confineBanks = false;
+
+        /// <summary>Per-course-node elevation the low bank is raised to where the reach
+        /// is confined - water surface plus freeboard. Entries at or below the local
+        /// surface mean "not confined here". Empty means no confinement anywhere.</summary>
+        public List<float> courseConfineY = new List<float>();
+
         // ---- Ring bodies (lakes, oceans, pools) -----------------------------
 
         public List<Vector3> ringPoints = new List<Vector3>();
+
+        /// <summary>
+        /// Per-ring-node maximum depth, in metres, one entry per ring point. Empty
+        /// means the whole basin digs to <see cref="maxDepthMetres"/> - the old flat
+        /// scalar. When filled it makes the basin RUGGED the way a real lake is: a
+        /// border node over the deep trough asks for a large depth, a node on a
+        /// wave-cut shelf asks for a small one, and the bed eases between them along
+        /// the shore. This is the lake counterpart to <see cref="courseDepths"/>: the
+        /// dish profile still runs from shore to centre, but its full-depth target is
+        /// now interpolated round the ring instead of being one number everywhere.
+        /// </summary>
+        public List<float> ringDepths = new List<float>();
 
         /// <summary>
         /// Round the shoreline but dig nothing.
@@ -573,8 +610,8 @@ namespace UniverseCreator.TerrainSystem
 
             if (isCourse)
             {
-                float signed, s, d, r;
-                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r)) return false;
+                float signed, s, d, r, c;
+                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r, out c)) return false;
                 return signed > 0f;
             }
 
@@ -627,18 +664,22 @@ namespace UniverseCreator.TerrainSystem
             float localSurfaceY;
             float localDepth;
             float localRun;
+            float localConfineY = float.NegativeInfinity;
 
             if (isCourse)
             {
                 if (!CourseFrame(worldX, worldZ, out signed, out localSurfaceY,
-                                 out localDepth, out localRun))
+                                 out localDepth, out localRun, out localConfineY))
                     return existingY;
             }
             else
             {
                 signed = RingSignedDistance(worldX, worldZ);
                 localSurfaceY = surfaceY;
-                localDepth = maxDepthMetres;
+                // Per-ring-node depth when authored (rugged basin), else the flat
+                // scalar. The dish profile below still shapes shore-to-centre; this
+                // only sets how deep the centre it eases to actually is, per bearing.
+                localDepth = RingDepthAt(worldX, worldZ);
                 localRun = shoreRunMetres;
             }
 
@@ -694,6 +735,8 @@ namespace UniverseCreator.TerrainSystem
                 // that one is how fast the valley's sides may rise.
                 outside = ValleySag(signed, bevel, corridor, localSurfaceY,
                                     localDepth, localRun, outside);
+
+                outside = ConfineWall(signed, bevel, localConfineY, outside);
 
                 return CorridorCap(signed, bevel, corridor, localSurfaceY, outside);
             }
@@ -899,6 +942,40 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// The confining wall (§14). The one place the carve is allowed to RAISE ground,
+        /// and only ever a river's low bank on a steep cross slope, because the water has
+        /// no valley to sit in there and would otherwise hang over the falling ground.
+        /// UCWaterBody decided this - it passed a target elevation (water surface plus
+        /// freeboard) only for stations where the two-bank test found a genuine slope and
+        /// a bank below the water. Here that target is simply held up across the bank
+        /// band, faded to nothing at the band edge so it eases into the hillside with no
+        /// crease.
+        ///
+        /// Raise ONLY. Where the ground already stands above the target this does nothing
+        /// (Max discards it), so it can never cap a hill or dam a pond - it only fills the
+        /// gap on the low side that the cut-only rule cannot.
+        /// </summary>
+        private float ConfineWall(float signed, float bevel, float confineY, float current)
+        {
+            if (!confineBanks || !isCourse) return current;
+            if (float.IsNegativeInfinity(confineY)) return current;   // unconfined station
+            if (confineY <= current) return current;                  // ground already holds it
+
+            // Only across the bank band, where the wall belongs; beyond the bevel it is
+            // the floodplain/hillside and the sag owns the shape.
+            float band = Mathf.Max(1e-4f, bevel);
+            if (signed >= band) return current;
+
+            // Full at the waterline, easing to nothing at the band edge, so the wall
+            // stands right beside the water and blends out into the ground.
+            float t = Mathf.Clamp01(signed / band);
+            float k = Mathf.SmoothStep(1f, 0f, t);
+
+            float raised = Mathf.Lerp(current, confineY, k);
+            return Mathf.Max(current, raised);
+        }
+
+        /// <summary>
         /// Warps the shore-to-deep fraction so the basin is not a cone.
         ///
         /// The warp is scaled by t, which is what keeps the waterline honest: at the
@@ -996,12 +1073,14 @@ namespace UniverseCreator.TerrainSystem
         /// so smoothly rather than in steps at each spline point.
         /// </summary>
         private bool CourseFrame(float worldX, float worldZ, out float signedDistance,
-                                 out float localSurfaceY, out float localDepth, out float localRun)
+                                 out float localSurfaceY, out float localDepth, out float localRun,
+                                 out float localConfineY)
         {
             signedDistance = 0f;
             localSurfaceY = surfaceY;
             localDepth = maxDepthMetres;
             localRun = 1f;
+            localConfineY = float.NegativeInfinity;
 
             int count = coursePoints.Count;
             if (count < 2) return false;
@@ -1053,6 +1132,15 @@ namespace UniverseCreator.TerrainSystem
             localDepth = Mathf.Lerp(DepthAt(bestSeg), DepthAt(bestSeg + 1), bestT);
             localSurfaceY = Mathf.Lerp(SurfaceAt(bestSeg), SurfaceAt(bestSeg + 1), bestT);
 
+            // Confine target: only when both ends carry one, so a reach that is
+            // confined at one node and open at the next does not smear a phantom wall
+            // across the open node. Either end unconfined (NegInf) -> unconfined here.
+            float cA = ConfineYAt(bestSeg);
+            float cB = ConfineYAt(bestSeg + 1);
+            localConfineY = (float.IsNegativeInfinity(cA) || float.IsNegativeInfinity(cB))
+                ? float.NegativeInfinity
+                : Mathf.Lerp(cA, cB, bestT);
+
             // A channel is deepest at its middle, so the run from bank to deepest
             // point is half the width.
             localRun = halfWidth;
@@ -1077,6 +1165,16 @@ namespace UniverseCreator.TerrainSystem
         {
             if (courseSurfaceY == null || courseSurfaceY.Count == 0) return surfaceY;
             return courseSurfaceY[Mathf.Clamp(i, 0, courseSurfaceY.Count - 1)];
+        }
+
+        /// <summary>The elevation the low bank is confined to at node i, or negative
+        /// infinity where the list is empty or the node is unconfined - a value the
+        /// raise below always discards, so "no data" reads as "no confinement".</summary>
+        private float ConfineYAt(int i)
+        {
+            if (!confineBanks || courseConfineY == null || courseConfineY.Count == 0)
+                return float.NegativeInfinity;
+            return courseConfineY[Mathf.Clamp(i, 0, courseConfineY.Count - 1)];
         }
 
         /// <summary>
@@ -1128,6 +1226,57 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// Full-depth target for a ring body at a world position: the depth
+        /// interpolated between the two ring nodes of the nearest edge, so a basin
+        /// authored with a deep trough on one side and a shelf on the other digs
+        /// rugged rather than to one flat number. Falls back to
+        /// <see cref="maxDepthMetres"/> when no per-node depths are authored - the
+        /// old constant-depth behaviour, unchanged.
+        /// </summary>
+        /// <remarks>
+        /// Same nearest-edge scan as RingSignedDistance, kept separate so the signed
+        /// distance stays the cheap even-odd/nearest-edge routine every containment
+        /// test calls, and only a digging basin with authored depths pays for this.
+        /// The endpoints of edge i are ring nodes i and (i+1), so the depth eases
+        /// round the shore in step with the geometry that defines it.
+        /// </remarks>
+        private float RingDepthAt(float worldX, float worldZ)
+        {
+            int count = ringPoints.Count;
+            if (count < 3 || ringDepths == null || ringDepths.Count == 0)
+                return maxDepthMetres;
+
+            float bestSqr = float.MaxValue;
+            int bestI = 0;
+            float bestT = 0f;
+
+            for (int i = 0; i < count; i++)
+            {
+                int nxt = (i + 1) % count;
+                Vector3 a = ringPoints[i];
+                Vector3 b = ringPoints[nxt];
+
+                float dx = b.x - a.x;
+                float dz = b.z - a.z;
+                float lenSqr = dx * dx + dz * dz;
+
+                float t = lenSqr < 1e-8f
+                    ? 0f
+                    : Mathf.Clamp01(((worldX - a.x) * dx + (worldZ - a.z) * dz) / lenSqr);
+
+                float ox = worldX - (a.x + dx * t);
+                float oz = worldZ - (a.z + dz * t);
+                float sqr = ox * ox + oz * oz;
+
+                if (sqr < bestSqr) { bestSqr = sqr; bestI = i; bestT = t; }
+            }
+
+            float da = ringDepths[Mathf.Clamp(bestI, 0, ringDepths.Count - 1)];
+            float db = ringDepths[Mathf.Clamp((bestI + 1) % count, 0, ringDepths.Count - 1)];
+            return Mathf.Lerp(da, db, bestT);
+        }
+
+        /// <summary>
         /// True where a kept island sits, by nearest cell of the keep-out mask. False
         /// when there is no mask, which is the common case and the old behaviour
         /// exactly - so a body with no large projections is dug just as before.
@@ -1156,8 +1305,8 @@ namespace UniverseCreator.TerrainSystem
         {
             if (!isCourse) return surfaceY;
 
-            float signed, s, d, run;
-            if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out run))
+            float signed, s, d, run, c;
+            if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out run, out c))
                 return surfaceY;
 
             return s;
@@ -1185,7 +1334,9 @@ namespace UniverseCreator.TerrainSystem
             if (courseWidths != null) courseWidths.Clear();
             if (courseDepths != null) courseDepths.Clear();
             if (courseSurfaceY != null) courseSurfaceY.Clear();
+            if (courseConfineY != null) courseConfineY.Clear();
             if (ringPoints != null) ringPoints.Clear();
+            if (ringDepths != null) ringDepths.Clear();
 
             islandMask = null;
             islandCols = 0;

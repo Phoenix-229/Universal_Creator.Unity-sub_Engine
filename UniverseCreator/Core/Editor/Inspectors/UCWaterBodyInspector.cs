@@ -36,6 +36,7 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool riverFoldout = true;
         private static bool digFoldout = true;
         private static bool routingFoldout = true;
+        private static bool connectionsFoldout = true;
         private static bool nodesFoldout;
         private static bool bedFoldout = true;
         private static bool meshFoldout;
@@ -104,6 +105,23 @@ namespace UniverseCreator.Editor.Inspectors
 
                 routingFoldout = Group(routingFoldout, "Routing and Junctions", UCInspectorUI.HeaderAmber);
                 if (routingFoldout) DrawRouting(body);
+            }
+
+            // Connections (tick-on-touch): rivers and lakes only. The ocean connects
+            // from the river side and gets no child list; pools do not join. (§6)
+            if (body.kind == WaterBodyKind.River || body.kind == WaterBodyKind.Lake)
+            {
+                connectionsFoldout = Group(connectionsFoldout, "Connections", UCInspectorUI.HeaderAmber);
+                if (connectionsFoldout) DrawConnections(body);
+            }
+
+            // Waterfalls (§12): placed by hand on a river. The author drops a crest
+            // where the channel crosses a scarp; the fall's height is measured from
+            // the solved surface, never typed. Rivers only.
+            if (body.shape == UCWaterBody.ShapeMode.RiverSpline)
+            {
+                waterfallFoldout = Group(waterfallFoldout, "Waterfalls", UCInspectorUI.HeaderTeal);
+                if (waterfallFoldout) DrawWaterfalls(body);
             }
 
             digFoldout = Group(digFoldout, "Dig  (carves the terrain)", UCInspectorUI.HeaderGreen);
@@ -249,6 +267,8 @@ namespace UniverseCreator.Editor.Inspectors
 
         private int selectedNodeIndex = -1;
         private bool isConnectingJunction = false;
+        private bool isPlacingWaterfall = false;
+        private static bool waterfallFoldout = true;
 
         private void DrawRiver(UCWaterBody body)
         {
@@ -703,6 +723,16 @@ namespace UniverseCreator.Editor.Inspectors
             }
 
             EditorGUILayout.Space(4);
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("confineBanks"));
+            if (body.confineBanks)
+                EditorGUILayout.HelpBox(
+                    "Where the river crosses a steep slope and its low bank sits below the " +
+                    "water, a confining wall is raised to hold it - a real gorge. On gentle " +
+                    "ground it does nothing (the floodplain shapes itself). If a reach is on " +
+                    "a hillside rather than a valley, no wall is built; the valley-seek moves " +
+                    "the course to the low line instead.", MessageType.None);
+
+            EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Junctions", EditorStyles.miniBoldLabel);
             EditorGUILayout.PropertyField(serializedObject.FindProperty("autoConnectMetres"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("joinDownstreamTo"));
@@ -715,6 +745,144 @@ namespace UniverseCreator.Editor.Inspectors
                 "Leave the two fields empty and the mouth connects by itself to " +
                 "whatever ocean or lake it reaches within Auto Connect metres.",
                 MessageType.None);
+
+            EditorGUI.indentLevel--;
+        }
+
+        /// <summary>
+        /// Tick-on-touch (§6). Lists the joinable water bodies whose edge is within Auto
+        /// Connect metres of one of this body's endpoints, each with a checkbox that
+        /// wires (or clears) the join. The checkbox only activates when the bodies are
+        /// actually touching - it is disabled otherwise, so a tick always means "these
+        /// two meet here." The ocean is never listed: a river's mouth connects to the sea
+        /// by itself and the sea carries no child connection node.
+        /// </summary>
+        private void DrawConnections(UCWaterBody body)
+        {
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("autoConnectMetres"));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinBlendMetres"));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinMatchesDepth"));
+            serializedObject.ApplyModifiedProperties();
+
+            EditorGUILayout.Space(2);
+
+            List<UCWaterBody> touching = body.TouchingJoinables();
+
+            if (touching.Count == 0)
+            {
+                EditorGUILayout.HelpBox(
+                    "No other river or lake is touching this one. Move an endpoint within " +
+                    "Auto Connect metres of another body's edge and it appears here with a " +
+                    "checkbox. A river mouth meeting the ocean connects on its own - the sea " +
+                    "is never listed.", MessageType.None);
+                EditorGUI.indentLevel--;
+                return;
+            }
+
+            EditorGUILayout.LabelField("Touching bodies", EditorStyles.miniBoldLabel);
+
+            foreach (UCWaterBody other in touching)
+            {
+                if (other == null) continue;
+
+                bool joined = body.IsJoinedTo(other) ||
+                              (other.shape == UCWaterBody.ShapeMode.RiverSpline && other.IsJoinedTo(body));
+
+                EditorGUILayout.BeginHorizontal();
+                bool now = EditorGUILayout.ToggleLeft(
+                    new GUIContent(other.name + "  (" + other.kind + ")",
+                        "Tick to connect the two bodies where they touch: their surfaces " +
+                        "are welded at the join and the shader blends the seam over Join " +
+                        "Blend Metres, so they read as one continuous surface."),
+                    joined);
+                EditorGUILayout.EndHorizontal();
+
+                if (now != joined)
+                {
+                    Undo.RecordObject(body, now ? "Connect Water Bodies" : "Disconnect Water Bodies");
+                    UCWaterBody wired = (body.shape != UCWaterBody.ShapeMode.RiverSpline &&
+                                         other.shape == UCWaterBody.ShapeMode.RiverSpline)
+                                        ? other : body;
+                    Undo.RecordObject(wired, now ? "Connect Water Bodies" : "Disconnect Water Bodies");
+                    body.SetJoinTicked(other, now);
+                    EditorUtility.SetDirty(body);
+                    EditorUtility.SetDirty(wired);
+                    if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
+                    if (wired != body && wired.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(wired);
+                }
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawWaterfalls(UCWaterBody body)
+        {
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("autoDetectWaterfalls"));
+            serializedObject.ApplyModifiedProperties();
+
+            if (body.autoDetectWaterfalls)
+            {
+                EditorGUILayout.HelpBox(
+                    "The solver is finding falls on its own, wherever the surface plunges " +
+                    "steeply. Turn Auto Detect off to place them by hand instead.",
+                    MessageType.None);
+                EditorGUI.indentLevel--;
+                return;
+            }
+
+            if (body.waterfallCrests == null)
+                body.waterfallCrests = new List<Vector3>();
+
+            EditorGUILayout.HelpBox(
+                "Click 'Place a crest', then click the river in the scene where it crosses " +
+                "a scarp. The fall grows downstream for as far as the ground actually drops, " +
+                "so its height comes from the terrain, not a typed number. A crest on flat " +
+                "water grows no fall.", MessageType.None);
+
+            Color tint = isPlacingWaterfall
+                ? new Color(0.95f, 0.55f, 0.20f)
+                : UCInspectorUI.HeaderTeal;
+            if (ActionButton(isPlacingWaterfall ? "Click the river...  (Esc to cancel)" : "Place a crest", tint))
+            {
+                isPlacingWaterfall = !isPlacingWaterfall;
+                SceneView.RepaintAll();
+            }
+
+            int count = body.waterfallCrests.Count;
+            if (count == 0)
+            {
+                EditorGUILayout.LabelField("No waterfalls placed.", EditorStyles.miniLabel);
+                EditorGUI.indentLevel--;
+                return;
+            }
+
+            EditorGUILayout.Space(2);
+            EditorGUILayout.LabelField(count + (count == 1 ? " crest" : " crests"), EditorStyles.miniBoldLabel);
+
+            int removeAt = -1;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 c = body.waterfallCrests[i];
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField(
+                    string.Format("#{0}   ({1:0}, {2:0}, {3:0})", i + 1, c.x, c.y, c.z),
+                    EditorStyles.miniLabel);
+                if (GUILayout.Button("Remove", EditorStyles.miniButton, GUILayout.Width(64f)))
+                    removeAt = i;
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (removeAt >= 0)
+            {
+                Undo.RecordObject(body, "Remove Waterfall");
+                body.waterfallCrests.RemoveAt(removeAt);
+                EditorUtility.SetDirty(body);
+                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
+            }
 
             EditorGUI.indentLevel--;
         }
@@ -1082,6 +1250,60 @@ namespace UniverseCreator.Editor.Inspectors
                 }
             }
 
+            // ---- Waterfall Placement Mode (§12) ----
+            // The author clicks the river where it crosses a scarp. The hit is snapped
+            // onto the solved course and stored as a crest; whether it actually becomes
+            // a fall is decided later by the terrain angle at that point, not here.
+            if (isPlacingWaterfall && body.shape == UCWaterBody.ShapeMode.RiverSpline
+                && body.course != null && body.course.Count >= 2)
+            {
+                if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
+                {
+                    isPlacingWaterfall = false;
+                    e.Use();
+                    return;
+                }
+
+                if (e.type == EventType.Layout)
+                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+
+                Ray wray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+                if (RaycastTerrain(wray, body, out Vector3 hit))
+                {
+                    // Snap the hit onto the nearest point of the drawn course, so the
+                    // crest sits on the water, not on the bank the author clicked near.
+                    Vector3 snapped = hit;
+                    float best = float.MaxValue;
+                    for (int s = 0; s < body.course.Count; s++)
+                    {
+                        Vector3 wp = body.transform.TransformPoint(body.course.points[s]);
+                        float d = (wp - hit).sqrMagnitude;
+                        if (d < best) { best = d; snapped = wp; }
+                    }
+
+                    if (e.type == EventType.Repaint)
+                    {
+                        Handles.color = new Color(0.95f, 0.55f, 0.20f);
+                        float hs = HandleUtility.GetHandleSize(snapped) * 0.15f;
+                        Handles.DrawSolidDisc(snapped, Vector3.up, hs);
+                        SceneView.currentDrawingSceneView.Repaint();
+                    }
+
+                    if (e.type == EventType.MouseDown && e.button == 0)
+                    {
+                        Undo.RecordObject(body, "Place Waterfall");
+                        if (body.waterfallCrests == null)
+                            body.waterfallCrests = new System.Collections.Generic.List<Vector3>();
+                        body.waterfallCrests.Add(snapped);
+                        EditorUtility.SetDirty(body);
+                        if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
+                        isPlacingWaterfall = false;
+                        e.Use();
+                        return;
+                    }
+                }
+            }
+
             Polyline line = null;
             Color tint = Color.white;
 
@@ -1097,6 +1319,23 @@ namespace UniverseCreator.Editor.Inspectors
             }
 
             if (line == null) return;
+
+            // ---- Draw placed waterfall crests ----
+            // Small amber markers on the river so the author can see where falls are
+            // set, independent of whether the terrain angle turned each into a fall.
+            if (body.shape == UCWaterBody.ShapeMode.RiverSpline
+                && body.waterfallCrests != null && body.waterfallCrests.Count > 0
+                && e.type == EventType.Repaint)
+            {
+                Color entry = Handles.color;
+                Handles.color = new Color(0.95f, 0.55f, 0.20f);
+                foreach (Vector3 wc in body.waterfallCrests)
+                {
+                    float hs = HandleUtility.GetHandleSize(wc) * 0.12f;
+                    Handles.DrawSolidDisc(wc, Vector3.up, hs);
+                }
+                Handles.color = entry;
+            }
 
 
 

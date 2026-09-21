@@ -491,29 +491,61 @@ namespace UniverseCreator.TerrainSystem
                 if (connectedHydrology != null)
                 {
                     UniverseCreator.Nodes.Creators.HydrologyNode hydrologyToRun = connectedHydrology;
-                    cm.RunAfterSettle(() =>
-                    {
-                        UniverseCreator.TerrainSystem.HydrologyGenerator.GenerateFromNode(this, hydrologyToRun);
-                        cm.ReapplyCarves();
 
-                        // The sea's level has only just been derived, from the settled
-                        // surface, in metres. Every splatmap on the terrain was painted
-                        // before that number existed - from whatever fraction the graph
-                        // happened to hold - so the beach can be sitting at an elevation
-                        // the water never reached, which is the untextured shoreline.
-                        // Locking the two together and re-baking puts the sand on the real
-                        // waterline within the same Generate.
-                        //
-                        // Bounded, and not a loop. The re-bake below does not re-arm this
-                        // callback, so hydrology does not run a second time; the sync is a
-                        // no-op once the two agree, and they stay agreed because the ocean
-                        // holds its placement and no splatmap can move a height. A world
-                        // with no sea, or one already in sync, re-bakes nothing.
-                        UniverseCreator.TerrainSystem.UCWaterSystemManager water =
-                            GetComponentInChildren<UniverseCreator.TerrainSystem.UCWaterSystemManager>(true);
-                        if (water != null && water.SyncSeaLevelFromOcean(this))
-                            cm.RebuildAll();
-                    });
+                    // Armed as ordered steps, not one closure (freeze Fix A). Each is a
+                    // bounded piece of the old single blocking finish, and
+                    // SettlePhaseAfter runs one per pump so the Scene view repaints
+                    // between them instead of freezing for the whole finish (the ~30 s
+                    // modal). Order is load-bearing: spawn the water first (it reads the
+                    // settled surface), fold the new digs into the terrain second, then
+                    // reconcile the beach to the real waterline last.
+                    //
+                    // ONLY STEP 1 IS ARMED HERE (spec §15). The spawn now builds the
+                    // ocean, then EACH LAKE on its own after-settle pump, so it can no
+                    // longer be a single queued step with reapply/sync already sitting
+                    // behind it - those would run before the last lake was built. Instead
+                    // the spawn is handed a CONTINUATION: it self-arms one pump per lake,
+                    // and only after the final lake fires the continuation, which enqueues
+                    // the carve fold-in and the beach reconcile as the next two pumps. The
+                    // ordering is therefore preserved (spawn -> fold -> beach) while every
+                    // lake gets its own frame, so the editor never freezes on a bulk flood.
+                    ChunkManager cmFinish = cm;
+                    cm.RunAfterSettle(
+                        // 1) Spawn the procedural water (ocean now, then one lake per pump),
+                        //    reading the final surface. The continuation runs after the last.
+                        () => UniverseCreator.TerrainSystem.HydrologyGenerator.GenerateFromNode(
+                            this, hydrologyToRun,
+                            () =>
+                            {
+                                // 2) Fold the fresh basin/shore digs - and the fill-back of
+                                //    any lake the reconcile-down cull removed - into the
+                                //    settled terrain in one synchronous pass. Enqueued as
+                                //    its own pump so the view repaints before the fold-in.
+                                cmFinish.EnqueueAfterSettle(() => cmFinish.ReapplyCarves());
+
+                                // 3) The sea's level has only just been derived, from the
+                                //    settled surface, in metres. Every splatmap on the
+                                //    terrain was painted before that number existed - from
+                                //    whatever fraction the graph happened to hold - so the
+                                //    beach can be sitting at an elevation the water never
+                                //    reached, which is the untextured shoreline. Locking the
+                                //    two together and re-baking puts the sand on the real
+                                //    waterline within the same Generate.
+                                //
+                                //    Bounded, and not a loop. The re-bake does not re-arm
+                                //    this finish, so hydrology does not run a second time;
+                                //    the sync is a no-op once the two agree, and they stay
+                                //    agreed because the ocean holds its placement and no
+                                //    splatmap can move a height. A world with no sea, or one
+                                //    already in sync, re-bakes nothing.
+                                cmFinish.EnqueueAfterSettle(() =>
+                                {
+                                    UniverseCreator.TerrainSystem.UCWaterSystemManager water =
+                                        GetComponentInChildren<UniverseCreator.TerrainSystem.UCWaterSystemManager>(true);
+                                    if (water != null && water.SyncSeaLevelFromOcean(this))
+                                        cmFinish.RebuildAll();
+                                });
+                            }));
                 }
                 else
                 {
@@ -549,11 +581,15 @@ namespace UniverseCreator.TerrainSystem
                     // bodies are removed; hand-placed water and the UniverseCreator root are
                     // untouched. The re-carve is skipped when nothing was swept, so a world
                     // that never had procedural water sees no behaviour change.
-                    cm.RunAfterSettle(() =>
-                    {
-                        int removed = UniverseCreator.TerrainSystem.HydrologyGenerator.RemoveAllGenerated(this);
-                        if (removed > 0) cm.ReapplyCarves();
-                    });
+                    // Two ordered steps, one per pump (freeze Fix A), the mirror of the
+                    // spawn path: sweep the orphaned bodies first, then fold their freed
+                    // basins back into the settled terrain. removedGenerated carries the
+                    // count between the steps so the re-carve is skipped when nothing was
+                    // swept - a world that never had procedural water sees no change.
+                    int removedGenerated = 0;
+                    cm.RunAfterSettle(
+                        () => removedGenerated = UniverseCreator.TerrainSystem.HydrologyGenerator.RemoveAllGenerated(this),
+                        () => { if (removedGenerated > 0) cm.ReapplyCarves(); });
                 }
             }
 

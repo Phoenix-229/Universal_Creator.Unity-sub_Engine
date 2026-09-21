@@ -47,18 +47,6 @@ namespace UniverseCreator.Editor.Windows
         }
         private readonly List<MapDetail> mapDetails = new List<MapDetail>();
 
-        // Averaged colour per splat layer, keyed off the layer name (readable-texture-free), cached per
-        // terrain data so the satellite view is one lookup per pixel.
-        private readonly Dictionary<TerrainData, Color[]> layerColorCache =
-            new Dictionary<TerrainData, Color[]>();
-        private readonly Dictionary<TerrainData, float[,,]> alphaCache =
-            new Dictionary<TerrainData, float[,,]>();
-        // Average diffuse colour per layer texture - the material's real from-above colour.
-        // Keyed by the texture itself, so it is shared across every layer and terrain and
-        // computed once per texture per map build.
-        private readonly Dictionary<Texture2D, Color> textureAverageCache =
-            new Dictionary<Texture2D, Color>();
-
         // Opened via the World (UniverseCreatorInspector) rather than the top menu
         public static void ShowWindow()
         {
@@ -304,6 +292,19 @@ namespace UniverseCreator.Editor.Windows
 
             Bounds bounds = GetTerrainBounds(terrains);
 
+            // WORLD MAP = the true satellite look (§11): an orthographic top-down camera
+            // rendered to a texture, so it shows the ACTUAL scene - terrain textures,
+            // vegetation, water, everything a camera sees - not a CPU reconstruction that
+            // guessed a colour per pixel from the splat layer (which read flat brown/green,
+            // the reported fault). This is literally the Unity scene top-view the author
+            // asked for. Topography stays the CPU elevation heat map below, so the height
+            // numbers remain a separate, readable view.
+            if (viewMode == MapViewMode.WorldMap)
+            {
+                RenderWorldMapCamera(terrains, bounds);
+                return;
+            }
+
             // Real water, read from the water bodies the tool actually placed rather than guessed from a
             // percentage of the height range. The ocean gives a true sea level; each lake gives a surface
             // level over its own footprint. A point is water when the ground there lies below the surface
@@ -325,11 +326,6 @@ namespace UniverseCreator.Editor.Windows
 
             Color[] pixels = new Color[mapWidth * mapHeight];
             float[] heights = new float[mapWidth * mapHeight];
-            // The real painted surface colour at each pixel, read from the terrain's own splat layers, so
-            // the satellite view shows grass, rock, sand and snow where the tool actually painted them
-            // rather than a colour invented from height. Default mid-grey until a terrain fills it.
-            Color[] surfaceCols = new Color[mapWidth * mapHeight];
-            for (int i = 0; i < surfaceCols.Length; i++) { surfaceCols[i] = new Color(0.5f, 0.5f, 0.5f); }
             // Per pixel: is this point under a real water body, and how deep (0..1) for the water shading.
             bool[] waterMask = new bool[mapWidth * mapHeight];
             float[] waterDepth01 = new float[mapWidth * mapHeight];
@@ -363,7 +359,6 @@ namespace UniverseCreator.Editor.Windows
                         if (local.x >= 0 && local.x <= t.terrainData.size.x && local.z >= 0 && local.z <= t.terrainData.size.z)
                         {
                             height = t.SampleHeight(new Vector3(worldX, 0, worldZ)) + t.transform.position.y;
-                            surfaceCols[y * mapWidth + x] = DominantSplatColor(t, worldX, worldZ);
                             hit = true;
                             break;
                         }
@@ -435,61 +430,32 @@ namespace UniverseCreator.Editor.Windows
                     }
                     else
                     {
-                        float normalizedHeight = Mathf.InverseLerp(trueMin, trueMax, heights[i]);
                         Color c = Color.black;
 
-                        // Real water first, in every mode: deep water dark blue, shallows lighter, so a
+                        // Real water first: deep water dark blue, shallows lighter, so a
                         // lake, a river and the sea read as water and not as low ground.
                         if (waterMask[i])
                         {
                             c = Color.Lerp(new Color(0.30f, 0.55f, 0.72f), new Color(0.05f, 0.16f, 0.34f),
                                 waterDepth01[i]);
                         }
-                        else if (viewMode == MapViewMode.Topography)
+                        else
                         {
                             c = GetHeatMapColor(heights[i], trueMin, trueMax);
                         }
-                        else // MapViewMode.WorldMap
-                        {
-                            // The real painted surface (sampled from the layer textures),
-                            // shaded by a simple hillshade from the neighbouring heights so
-                            // relief reads without inventing colour - a satellite photo
-                            // carries its own relief the same way.
-                            float shade = 1f;
-                            if (x > 0 && y > 0)
-                            {
-                                float hl = heights[y * mapWidth + (x - 1)];
-                                float hd = heights[(y - 1) * mapWidth + x];
-                                if (hl != float.MinValue && hd != float.MinValue)
-                                {
-                                    float dx = heights[i] - hl;
-                                    float dz = heights[i] - hd;
-                                    shade = Mathf.Clamp(1f - (dx + dz) * 0.03f, 0.55f, 1.25f);
-                                }
-                            }
-                            c = surfaceCols[i] * shade;
-                            c.a = 1f;
-                        }
 
-                        // Real vegetation over the land (never over water): blend toward a
-                        // natural green by the ground-cover strength, so trees and grass the
-                        // tool planted show on the map. In the topographic view it is a lighter
-                        // touch - that view is about elevation - and in satellite/terrain it is
-                        // stronger, because those are what a from-above photo would show.
+                        // Real vegetation over the land (never over water): a light green
+                        // touch by ground-cover strength. Topography is about elevation, so
+                        // the tint stays subtle - just enough to show where the tool planted
+                        // vegetation without hiding the height ramp.
                         if (!waterMask[i] && vegetation01[i] > 0f)
                         {
-                            Color green = viewMode == MapViewMode.Topography
-                                ? new Color(0.25f, 0.45f, 0.20f)
-                                : new Color(0.18f, 0.42f, 0.14f);
-                            float amount = viewMode == MapViewMode.Topography
-                                ? vegetation01[i] * 0.45f
-                                : vegetation01[i] * 0.85f;
-                            c = Color.Lerp(c, green, amount);
+                            Color green = new Color(0.25f, 0.45f, 0.20f);
+                            c = Color.Lerp(c, green, vegetation01[i] * 0.45f);
                         }
 
-
-                        // Draw contours every 50m for Topography and Terrain
-                        if ((viewMode == MapViewMode.Topography || viewMode == MapViewMode.WorldMap) && x > 0 && y > 0)
+                        // Contour lines every 50 m.
+                        if (x > 0 && y > 0)
                         {
                             float hLeft = heights[y * mapWidth + (x - 1)];
                             float hDown = heights[(y - 1) * mapWidth + x];
@@ -515,14 +481,112 @@ namespace UniverseCreator.Editor.Windows
             mapTexture.Apply();
         }
 
-        // Read every placed level water body once per map build. Caches are cleared here too, so a map
-        // refresh after the world changed re-reads the real layers and bodies rather than a stale copy.
+        // Renders the world from a top-down orthographic camera into a texture - the true
+        // satellite view (§11). The camera sees exactly what the Scene view sees from
+        // straight above: painted terrain, trees, grass, water surfaces. Zoom and pan are
+        // honoured through the ortho size and the camera XZ, so the same navigation the CPU
+        // views use works here. The camera is temporary - created, rendered once, destroyed
+        // - so nothing is left in the scene.
+        private void RenderWorldMapCamera(Terrain[] terrains, Bounds bounds)
+        {
+            // The visible world rectangle after zoom/pan, matching the CPU views exactly so
+            // switching view mode keeps the same framing.
+            float viewWidth = bounds.size.x / zoom;
+            float viewDepth = bounds.size.z / zoom;
+            float centreX = bounds.center.x + pan.x;
+            float centreZ = bounds.center.z + pan.y;
+
+            // Texture keeps the world's aspect, same as the CPU path.
+            int mapWidth = 1024;
+            int mapHeight = Mathf.Max(1, Mathf.RoundToInt(1024 * (viewDepth / Mathf.Max(0.0001f, viewWidth))));
+
+            // Height range for the on-screen label. A coarse sample is enough - the label is
+            // informational and the camera, not this, draws the map.
+            SampleHeightRange(terrains, bounds, out minTerrainHeight, out maxTerrainHeight);
+
+            // A camera high enough to clear the tallest peak, looking straight down. Far
+            // plane reaches past the lowest ground. Orthographic, so there is no perspective
+            // - every metre of ground maps to the same number of pixels, which is what makes
+            // it a map and not a photo taken from altitude.
+            float top = bounds.max.y + 1000f;
+            float depthSpan = (bounds.max.y - bounds.min.y) + 2000f;
+
+            GameObject camGo = EditorUtility.CreateGameObjectWithHideFlags(
+                "UC Map Camera", HideFlags.HideAndDontSave, typeof(Camera));
+            Camera cam = camGo.GetComponent<Camera>();
+
+            RenderTexture rt = RenderTexture.GetTemporary(mapWidth, mapHeight, 24, RenderTextureFormat.ARGB32);
+            RenderTexture prevActive = RenderTexture.active;
+
+            try
+            {
+                cam.transform.position = new Vector3(centreX, top, centreZ);
+                cam.transform.rotation = Quaternion.Euler(90f, 0f, 0f);   // look straight down, +Z up on screen
+                cam.orthographic = true;
+                cam.orthographicSize = viewDepth * 0.5f;                  // half-height in world metres
+                cam.aspect = viewWidth / Mathf.Max(0.0001f, viewDepth);
+                cam.nearClipPlane = 0.3f;
+                cam.farClipPlane = depthSpan;
+                cam.clearFlags = CameraClearFlags.SolidColor;
+                cam.backgroundColor = new Color(0.02f, 0.05f, 0.1f);      // deep-water blue for off-world
+                cam.cullingMask = ~0;                                     // everything the scene draws
+                cam.enabled = false;                                      // we drive it by hand
+
+                cam.targetTexture = rt;
+                cam.Render();
+
+                RenderTexture.active = rt;
+                if (mapTexture == null || mapTexture.width != mapWidth || mapTexture.height != mapHeight)
+                {
+                    if (mapTexture != null) DestroyImmediate(mapTexture);
+                    mapTexture = new Texture2D(mapWidth, mapHeight, TextureFormat.RGB24, false);
+                }
+                mapTexture.ReadPixels(new Rect(0, 0, mapWidth, mapHeight), 0, 0);
+                mapTexture.Apply();
+            }
+            finally
+            {
+                RenderTexture.active = prevActive;
+                cam.targetTexture = null;
+                RenderTexture.ReleaseTemporary(rt);
+                DestroyImmediate(camGo);
+            }
+        }
+
+        // A coarse min/max terrain height over the visible bounds, for the height-range
+        // label. Sampled on a small grid - the number only has to be about right.
+        private void SampleHeightRange(Terrain[] terrains, Bounds bounds, out float lo, out float hi)
+        {
+            lo = float.MaxValue; hi = float.MinValue;
+            const int N = 48;
+            for (int j = 0; j <= N; j++)
+            {
+                for (int i = 0; i <= N; i++)
+                {
+                    float wx = Mathf.Lerp(bounds.min.x, bounds.max.x, i / (float)N);
+                    float wz = Mathf.Lerp(bounds.min.z, bounds.max.z, j / (float)N);
+                    foreach (var t in terrains)
+                    {
+                        if (t == null || t.terrainData == null) continue;
+                        Vector3 local = t.transform.InverseTransformPoint(new Vector3(wx, 0, wz));
+                        if (local.x >= 0 && local.x <= t.terrainData.size.x && local.z >= 0 && local.z <= t.terrainData.size.z)
+                        {
+                            float h = t.SampleHeight(new Vector3(wx, 0, wz)) + t.transform.position.y;
+                            if (h < lo) lo = h;
+                            if (h > hi) hi = h;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (lo > hi) { lo = bounds.min.y; hi = bounds.max.y; }
+        }
+
+        // Read every placed level water body once per map build. Lists are cleared here too, so a map
+        // refresh after the world changed re-reads the real bodies rather than a stale copy.
         private void GatherWater()
         {
             mapWaters.Clear();
-            layerColorCache.Clear();
-            alphaCache.Clear();
-            textureAverageCache.Clear();
 
             mapRivers.Clear();
             mapTrees.Clear();
@@ -743,129 +807,6 @@ namespace UniverseCreator.Editor.Windows
             return false;
         }
 
-        // The colour of the dominant splat layer at a world point, from the terrain's own alphamap and the
-        // layer's name. This is the real painted surface, not a colour invented from height.
-        private Color DominantSplatColor(Terrain t, float worldX, float worldZ)
-        {
-            TerrainData td = t.terrainData;
-            if (td == null || td.alphamapLayers == 0) { return new Color(0.45f, 0.5f, 0.4f); }
-
-            float[,,] alpha;
-            if (!alphaCache.TryGetValue(td, out alpha))
-            {
-                try { alpha = td.GetAlphamaps(0, 0, td.alphamapWidth, td.alphamapHeight); }
-                catch { alpha = null; }
-                alphaCache[td] = alpha;
-            }
-            if (alpha == null) { return new Color(0.45f, 0.5f, 0.4f); }
-
-            Vector3 local = t.transform.InverseTransformPoint(new Vector3(worldX, 0f, worldZ));
-            int aw = td.alphamapWidth, ah = td.alphamapHeight;
-            int mx = Mathf.Clamp(Mathf.RoundToInt(local.x / td.size.x * (aw - 1)), 0, aw - 1);
-            int mz = Mathf.Clamp(Mathf.RoundToInt(local.z / td.size.z * (ah - 1)), 0, ah - 1);
-
-            int layers = Mathf.Min(td.alphamapLayers, alpha.GetLength(2));
-            int best = 0; float bestW = -1f;
-            for (int l = 0; l < layers; l++)
-            {
-                float w = alpha[mz, mx, l];
-                if (w > bestW) { bestW = w; best = l; }
-            }
-            Color[] cols = LayerColors(td);
-            return best < cols.Length ? cols[best] : new Color(0.45f, 0.5f, 0.4f);
-        }
-
-        private Color[] LayerColors(TerrainData td)
-        {
-            Color[] cols;
-            if (layerColorCache.TryGetValue(td, out cols)) { return cols; }
-            var layers = td.terrainLayers;
-            cols = new Color[layers != null ? layers.Length : 0];
-            for (int i = 0; i < cols.Length; i++)
-            {
-                // A real satellite shows the actual painted material, so sample the layer's
-                // own diffuse texture average colour - that IS what the ground looks like
-                // from above. The name is only a fallback for a layer whose texture cannot
-                // be read (compressed/unreadable import), because a name like "Ground" says
-                // nothing about whether the texture is green grass or brown soil.
-                Color sampled;
-                if (layers[i] != null && TryAverageTextureColor(layers[i].diffuseTexture, out sampled))
-                {
-                    // Fold in the layer's diffuse tint (URP terrain layers can tint the
-                    // texture), so a green-tinted rock still reads the way it renders.
-                    Color tint = layers[i].diffuseRemapMax == Vector4.zero
-                        ? Color.white
-                        : (Color)layers[i].diffuseRemapMax;
-                    cols[i] = new Color(sampled.r * tint.r, sampled.g * tint.g, sampled.b * tint.b, 1f);
-                }
-                else
-                {
-                    string n = layers[i] != null ? layers[i].name : string.Empty;
-                    cols[i] = ColorForLayerName(n);
-                }
-            }
-            layerColorCache[td] = cols;
-            return cols;
-        }
-
-        // The average colour of a terrain-layer diffuse texture - the material's real
-        // from-above colour. Reads the smallest mip so the average is cheap and no per-texel
-        // walk of a 2k texture is needed. Returns false when the texture is null or its
-        // pixels cannot be read (unreadable import, unsupported format), so the caller can
-        // fall back to the name. Cached per texture across every layer and terrain.
-        private bool TryAverageTextureColor(Texture2D tex, out Color avg)
-        {
-            avg = Color.white;
-            if (tex == null) { return false; }
-            if (textureAverageCache.TryGetValue(tex, out avg)) { return avg.a > 0.5f; }
-
-            Color result;
-            bool ok = false;
-            try
-            {
-                // Prefer the smallest mip: one GetPixels call over a handful of texels.
-                int mip = Mathf.Max(0, tex.mipmapCount - 1);
-                Color[] px = tex.GetPixels(mip);
-                if (px != null && px.Length > 0)
-                {
-                    float r = 0f, g = 0f, b = 0f;
-                    for (int i = 0; i < px.Length; i++) { r += px[i].r; g += px[i].g; b += px[i].b; }
-                    float inv = 1f / px.Length;
-                    result = new Color(r * inv, g * inv, b * inv, 1f);
-                    ok = true;
-                }
-                else { result = Color.white; }
-            }
-            catch { result = Color.white; }
-
-            // a<0.5 marks "unreadable" in the cache so we do not retry the GetPixels throw.
-            avg = ok ? result : new Color(1f, 1f, 1f, 0f);
-            textureAverageCache[tex] = avg;
-            return ok;
-        }
-
-        // A from-above colour for a splat layer, decided by its name -- the real painted material, mapped to
-        // what that material looks like from orbit. Unknown names fall to a neutral scrub green.
-        private Color ColorForLayerName(string name)
-        {
-            string n = string.IsNullOrEmpty(name) ? string.Empty : name.ToLowerInvariant();
-            if (n.Contains("snow") || n.Contains("ice")) { return new Color(0.92f, 0.94f, 0.97f); }
-            if (n.Contains("sand") || n.Contains("beach") || n.Contains("desert") || n.Contains("dune"))
-            { return new Color(0.78f, 0.71f, 0.5f); }
-            if (n.Contains("rock") || n.Contains("cliff") || n.Contains("stone") || n.Contains("scree"))
-            { return new Color(0.44f, 0.42f, 0.4f); }
-            if (n.Contains("gravel") || n.Contains("slate")) { return new Color(0.55f, 0.54f, 0.52f); }
-            if (n.Contains("grass") || n.Contains("meadow") || n.Contains("lush") || n.Contains("plain"))
-            { return new Color(0.32f, 0.5f, 0.22f); }
-            if (n.Contains("forest") || n.Contains("wood") || n.Contains("jungle") || n.Contains("moss"))
-            { return new Color(0.18f, 0.34f, 0.15f); }
-            if (n.Contains("dirt") || n.Contains("soil") || n.Contains("mud") || n.Contains("ground")
-                || n.Contains("earth")) { return new Color(0.42f, 0.32f, 0.2f); }
-            if (n.Contains("tundra") || n.Contains("dry") || n.Contains("savanna") || n.Contains("steppe"))
-            { return new Color(0.6f, 0.56f, 0.34f); }
-            return new Color(0.3f, 0.42f, 0.24f);
-        }
-
         private Color GetHeatMapColor(float height, float minHeight, float maxHeight)
         {
             float range = maxHeight - minHeight;
@@ -887,26 +828,5 @@ namespace UniverseCreator.Editor.Windows
             return Color.Lerp(new Color(0.5f, 0.3f, 0.1f), Color.white, (landVal - 0.6f) / 0.4f);
         }
 
-        private Color GetSatelliteColor(float height, float minHeight, float maxHeight)
-        {
-            float range = maxHeight - minHeight;
-            if (range <= 0) return Color.black;
-            
-            float seaLevel = minHeight + (range * 0.15f); // Rough heuristic for sea level
-            
-            if (height <= seaLevel) 
-            {
-                float waterDepth = Mathf.InverseLerp(minHeight, seaLevel, height);
-                return Color.Lerp(new Color(0.02f, 0.1f, 0.2f), new Color(0.1f, 0.3f, 0.4f), waterDepth); 
-            }
-            
-            float landVal = Mathf.InverseLerp(seaLevel, maxHeight, height);
-            
-            if (landVal < 0.03f) return new Color(0.76f, 0.7f, 0.5f); // Beach sand
-            if (landVal < 0.3f) return Color.Lerp(new Color(0.2f, 0.35f, 0.15f), new Color(0.15f, 0.25f, 0.1f), (landVal - 0.03f) / 0.27f); // Dense forest
-            if (landVal < 0.7f) return Color.Lerp(new Color(0.15f, 0.25f, 0.1f), new Color(0.4f, 0.4f, 0.4f), (landVal - 0.3f) / 0.4f); // Forest to rock
-            if (landVal < 0.85f) return Color.Lerp(new Color(0.4f, 0.4f, 0.4f), new Color(0.6f, 0.6f, 0.65f), (landVal - 0.7f) / 0.15f); // Bare rock
-            return Color.Lerp(new Color(0.6f, 0.6f, 0.65f), new Color(0.95f, 0.95f, 0.98f), (landVal - 0.85f) / 0.15f); // Snow caps
-        }
     }
 }

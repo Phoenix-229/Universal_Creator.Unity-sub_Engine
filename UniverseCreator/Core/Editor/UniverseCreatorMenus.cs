@@ -118,8 +118,121 @@ namespace UniverseCreator.Editor
             // twice with a visible flicker between them.
             WaterPresets.ApplyManagerDefaults(body);
 
+            // §9: read the procedural graph before placing, so the body drops onto the
+            // world the graph already made rather than at the raw scene pivot. Done here,
+            // before Finish's first Rebuild, so the body builds once at its real level.
+            SeatFromGraph(body);
+
             Finish(body);
             return body;
+        }
+
+        /// <summary>
+        /// Seats a freshly-spawned body on the elevation the procedural graph implies,
+        /// so a hand-placed body starts where the procedural one would (§9).
+        ///
+        /// OCEAN reads ONLY the ocean node: its surface is sea level, so the body's Y is
+        /// set to sea-level metres and the terrain crossing that plane IS the shore -
+        /// exactly how the procedural ocean places itself, no basin search. LAKE drops
+        /// into a real basin: its Y is lowered to the lowest ground under its own
+        /// footprint (a hollow, not the pivot bump), so it fills a basin instead of
+        /// sitting proud of one. River and pool keep the real-math width/depth/level
+        /// fields the presets already wrote - a river's level comes from the ground its
+        /// course falls down, a pool carries its own floor - so neither is touched here.
+        /// </summary>
+        private static void SeatFromGraph(UCWaterBody body)
+        {
+            if (body == null) return;
+
+            UniverseCreatorObject world = body.GetComponentInParent<UniverseCreatorObject>();
+            if (world == null) return;
+
+            if (body.kind == WaterBodyKind.Ocean)
+            {
+                // Sea level is a fraction of world height; the ocean's surface stands
+                // there and the beach is wherever the ground rises through it.
+                Graph graph = world.graph;
+                float seaFraction = 0.35f;
+                UCWaterSystemManager mgr = body.GetComponentInParent<UCWaterSystemManager>();
+                if (mgr != null) seaFraction = mgr.nodeSeaLevel;
+                else if (graph != null) seaFraction = OceanSeaLevelFraction(graph, seaFraction);
+
+                float seaY = world.transform.position.y + seaFraction * world.maxHeightMeters;
+                Vector3 p = body.transform.position;
+                body.transform.position = new Vector3(p.x, seaY - body.surfaceOffsetMetres, p.z);
+                return;
+            }
+
+            if (body.kind == WaterBodyKind.Lake)
+            {
+                // Drop to the lowest ground under the seeded outline, so the lake sits in
+                // a basin. A tiny fill above that floor gives it a waterline instead of a
+                // puddle skimming the bed; the dig then shapes the real bed beneath.
+                float floorY;
+                if (LowestGroundUnder(body, out floorY))
+                {
+                    Vector3 p = body.transform.position;
+                    body.transform.position = new Vector3(p.x, floorY - body.surfaceOffsetMetres, p.z);
+                }
+            }
+        }
+
+        /// <summary>Sea-level fraction from the first Ocean Level node in the graph.</summary>
+        private static float OceanSeaLevelFraction(Graph graph, float fallback)
+        {
+            if (graph == null || graph.nodes == null) return fallback;
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                UniverseCreator.Nodes.Selectors.OceanLevelNode ocean =
+                    graph.nodes[i] as UniverseCreator.Nodes.Selectors.OceanLevelNode;
+                if (ocean != null) return ocean.seaLevel;
+            }
+            return fallback;
+        }
+
+        /// <summary>
+        /// Lowest active-terrain height under a level body's footprint, world Y. False
+        /// when no terrain lies under it (nothing to seat against).
+        /// </summary>
+        private static bool LowestGroundUnder(UCWaterBody body, out float floorY)
+        {
+            floorY = float.MaxValue;
+            bool any = false;
+
+            Vector3 centre = body.transform.position;
+            float hx = Mathf.Max(1f, body.sizeMetres.x * 0.5f);
+            float hz = Mathf.Max(1f, body.sizeMetres.y * 0.5f);
+
+            Terrain[] terrains = Terrain.activeTerrains;
+
+            // A coarse 5x5 lattice over the footprint: enough to find the basin floor
+            // without a full solve, and this runs once on spawn.
+            const int Steps = 4;
+            for (int iz = 0; iz <= Steps; iz++)
+            {
+                for (int ix = 0; ix <= Steps; ix++)
+                {
+                    float wx = centre.x - hx + (2f * hx) * ix / Steps;
+                    float wz = centre.z - hz + (2f * hz) * iz / Steps;
+
+                    for (int t = 0; t < terrains.Length; t++)
+                    {
+                        Terrain terrain = terrains[t];
+                        if (terrain == null || terrain.terrainData == null) continue;
+
+                        Vector3 local = new Vector3(wx, 0f, wz) - terrain.transform.position;
+                        Vector3 size = terrain.terrainData.size;
+                        if (local.x < 0f || local.z < 0f || local.x > size.x || local.z > size.z) continue;
+
+                        float y = terrain.transform.position.y +
+                                  terrain.terrainData.GetInterpolatedHeight(local.x / size.x, local.z / size.z);
+                        if (y < floorY) { floorY = y; any = true; }
+                        break;
+                    }
+                }
+            }
+
+            return any;
         }
 
         private static UCWaterBody PresetOcean(Transform parentOverride)

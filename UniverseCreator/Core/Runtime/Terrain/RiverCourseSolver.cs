@@ -72,9 +72,21 @@ namespace UniverseCreator.TerrainSystem
         /// side, so the course keeps its length and its shape and simply finds the
         /// bottom of the trench it is near.
         /// </summary>
+        /// <param name="holdEnds">When true the source (i=0) and mouth (i=n-1) are left
+        /// exactly where they were - only the interior points are slid sideways. This is
+        /// the endpoint hold that stops Fit-to-Valley / Refit-to-High-Ground from dragging
+        /// a river off its own source or pulling its mouth away from the sea it empties
+        /// into. Relax and Meander already hold their ends; this makes the valley seek
+        /// match, so no pass can move an endpoint.</param>
+        /// <param name="submergedFloorY">Any candidate ground below this world Y is a point
+        /// already under the ocean/lake surface, so seating the channel there would push it
+        /// under water. Such candidates are refused (the point keeps its position). Pass
+        /// float.NegativeInfinity - the default - to disable the exclusion.</param>
         public static void SnapToValley(List<Vector3> points, GroundSampler ground,
                                         float searchMetres, float strength, int samples,
-                                        float deadbandMetres = 0f)
+                                        float deadbandMetres = 0f,
+                                        bool holdEnds = false,
+                                        float submergedFloorY = float.NegativeInfinity)
         {
             if (points == null || points.Count < 2 || ground == null) return;
 
@@ -108,6 +120,12 @@ namespace UniverseCreator.TerrainSystem
             {
                 Vector3 p = points[i];
 
+                // Endpoint hold: the source and the mouth are the two points a river is
+                // pinned to - the spring it rises from and the sea/lake it empties into -
+                // so a valley seek must never slide them. Leaving them out here is the
+                // whole of the "Fit-to-Valley must not move source or mouth" fix.
+                if (holdEnds && (i == 0 || i == n - 1)) { moved[i] = p; continue; }
+
                 int prev = Mathf.Max(0, i - 1);
                 int next = Mathf.Min(n - 1, i + 1);
 
@@ -129,6 +147,13 @@ namespace UniverseCreator.TerrainSystem
 
                     float offset = reach * (s / (float)half);
                     float h = ground(p.x + side.x * offset, p.z + side.y * offset);
+
+                    // Submerged-ground exclusion: a candidate below the water surface is
+                    // ground already under the ocean/lake, so pulling the channel onto it
+                    // would seat the river under water. Skip it. This is the second half of
+                    // the Fit-to-Valley fix - the valley floor it seeks can never be below
+                    // the waterline.
+                    if (h < submergedFloorY) continue;
 
                     // Ties go to the smaller offset, because a flat valley floor
                     // should leave the drawn line where it is rather than jumping it

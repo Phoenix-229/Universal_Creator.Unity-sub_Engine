@@ -137,7 +137,8 @@ namespace UniverseCreator.Nodes.Selectors
         /// </remarks>
         internal static bool StampNetwork(Matrix mask, WorldDrainage solve, float channelHeadArea,
                                           float baseWidth, float widthExponent, float maxWidth,
-                                          float seaLevel, int maxChannels, StopToken stop)
+                                          float seaLevel, int maxChannels, StopToken stop,
+                                          System.Action<List<Vector2>, List<float>> refineCourse = null)
         {
             System.Func<bool> cancel = null;
             if (stop != null) cancel = delegate { return stop.StopRequested; };
@@ -217,6 +218,15 @@ namespace UniverseCreator.Nodes.Selectors
                 }
 
                 SmoothCourse(points);
+
+                // Optional course refinement (River Course Solver node). The trace above is
+                // a D8 thread smoothed once; the refiner runs the real-world course passes
+                // (valley-seek onto the thalweg, then meander loops sized by Leopold-Wolman)
+                // over the SAME polyline before it is stamped, so the mask the carve reads
+                // is a fitted course, not a raw drainage thread. Null for the plain Trace
+                // node and the spawner, so their behaviour is unchanged. Point count is
+                // preserved by the passes used, so widths stay index-aligned.
+                if (refineCourse != null) refineCourse(points, widths);
 
                 for (int p = 1; p < points.Count; p++)
                     StampReach(mask, points[p - 1], widths[p - 1], points[p], widths[p]);
@@ -347,6 +357,133 @@ namespace UniverseCreator.Nodes.Selectors
     }
 
     /// <summary>
+    /// Traces the world network exactly as River Network Trace does, then runs the
+    /// real-world course passes over each course before it is stamped: valley-seek
+    /// onto the thalweg (endpoints held), a light relax, and meander loops sized by
+    /// Leopold and Wolman. The output is the SAME "River Mask" port the plain trace
+    /// emits, so River Carve reads it identically - the difference is the mask now
+    /// carries fitted, meandering courses rather than raw D8 threads.
+    /// </summary>
+    /// <remarks>
+    /// WHY A NODE AND NOT A DUPLICATE
+    /// The graph has no polyline port, so a course solver cannot be a spline in and a
+    /// spline out. It shares River Network Trace's one tracing (StampNetwork) and
+    /// injects the solver's passes through the refineCourse hook - the passes that are
+    /// NOT in SmoothCourse. So there is exactly one place that traces the network and
+    /// one static course solver; this node wires them together, it does not re-derive
+    /// either.
+    ///
+    /// ENDPOINT HOLD
+    /// Every pass used here holds i=0 (source) and i=n-1 (mouth), so the fitted course
+    /// still starts at its spring and ends where the raw thread reached the sea. The
+    /// passes preserve point count, so widths stay index-aligned with points.
+    /// </remarks>
+    [System.Serializable]
+    public class RiverCourseSolverNode : Generator
+    {
+        public override string NodeName { get { return "River Course Solver"; } }
+        public override NodeCategory Category { get { return NodeCategory.Selector; } }
+        public override string Tooltip { get { return "Traces river courses, then fits them to the valley and meanders them by real-world course law."; } }
+
+        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
+        public override Port[] GetOutputs() { return Outs; }
+
+        /// <summary>
+        /// The fitted course, emitted under the SAME name River Network Trace uses so
+        /// River Carve / River Fill / Water Bank Seat consume it with no rewiring.
+        /// </summary>
+        private static readonly Port[] Outs =
+        {
+            new Port("River Mask", PortType.Matrix, PortDirection.Output, true)
+        };
+
+        /// <summary>Cells per side of the world drainage solve. See River Network Trace.</summary>
+        public int drainageResolution = 256;
+
+        /// <summary>Land a channel must drain before it counts as a river, in square metres.</summary>
+        public float channelHeadArea = 250000f;
+
+        /// <summary>Channel width where a channel first forms, in world metres.</summary>
+        public float baseWidth = 6f;
+
+        /// <summary>How width grows with catchment (Leopold and Maddock: w ∝ Q^0.5).</summary>
+        public float widthExponent = 0.5f;
+
+        /// <summary>Cap on channel width, in world metres.</summary>
+        public float maxWidth = 60f;
+
+        /// <summary>Rivers stop at this elevation. Below it they have reached the sea.</summary>
+        public float seaLevel = 0.35f;
+
+        /// <summary>Most courses traced. Guards pathological heightfields.</summary>
+        public int maxChannels = 512;
+
+        /// <summary>How far to either side the valley-seek looks for lower ground, in metres.</summary>
+        public float valleySearchMetres = 40f;
+
+        /// <summary>How hard a point is pulled toward the valley floor, 0-1.</summary>
+        public float valleyPull = 0.6f;
+
+        /// <summary>Meander amplitude, 0-1. 0 leaves the course straight-ish.</summary>
+        public float meanderStrength = 0.5f;
+
+        /// <summary>Steepest grade a meander loop may climb into a bank before it is refused.</summary>
+        public float meanderMaxGrade = 0.06f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix mask = tile.CreateMatrix();
+
+            WorldDrainage solve = WorldDrainage.Solve(this, 0, tile, drainageResolution,
+                                                      1e-6f, true, stop);
+            if (solve == null) return mask;
+            if (stop != null && stop.StopRequested) return null;
+
+            // The course solver samples the SAME world height the drainage was solved on,
+            // so the valley it seeks is the valley the network was traced through. XZ is a
+            // plan-view line; Y is whatever the ground under it turns out to be.
+            UniverseCreator.TerrainSystem.RiverCourseSolver.GroundSampler ground =
+                delegate (float wx, float wz) { return solve.height.GetWorldHeight(wx, wz); };
+
+            float search = Mathf.Max(0f, valleySearchMetres);
+            float pull = Mathf.Clamp01(valleyPull);
+            float meander = Mathf.Clamp01(meanderStrength);
+            float grade = Mathf.Max(0.002f, meanderMaxGrade);
+
+            // Scratch lists reused across every course; the delegate is called once per
+            // course by StampNetwork, in-between the trace and the stamp.
+            List<Vector3> course = new List<Vector3>();
+
+            System.Action<List<Vector2>, List<float>> refine =
+                delegate (List<Vector2> pts, List<float> widths)
+                {
+                    if (pts == null || pts.Count < 2) return;
+
+                    course.Clear();
+                    for (int i = 0; i < pts.Count; i++)
+                        course.Add(new Vector3(pts[i].x, ground(pts[i].x, pts[i].y), pts[i].y));
+
+                    // Real-world course passes, endpoints held so the source and mouth do
+                    // not move. Count is preserved by all three, so widths stay aligned.
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.SnapToValley(
+                        course, ground, search, pull, 12, 0f, true);
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.Relax(course, 2);
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.Meander(
+                        course, ground, widths, meander, grade, Mathf.Max(0.5f, baseWidth));
+
+                    // Write the fitted planform back; the stamp reads XZ only.
+                    int n = Mathf.Min(pts.Count, course.Count);
+                    for (int i = 0; i < n; i++)
+                        pts[i] = new Vector2(course[i].x, course[i].z);
+                };
+
+            return RiverNetworkTraceNode.StampNetwork(
+                mask, solve, channelHeadArea, baseWidth, widthExponent, maxWidth,
+                seaLevel, maxChannels, stop, refine) ? mask : null;
+        }
+    }
+
+    /// <summary>
     /// Cuts the river channel into the heightfield. Separate from the trace so a
     /// user can carve one network and texture another, and so the carve can be
     /// masked without recomputing drainage.
@@ -381,6 +518,26 @@ namespace UniverseCreator.Nodes.Selectors
 
         /// <summary>Raises a levee alongside the channel, as real rivers deposit.</summary>
         public float leveeHeight;
+
+        /// <summary>
+        /// Floodplain half-width as a multiple of the local channel width (W_fp ≈ k·w).
+        /// Real unconfined reaches carry k ≈ 3–8; 0 turns the floodplain off and only the
+        /// channel is cut. The belt is the gently graded, near-level ground a hand-placed
+        /// river drops into and meanders across - NOT a constant width, because it is
+        /// measured from the channel width at each point and then pulled in wherever the
+        /// valley is confined (both sides rising within the search), so a gorge reach gets
+        /// a narrow asymmetric plain and an open reach a wide gentle one.
+        /// </summary>
+        public float floodplainWidthK = 5f;
+
+        /// <summary>
+        /// How far below the surrounding ground the floodplain belt is graded, as a
+        /// fraction of the channel depth. The belt is not cut to the channel bed - it is a
+        /// shallow, near-level bench a little above the water - so a river laid along the
+        /// carved trench sits IN its floodplain instead of in a slot. 0 leaves the belt at
+        /// ground level (a graded shelf with no lowering).
+        /// </summary>
+        public float floodplainDepthFraction = 0.25f;
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
@@ -438,6 +595,19 @@ namespace UniverseCreator.Nodes.Selectors
             float power = Mathf.Max(0.2f, profilePower);
             float flatten = Mathf.Clamp01(bedFlattening);
 
+            // Floodplain belt (§4). Half-width scales with the channel (W_fp ≈ k·w), so it
+            // is NOT a constant: a wider channel carries a wider plain. Bounded in pixels so
+            // a huge k on a fine chunk cannot run the march away. The belt is graded to a
+            // BENCH a little below the local valley floor and well above the channel bed, so
+            // a hand-placed river laid along the trench drops into its floodplain instead of
+            // a slot. The march stops where the ground rises out of the belt band - that is
+            // the valley wall - which is what pulls the belt in on a confined reach and lets
+            // it spread on an open one, the confinement trade the spec asks for.
+            int fpHalfPixels = floodplainWidthK > 1e-3f
+                ? Mathf.Clamp(Mathf.RoundToInt(floodplainWidthK * bankWidth / mpp), 0, 64)
+                : 0;
+            float fpDepthFrac = Mathf.Clamp01(floodplainDepthFraction);
+
             for (int z = 0; z < resZ; z++)
             {
                 if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
@@ -480,10 +650,74 @@ namespace UniverseCreator.Nodes.Selectors
                     }
 
                     dst.arr[i] = Mathf.Clamp01(value);
+
+                    // Grade the floodplain from the channel CORE only (w near the thalweg),
+                    // so the march runs once per centreline cell rather than from every
+                    // partial-bank cell. The bench is a shallow bench below the valley floor
+                    // and above the channel bed - the near-level ground the river meanders
+                    // across.
+                    if (fpHalfPixels > 0 && w > 0.5f)
+                    {
+                        float benchLevel = bed - depth * fpDepthFrac;
+                        GradeFloodplain(src, dst, maskSmooth, x, z, resX, resZ,
+                                        fpHalfPixels, benchLevel, depth);
+                    }
                 }
             }
 
             return dst;
+        }
+
+        /// <summary>
+        /// Grades the floodplain belt out from a channel-core cell, across the flow, to
+        /// <paramref name="halfPixels"/> either side. Each cell in the belt is lowered
+        /// toward <paramref name="benchLevel"/> (never raised) with a smooth falloff by
+        /// distance, so the plain eases from the bench near the channel back to natural
+        /// ground at the belt edge. The march STOPS on each side the moment the ground
+        /// rises more than the channel depth above the bench: that is the valley wall, so a
+        /// confined reach gets a narrow belt and cannot be cut into a hillside, while an
+        /// open reach spreads to the full width - the confinement trade (§4). Reads ground
+        /// from <paramref name="src"/> and writes the minimum into <paramref name="dst"/>,
+        /// so the result does not depend on the order cells are visited.
+        /// </summary>
+        private static void GradeFloodplain(Matrix src, Matrix dst, Matrix mask,
+                                            int x, int z, int resX, int resZ,
+                                            int halfPixels, float benchLevel, float depth)
+        {
+            float dx, dz;
+            if (!CrossDirection(mask, x, z, resX, resZ, out dx, out dz)) return;
+
+            float wallBand = Mathf.Max(1e-4f, depth);   // rise that ends the belt = one channel depth
+
+            for (int sign = -1; sign <= 1; sign += 2)
+            {
+                for (int k = 1; k <= halfPixels; k++)
+                {
+                    int ax = Mathf.Clamp(x + Mathf.RoundToInt(dx * k * sign), 0, resX - 1);
+                    int az = Mathf.Clamp(z + Mathf.RoundToInt(dz * k * sign), 0, resZ - 1);
+                    int ai = az * resX + ax;
+
+                    float ground = src.arr[ai];
+
+                    // Valley wall: the ground has climbed a channel depth above the bench.
+                    // Stop here - beyond is hillside, not floodplain, and grading it would
+                    // cut a shelf into the slope (the exact fault the belt must avoid).
+                    if (ground - benchLevel > wallBand) break;
+
+                    // Already at or below the bench (in the trench, or a lower plain): the
+                    // channel carve owns it, nothing to grade.
+                    if (ground <= benchLevel) continue;
+
+                    // Smooth falloff: full pull to the bench near the channel, easing to no
+                    // change at the belt edge, so the plain grades gently rather than
+                    // stepping down.
+                    float t = 1f - (k / (float)halfPixels);
+                    float ease = t * t * (3f - 2f * t);   // smoothstep
+                    float target = Mathf.Lerp(ground, benchLevel, ease);
+
+                    if (target < dst.arr[ai]) dst.arr[ai] = Mathf.Clamp01(target);
+                }
+            }
         }
 
         /// <summary>
@@ -572,6 +806,163 @@ namespace UniverseCreator.Nodes.Selectors
     }
 
     /// <summary>
+    /// Cuts a lake BASIN into the heightfield: a rugged, non-constant-depth bed with a
+    /// wave-cut shelf near the shore, a dish falling to the deep, and low-amplitude bed
+    /// ruggedness. The lake counterpart of River Carve - it authors the terrain the
+    /// water sits in, so a lake placed on this bed is flush to its shore and never
+    /// floats. Reads the Lake Mask (where water stands) and the Water Level (the flat
+    /// surface it fills to); the depth profile runs from 0 at the waterline to full in
+    /// the deep, shaped by the shared WaterBedMath.LakeBasin profile.
+    /// </summary>
+    /// <remarks>
+    /// WHY THE PROFILE IS A DISTANCE FIELD, NOT THE MASK
+    /// The Lake Mask is 1 across the whole interior and only softens at the very edge,
+    /// so it cannot say how far from shore a cell is. A shore-to-deep fraction has to
+    /// come from an actual distance to the waterline. SpreadLinear on the INVERTED mask
+    /// gives distance inward from the dry bank, from which t (0 at the shore, 1 in the
+    /// deep) falls straight out - the same t the runtime WaterCarveLayer feeds
+    /// WaterBedMath.DepthFraction, so the graph guide and the placed lake read the same
+    /// bed shape.
+    ///
+    /// DEEPENING ONLY. Like River Carve, the bed is a Min against the ground: a basin
+    /// is a hole, and lifting ground to meet a shallow bed would fill a valley the lake
+    /// happens to sit in.
+    /// </remarks>
+    [System.Serializable]
+    public class LakeBasinNode : Generator
+    {
+        public override string NodeName { get { return "Lake Basin"; } }
+        public override NodeCategory Category { get { return NodeCategory.Modifier; } }
+        public override string Tooltip { get { return "Cuts a rugged, shelved lake basin into the terrain under a lake mask."; } }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            new Port("Lake Mask", PortType.Matrix, PortDirection.Input),
+            new Port("Water Level", PortType.Matrix, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
+
+        /// <summary>Deepest the basin digs below its surface, as a fraction of world height.</summary>
+        public float maxDepth = 0.03f;
+
+        /// <summary>How far from shore the dish reaches full depth, in metres.</summary>
+        public float shoreRunMetres = 120f;
+
+        /// <summary>
+        /// How much of the shore-to-deep run is the wave-cut shelf (shallow bench).
+        /// Read by the LakeBasin profile - see WaterBedMath.DepthFraction.
+        /// </summary>
+        public float shelfFraction = 0.25f;
+
+        /// <summary>Bed roughness amplitude, as a fraction of world height. 0 is a smooth dish.</summary>
+        public float ruggedness = 0.004f;
+
+        /// <summary>Feature size of the bed roughness, in metres.</summary>
+        public float ruggednessFeatureMetres = 40f;
+
+        /// <summary>Octaves of the bed roughness.</summary>
+        public int ruggednessOctaves = 3;
+
+        /// <summary>Roughness persistence, 0..1.</summary>
+        public float ruggednessPersistence = 0.5f;
+
+        /// <summary>Seed for the bed roughness, so a basin is identical on every rebuild.</summary>
+        public int seed = 12345;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+
+            Matrix lake = GetInputMatrix(tile, 1, stop);
+            if (lake == null) return new Matrix(src);
+            if (stop != null && stop.StopRequested) return null;
+
+            Matrix waterLevel = GetInputMatrix(tile, 2, stop);
+
+            Matrix dst = new Matrix(src);
+
+            int resX = src.rect.size.x;
+            int resZ = src.rect.size.z;
+
+            Vector2 ps = src.PixelSize;
+            float mpp = Mathf.Max(1e-4f, (ps.x + ps.y) * 0.5f);
+
+            // Distance INWARD from the shore, in pixels, capped at the shore run. On the
+            // inverted mask the dry bank is the seed, so the field is 1 at the waterline
+            // falling to 0 in the deep; t is its complement, matching WaterBedMath.
+            float runPixels = Mathf.Max(1f, shoreRunMetres / mpp);
+            Matrix inv = src.Blank();
+            for (int i = 0; i < inv.arr.Length; i++)
+                inv.arr[i] = 1f - Mathf.Clamp01(lake.arr[i]);
+
+            Matrix shoreField = MatrixOperations.SpreadLinear(inv, 0.5f, runPixels);
+            if (stop != null && stop.StopRequested) return null;
+
+            float depth = Mathf.Max(0f, maxDepth);
+            float shelf = Mathf.Clamp(shelfFraction, 0.02f, 0.9f);
+            float rug = Mathf.Max(0f, ruggedness);
+            float originX = src.worldPos.x;
+            float originZ = src.worldPos.z;
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float wet = Mathf.Clamp01(lake.arr[i]);
+                    if (wet <= 0.001f) continue;
+
+                    // t = 0 at the waterline, 1 in the deep. shoreField is 1 at the bank.
+                    float t = Mathf.Clamp01(1f - shoreField.arr[i]);
+
+                    // Shared lake profile: shallow shelf, then a dish. bankExponent is
+                    // unused by the LakeBasin case, so any value passes. Fully qualified:
+                    // WaterBedMath lives in the terrain layer, reached the same way the
+                    // trace node reaches RiverNetworkPlanner.
+                    float frac = UniverseCreator.TerrainSystem.WaterBedMath.DepthFraction(
+                        UniverseCreator.TerrainSystem.BedProfile.LakeBasin, t, shelf, 2f);
+
+                    // Surface the basin is measured DOWN from: the flat fill level where
+                    // wired, else the local ground (a self-consistent hollow).
+                    float surface = waterLevel != null
+                        ? Mathf.Clamp01(waterLevel.arr[i])
+                        : src.arr[i];
+
+                    float bed = surface - depth * frac;
+
+                    // Bed ruggedness, faded out toward the shore so it never breaks the
+                    // waterline into a dashed line of islands (t^2 fade, as the runtime
+                    // carve does).
+                    if (rug > 1e-6f)
+                    {
+                        float fade = t * t;
+                        float worldX = originX + x * ps.x;
+                        float worldZ = originZ + z * ps.y;
+                        float n = UniverseCreator.TerrainSystem.WaterBedMath.Ruggedness(
+                            worldX, worldZ, ruggednessFeatureMetres,
+                            ruggednessOctaves, ruggednessPersistence, seed);
+                        bed += n * rug * fade;
+                    }
+
+                    // Never above its own surface, and deepening only.
+                    if (bed > surface) bed = surface;
+                    dst.arr[i] = Mathf.Clamp01(Mathf.Min(dst.arr[i], bed));
+                }
+            }
+
+            return dst;
+        }
+    }
+
+    /// <summary>
     /// Floods every closed basin to its spill elevation. Port 0 is the water mask,
     /// port 1 the depth, port 2 the surface elevation, so the texture graph can fade
     /// a lake from shallow shore to deep centre without a second solve.
@@ -605,7 +996,12 @@ namespace UniverseCreator.Nodes.Selectors
     {
         public override string NodeName { get { return "Lake Fill"; } }
         public override NodeCategory Category { get { return NodeCategory.Selector; } }
-        public override string Tooltip { get { return "Floods closed basins to their spill elevation. Outputs mask, depth and level."; } }
+        // Role: LAKE SURFACE LEVEL. It computes the flat elevation each basin fills to
+        // (plus the wet mask and depth that fall out of it). It does NOT place or shape a
+        // basin - Lake Basin cuts the rugged bed, and the water body reads this level to
+        // know how high to fill. Kept separate so the surface and the bed have one author
+        // each and cannot disagree about the waterline.
+        public override string Tooltip { get { return "Lake surface level: floods closed basins to their spill elevation. Outputs mask, depth and level."; } }
 
         // Same split as River Fill: the input mask RESTRICTS where lakes may form, the
         // first output is the water that ended up there. One name for both made the

@@ -265,6 +265,26 @@ namespace UniverseCreator.TerrainSystem
                  "inherits from upstream, and the first unset run takes Width.")]
         public List<float> nodeWidthMetres = new List<float>();
 
+        // ---- Waterfalls -----------------------------------------------------
+        //
+        //  A waterfall is placed by hand, not guessed. The author drops a crest
+        //  where the river crosses a scarp; the plunge that follows is measured
+        //  from the SOLVED surface at that point, so the fall is only ever as
+        //  tall as the ground actually drops there - real elevation, no invented
+        //  height. Leave the list empty and the river grows no falls at all.
+
+        [Tooltip("Let the solver find waterfalls on its own from the surface profile, " +
+                 "wherever the water plunges steeply. Off by default: falls are placed " +
+                 "by hand instead (see the crest list), so a river only falls where you " +
+                 "say it does. Turn this on to go back to fully automatic cascades.")]
+        public bool autoDetectWaterfalls = false;
+
+        [Tooltip("World points where you have placed a waterfall crest. Each one grows " +
+                 "a fall downstream for as far as the solved surface keeps dropping, so " +
+                 "the height comes from the terrain, not from a number you type. Managed " +
+                 "from the inspector's Waterfalls list.")]
+        public List<Vector3> waterfallCrests = new List<Vector3>();
+
         // ---- Junctions ------------------------------------------------------
 
         [Tooltip("The body this river runs into: an ocean, a lake, or another river " +
@@ -437,6 +457,15 @@ namespace UniverseCreator.TerrainSystem
                  "The flow area (width x depth) is preserved either way, so this only " +
                  "redistributes the channel, it does not add or remove water.")]
         [Range(0f, 1f)] public float valleyConfinementStrength = 0.6f;
+
+        [Tooltip("Let a river raise a confining bank (a gorge wall) where it crosses a " +
+                 "steep slope and its low bank sits below the water (§14). On real ground " +
+                 "a river there runs in a walled gorge, not hanging over the falling side. " +
+                 "Off keeps the carve cut-only: the water is simply lowered to its lowest " +
+                 "bank instead. Only ever raises a river's own low bank, never a pond's, " +
+                 "and never where the two-bank test says the course is on a hillside - " +
+                 "there the course is moved to the valley floor, not walled in place.")]
+        public bool confineBanks = false;
 
         [Tooltip("On Build, if the mouth of the river comes within this many metres of " +
                  "an ocean or a lake, it joins that body automatically - no need to " +
@@ -1353,6 +1382,8 @@ namespace UniverseCreator.TerrainSystem
             carve.ruggednessPersistence = ruggednessPersistence;
             carve.ruggednessCalmMetres = ruggednessCalmMetres;
 
+            carve.confineBanks = confineBanks && bedSource != BedSource.FlatFloor;
+
             if (!SolveRiverCourse()) return;
 
             for (int i = 0; i < solvedPoints.Count; i++)
@@ -1361,8 +1392,110 @@ namespace UniverseCreator.TerrainSystem
                 carve.courseWidths.Add(Mathf.Max(0.2f, solvedWidths[i]));
                 carve.courseDepths.Add(Mathf.Max(0.05f, solvedDepths[i]));
                 carve.courseSurfaceY.Add(solvedSurfaceY[i]);
+
+                // §14: the confining wall target, per node. NegInf means "not confined
+                // here" - the carve leaves the bank cut-only. A finite value is the
+                // elevation the low bank is raised to. ConfineTargetAt runs the two-bank
+                // test and only returns finite where a genuine gorge is called for; a
+                // hillside station returns NegInf and is handled by the course solver's
+                // valley seek, not walled in place.
+                carve.courseConfineY.Add(
+                    carve.confineBanks ? ConfineTargetAt(i) : float.NegativeInfinity);
             }
         }
+
+        // The wall stands the water's freeboard above the surface, in local channel
+        // depths - the same dry height the floodplain sole is held at, so a confined
+        // reach and an open one keep the same relationship between bank top and water.
+        private const float ConfineFreeboardDepths = 0.5f;
+
+        /// <summary>
+        /// The two-bank test and the confining-wall target for station i (§14, §14a).
+        ///
+        /// Reads the ground rising away from the course on BOTH sides, perpendicular to
+        /// flow, a few channel-widths out - exactly as ValleyConfinement does. The
+        /// real-world rule the user set:
+        ///
+        ///   both banks RISE            -> a valley/low line. If the rise is steep enough
+        ///                                 to be a gorge AND the low bank sits below the
+        ///                                 water, return the wall target (surface +
+        ///                                 freeboard) so the carve builds the gorge wall.
+        ///                                 A gentle valley returns NegInf - the floodplain
+        ///                                 sag already shapes it, no wall needed.
+        ///
+        ///   one bank FALLS away        -> the course is on a HILLSIDE, not a valley. A
+        ///                                 wall here would be a dam on a slope; the water
+        ///                                 would break the falling bank in real flow. So
+        ///                                 return NegInf: no wall. The station belongs on
+        ///                                 the valley floor and the course solver's valley
+        ///                                 seek is what moves it there.
+        ///
+        /// Returns NegInf whenever a wall must not be built, a finite elevation only for a
+        /// true confined reach whose water would otherwise hang over a low bank.
+        /// </summary>
+        private float ConfineTargetAt(int i)
+        {
+            if (solvedPoints == null || i < 0 || i >= solvedPoints.Count)
+                return float.NegativeInfinity;
+
+            Vector3 at = solvedPoints[i];
+            float surf = (solvedSurfaceY != null && i < solvedSurfaceY.Length)
+                ? solvedSurfaceY[i] : at.y;
+            float width = (solvedWidths != null && i < solvedWidths.Count)
+                ? Mathf.Max(0.5f, solvedWidths[i]) : 1f;
+
+            // Bank normal from the neighbours, so a bend measures the curve's banks.
+            int n = solvedPoints.Count;
+            Vector3 a = solvedPoints[i > 0 ? i - 1 : 0];
+            Vector3 b = solvedPoints[i < n - 1 ? i + 1 : n - 1];
+            float tx = b.x - a.x, tz = b.z - a.z;
+            float len = Mathf.Sqrt(tx * tx + tz * tz);
+            if (len < 1e-4f) return float.NegativeInfinity;
+            float nx = -tz / len, nz = tx / len;
+
+            // Probe a valley's width out, past the channel's own dug banks, so what is
+            // read is the surrounding land and not the trench.
+            float reach = Mathf.Clamp(width * 2.5f, 6f, 120f);
+            float centre = SampleGround(at.x, at.z);
+            float leftG = SampleGround(at.x + nx * reach, at.z + nz * reach);
+            float rightG = SampleGround(at.x - nx * reach, at.z - nz * reach);
+
+            float leftRise = leftG - centre;    // + rises away, - falls away
+            float rightRise = rightG - centre;
+
+            // §14a two-bank test: a valley has BOTH banks rising. If either bank keeps
+            // falling away, this is a hillside - no wall (the course belongs lower, and
+            // the valley seek moves it). A small deadband so dead-level ground does not
+            // read as "falling".
+            float dead = 0.25f;
+            if (leftRise < dead || rightRise < dead) return float.NegativeInfinity;
+
+            // Both rise: it is a valley. Is it steep enough to be a confined gorge? The
+            // gentler of the two walls sets the confinement, and it must surpass the
+            // waterfall-scale angle to earn a wall - below it the floodplain sag is the
+            // right, gentler shape.
+            float slope = Mathf.Min(leftRise, rightRise) / reach;   // rise over run
+            if (slope < ValleyConfineGrade) return float.NegativeInfinity;
+
+            // A wall is only needed where a bank actually sits below the water; if both
+            // banks already stand above the surface the ground holds the river and the
+            // carve's cut-only rule is enough.
+            float half = 0.5f * width;
+            float bevel = Mathf.Max(0f, shoreBevelMetres);
+            float lb = SampleGround(at.x + nx * (half + bevel), at.z + nz * (half + bevel));
+            float rb = SampleGround(at.x - nx * (half + bevel), at.z - nz * (half + bevel));
+            float lowBank = Mathf.Min(lb, rb);
+            if (lowBank >= surf) return float.NegativeInfinity;
+
+            float depth = (solvedDepths != null && i < solvedDepths.Count)
+                ? Mathf.Max(0.5f, solvedDepths[i]) : 1f;
+            return surf + depth * ConfineFreeboardDepths;
+        }
+
+        // The cross-valley grade (rise/run) at or above which a valley reads as a
+        // confined gorge that earns a raised wall. Matches WaterfallGrade so "steep
+        // enough to fall" and "steep enough to wall" are the one real-world angle.
+        private const float ValleyConfineGrade = 0.28f;   // ~15.6 deg
 
         // =====================================================================
         //  THE SOLVED COURSE
@@ -1637,7 +1770,11 @@ namespace UniverseCreator.TerrainSystem
             solvedWidths = widths;
             solvedDepths = depths;
             solvedSurfaceY = surf;
-            solvedCascades = DetectCascades(world, surf, widths);
+            // Falls are placed by hand: the author's crests, measured against this
+            // freshly solved surface, unless they opted back into automatic detection.
+            solvedCascades = autoDetectWaterfalls
+                ? DetectCascades(world, surf, widths)
+                : BuildManualCascades(world, surf, widths);
 
             return true;
         }
@@ -1704,6 +1841,79 @@ namespace UniverseCreator.TerrainSystem
                 }
 
                 i = j; // resume past the reach just consumed
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Builds the falls the author placed by hand. Each crest in
+        /// <see cref="waterfallCrests"/> is snapped to the nearest solved station, then the
+        /// reach is grown downstream for as long as the surface keeps dropping. The drop,
+        /// run and width all come from the solved profile, never from a typed number.
+        ///
+        /// The author picks WHERE; the terrain decides WHETHER. A crest only becomes a fall
+        /// when the surface actually plunges steeper than <see cref="WaterfallGrade"/> (the
+        /// real-world angle gate) somewhere in the reach - exactly the same physical test
+        /// the automatic detector applies. A crest laid on gentle or flat water grows no
+        /// fall, however the author meant it, because water does not fall where the ground
+        /// does not. The fall is then only ever as tall as the ground truly drops.
+        /// </summary>
+        private List<WaterfallReach> BuildManualCascades(List<Vector3> pts, float[] surf, List<float> w)
+        {
+            var found = new List<WaterfallReach>();
+            if (pts == null || surf == null || pts.Count < 2 || waterfallCrests == null) return found;
+
+            int n = Mathf.Min(pts.Count, surf.Length);
+
+            foreach (var crest in waterfallCrests)
+            {
+                // Snap the author's point to the nearest station on the solved course.
+                int start = 0;
+                float best = float.MaxValue;
+                for (int k = 0; k < n; k++)
+                {
+                    float dx = pts[k].x - crest.x;
+                    float dz = pts[k].z - crest.z;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 < best) { best = d2; start = k; }
+                }
+                if (start >= n - 1) start = n - 2; // a crest cannot be the very last station
+
+                // Grow downstream while the surface keeps falling, so one placed crest
+                // spans the whole plunge instead of clipping at the first station. Track
+                // the steepest single segment so the angle gate below tests the real
+                // scarp, not an average diluted by a gentle run-out.
+                float totalDrop = 0f;
+                float totalRun = 0f;
+                float steepestGrade = 0f;
+                int j = start;
+                while (j < n - 1)
+                {
+                    float r2 = Horizontal(pts[j], pts[j + 1]);
+                    float d2 = surf[j] - surf[j + 1];
+                    if (r2 <= 0.001f || d2 <= 0f) break;
+                    float grade = d2 / r2;
+                    if (grade > steepestGrade) steepestGrade = grade;
+                    totalDrop += d2;
+                    totalRun += r2;
+                    j++;
+                }
+
+                // The angle gate. The surface must plunge steeper than WaterfallGrade
+                // somewhere in the reach for this crest to read as a fall - the same
+                // real-world test the auto-detector uses. Below the angle it is just
+                // fast water and gets no foam column, no matter that a crest sits here.
+                if (totalDrop <= 0f || steepestGrade < WaterfallGrade) continue;
+
+                found.Add(new WaterfallReach
+                {
+                    crest = new Vector3(pts[start].x, surf[start], pts[start].z),
+                    foot = new Vector3(pts[j].x, surf[j], pts[j].z),
+                    dropMetres = totalDrop,
+                    runMetres = totalRun,
+                    widthMetres = (start < w.Count) ? Mathf.Max(0.5f, w[start]) : 1f,
+                });
             }
 
             return found;
@@ -2085,6 +2295,29 @@ namespace UniverseCreator.TerrainSystem
 
             for (int i = 0; i < ring.Count; i++) carve.ringPoints.Add(ring[i]);
 
+            // PER-RING-NODE DEPTH (the rugged basin). A Polygon lake's ring points are
+            // its outline points in order (WorldShoreRing returns ToWorld(outline)), so
+            // nodeDepthMetres[i] describes ring node i: a border node over the deep
+            // trough asks for a large depth, one on a shelf a small one, and the carve
+            // eases between them round the shore (RingDepthAt). Same carry-forward rule
+            // as a river's node depths - 0 means "not set here", inheriting the last
+            // authored value and finally digDepthMetres - so a designer types depths
+            // only where the bed actually changes. Left empty for a Rectangle (four
+            // corners, no meaningful per-node bed) and when nothing is authored, and
+            // then RingDepthAt falls back to the flat digDepthMetres exactly as before.
+            if (!damGoverned && shape == ShapeMode.Polygon &&
+                nodeDepthMetres != null && nodeDepthMetres.Count > 0 &&
+                ring.Count == (outline != null ? outline.Count : -1))
+            {
+                float carried = Mathf.Max(0.05f, digDepthMetres);
+                for (int i = 0; i < ring.Count; i++)
+                {
+                    float v = i < nodeDepthMetres.Count ? nodeDepthMetres[i] : 0f;
+                    if (v > 1e-4f) carried = v;
+                    carve.ringDepths.Add(carried);
+                }
+            }
+
             // Keep large projections inside the ring as islands; the carve steps around
             // them and the water routes around them. Small ones carry no mask and are
             // dug to the bed. The ocean is exempt: its "islands" are continents above
@@ -2328,7 +2561,13 @@ namespace UniverseCreator.TerrainSystem
             List<Vector3> worldPoints = ToWorld(course);
             RiverCourseSolver.GroundSampler ground = SampleGround;
 
-            RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12);
+            // Prime the join candidates so the submerged floor knows where the sea is:
+            // the Refit button (§8) must not pull the channel below the ocean/lake it
+            // drains to, and must not move the source or the mouth.
+            RefreshJoinCandidates();
+
+            RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12,
+                                           0f, true, SubmergedFloorY());
             RiverCourseSolver.Relax(worldPoints, 2);
 
             // Both passes move points in XZ only, so each one's stored elevation now
@@ -2422,7 +2661,7 @@ namespace UniverseCreator.TerrainSystem
                 float debowReach = Mathf.Clamp(Mathf.Max(0.5f, widthMetres) * DebowWidths,
                                                 DebowMinMetres, DebowMaxMetres);
                 RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8,
-                                               DebowDeadbandMetres);
+                                               DebowDeadbandMetres, true, SubmergedFloorY());
                 RiverCourseSolver.Relax(result, 1);
             }
 
@@ -2432,8 +2671,13 @@ namespace UniverseCreator.TerrainSystem
 
                 if (fitToValley)
                 {
+                    // holdEnds + submerged floor (§8): the wide valley seek must never move
+                    // the source or the mouth, and must never pull the channel onto ground
+                    // below the sea it drains to - the two ways Fit-to-Valley used to drag
+                    // a river under the ocean.
                     RiverCourseSolver.SnapToValley(result, ground,
-                                                   valleySearchMetres, valleyPull, 12);
+                                                   valleySearchMetres, valleyPull, 12,
+                                                   0f, true, SubmergedFloorY());
                     RiverCourseSolver.Relax(result, 2);
                 }
 
@@ -2984,6 +3228,31 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// The world Y of the standing water this river drains toward - the highest
+        /// ocean/lake surface among the join candidates. The valley seek uses it as the
+        /// submerged floor: it must never pull the channel onto ground below this, or the
+        /// river would be seated under the sea. Returns NegativeInfinity when no ocean or
+        /// lake is in the scene, which disables the exclusion (there is nothing to sink
+        /// under).
+        /// </summary>
+        private float SubmergedFloorY()
+        {
+            if (joinCandidates == null) return float.NegativeInfinity;
+
+            float floorY = float.NegativeInfinity;
+            for (int i = 0; i < joinCandidates.Length; i++)
+            {
+                UCWaterBody other = joinCandidates[i];
+                if (other == null || other == this) continue;
+                if (other.kind != WaterBodyKind.Ocean && other.kind != WaterBodyKind.Lake) continue;
+
+                float s = other.SurfaceWorldY();
+                if (s > floorY) floorY = s;
+            }
+            return floorY;
+        }
+
+        /// <summary>
         /// Whether this point has reached standing water the river can join. Handed to
         /// the descent walk, which stops there and reports ReachedWater.
         ///
@@ -3036,6 +3305,117 @@ namespace UniverseCreator.TerrainSystem
             if (world == null || world.Chunks == null) return;
 
             world.Chunks.ReapplyCarves();
+        }
+
+        /// <summary>
+        /// Every joinable water body whose edge lies within <see cref="autoConnectMetres"/>
+        /// of one of this body's endpoints - the "tick-on-touch" detector behind the
+        /// inspector's Connections list (§6). A river's endpoints are its course head and
+        /// mouth; a level body's are its ring points. The ocean is never returned as a
+        /// thing to TICK: it connects automatically from the river side and carries no
+        /// child connection node. Read-only: it wires nothing, it only reports what is in
+        /// reach so the inspector can offer the tick.
+        /// </summary>
+        public List<UCWaterBody> TouchingJoinables()
+        {
+            List<UCWaterBody> touching = new List<UCWaterBody>();
+            if (autoConnectMetres <= 0f) return touching;
+
+            RefreshJoinCandidates();
+            if (joinCandidates == null) return touching;
+
+            // This body's endpoints, world space.
+            List<Vector3> ends = new List<Vector3>(2);
+            if (shape == ShapeMode.RiverSpline)
+            {
+                List<Vector3> line = ToWorld(course);
+                if (line != null && line.Count >= 2)
+                {
+                    ends.Add(line[0]);
+                    ends.Add(line[line.Count - 1]);
+                }
+            }
+            else
+            {
+                List<Vector3> ring = WorldShoreRing();
+                if (ring != null) ends.AddRange(ring);
+            }
+            if (ends.Count == 0) return touching;
+
+            float reach = Mathf.Max(0f, autoConnectMetres);
+
+            for (int c = 0; c < joinCandidates.Length; c++)
+            {
+                UCWaterBody other = joinCandidates[c];
+                if (!CanJoin(other)) continue;
+
+                // The ocean auto-connects from the river side and gets no child node.
+                if (other.kind == WaterBodyKind.Ocean) continue;
+
+                bool near = false;
+                for (int e = 0; e < ends.Count && !near; e++)
+                {
+                    Vector3 edge;
+                    float sY, dJoin;
+                    if (!other.NearestEdgePoint(ends[e], joinBlendMetres, out edge, out sY, out dJoin))
+                        continue;
+                    float gap = new Vector2(edge.x - ends[e].x, edge.z - ends[e].z).magnitude;
+                    if (gap <= reach) near = true;
+                }
+
+                if (near && !touching.Contains(other)) touching.Add(other);
+            }
+
+            return touching;
+        }
+
+        /// <summary>True when this body currently has an authored join to <paramref name="other"/>.</summary>
+        public bool IsJoinedTo(UCWaterBody other)
+        {
+            return other != null && (joinDownstreamTo == other || joinUpstreamFrom == other);
+        }
+
+        /// <summary>
+        /// Wires (or clears) an authored join to <paramref name="other"/> from the
+        /// inspector tick. A river joins with the END nearest the target - mouth
+        /// downstream, head upstream - so the tick sets the same field the manual
+        /// dropdown does. A lake being ticked against a river wires the RIVER's field
+        /// instead, because a river carries the junction and a lake does not.
+        /// </summary>
+        public void SetJoinTicked(UCWaterBody other, bool ticked)
+        {
+            if (other == null) return;
+
+            if (shape == ShapeMode.RiverSpline)
+            {
+                if (!ticked)
+                {
+                    if (joinDownstreamTo == other) joinDownstreamTo = null;
+                    if (joinUpstreamFrom == other) joinUpstreamFrom = null;
+                    return;
+                }
+
+                List<Vector3> line = ToWorld(course);
+                if (line == null || line.Count < 2) return;
+
+                Vector3 head = line[0];
+                Vector3 mouth = line[line.Count - 1];
+
+                Vector3 edgeH, edgeM;
+                float sY, dJ;
+                float dHead = other.NearestEdgePoint(head, joinBlendMetres, out edgeH, out sY, out dJ)
+                    ? new Vector2(edgeH.x - head.x, edgeH.z - head.z).magnitude : float.MaxValue;
+                float dMouth = other.NearestEdgePoint(mouth, joinBlendMetres, out edgeM, out sY, out dJ)
+                    ? new Vector2(edgeM.x - mouth.x, edgeM.z - mouth.z).magnitude : float.MaxValue;
+
+                if (dMouth <= dHead) joinDownstreamTo = other;
+                else joinUpstreamFrom = other;
+            }
+            else if (other.shape == ShapeMode.RiverSpline)
+            {
+                // Ticking a river from a lake: wire the river's nearest end to this lake.
+                other.SetJoinTicked(this, ticked);
+            }
         }
 
         // =====================================================================
@@ -3131,11 +3511,13 @@ namespace UniverseCreator.TerrainSystem
 
             if (generateVolume) AttachVolume(body);
 
-            // Natural waterfalls (J.2). A river whose solved surface plunges down a
-            // steep reach grows foam and spray there, driven by the drop the solve
-            // measured - no marker, no authored flag. Attached only when the course
-            // actually has falls and removed when it does not, the same reversible
-            // sync the dam spillway uses. Additive: the ribbon is untouched.
+            // Waterfalls (J.2). By default the author places a crest where the river
+            // crosses a scarp and the foam and spray are driven by the drop the solve
+            // measured there - the height is the terrain's, never a typed number. With
+            // autoDetectWaterfalls on, the solver finds the steep reaches itself instead.
+            // Either way the effect is attached only when the course actually has falls
+            // and removed when it does not, the same reversible sync the dam spillway
+            // uses. Additive: the ribbon is untouched.
             if (shape == ShapeMode.RiverSpline && solvedCascades != null && solvedCascades.Count > 0)
                 UCWaterfallEffect.Ensure(this);
             else
@@ -3793,6 +4175,51 @@ namespace UniverseCreator.TerrainSystem
             Bounds worldBounds = new Bounds();
             bool boundsStarted = false;
 
+            // CROSS-BODY SEAM (§6). BlendJunction already welds the SURFACE-Y of the two
+            // bodies at a junction, but each surface's alpha still fades to 0 at its own
+            // waterline, so where a river meets a lake or the sea the two half-transparent
+            // edges overlap and read as a seam - "floating water" at the join. seamWeight
+            // is 1 at a joined end and eases to 0 a blend-length back up the course
+            // (smoothstep, the same curve BlendJunction uses for the height weld), and it
+            // floors the vertex alpha below so the river stays opaque right up to the body
+            // it joins. The two surfaces then read as one continuous sheet regardless of
+            // the join angle. 0 everywhere when neither end joins, so an isolated river is
+            // unchanged.
+            float[] seamWeight = new float[count];
+            {
+                float blend = Mathf.Max(0.01f, joinBlendMetres);
+                bool joinsDown = ResolveJoin(true) != null;
+                bool joinsUp = ResolveJoin(false) != null;
+
+                if (joinsDown)
+                {
+                    float travelled = 0f;
+                    for (int i = count - 1; i >= 0; i--)
+                    {
+                        if (i < count - 1)
+                            travelled += new Vector2(solvedPoints[i].x - solvedPoints[i + 1].x,
+                                                     solvedPoints[i].z - solvedPoints[i + 1].z).magnitude;
+                        if (travelled > blend) break;
+                        float w = Mathf.SmoothStep(0f, 1f, 1f - travelled / blend);
+                        if (w > seamWeight[i]) seamWeight[i] = w;
+                    }
+                }
+
+                if (joinsUp)
+                {
+                    float travelled = 0f;
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (i > 0)
+                            travelled += new Vector2(solvedPoints[i].x - solvedPoints[i - 1].x,
+                                                     solvedPoints[i].z - solvedPoints[i - 1].z).magnitude;
+                        if (travelled > blend) break;
+                        float w = Mathf.SmoothStep(0f, 1f, 1f - travelled / blend);
+                        if (w > seamWeight[i]) seamWeight[i] = w;
+                    }
+                }
+            }
+
             float surfSum = 0f;
             Vector2 flowSum = Vector2.zero;
             float deepest = 0f;
@@ -3872,6 +4299,13 @@ namespace UniverseCreator.TerrainSystem
 
                     Color c = colour;
                     c.a = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(d / feather));
+
+                    // Cross-body seam: hold the surface opaque toward a joined end so the
+                    // river's edge does not fade against the body it meets. Raises the
+                    // shore alpha, never lowers it, so open water is untouched.
+                    if (seamWeight[i] > 0f)
+                        c.a = Mathf.Max(c.a, seamWeight[i]);
+
                     body.colors[v] = c;
 
                     if (!boundsStarted) { worldBounds = new Bounds(world, Vector3.zero); boundsStarted = true; }
