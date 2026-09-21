@@ -863,55 +863,9 @@ namespace UniverseCreator.TerrainSystem
             else if (trace != null) native.seaLevel = trace.seaLevel;
             else if (lakeFill != null) native.seaLevel = lakeFill.seaLevel;
 
-            native.targetRiverCount = wantRivers ? NativeRiverCount(world, native.channelHeadArea) : 0;
             native.generateOcean = wantOcean;
 
             return native;
-        }
-
-        /// <summary>
-        /// How many trunk rivers a world of this size supports, by drainage math.
-        /// </summary>
-        /// <remarks>
-        /// Major valleys are spaced by the catchment each one drains: a trunk river
-        /// needs TrunkCatchmentMultiple channel-heads' worth of land above it
-        /// (1 km^2 with the planner's own figures), and a catchment of that area is
-        /// about its square root across - a kilometre. So trunk rivers land about a
-        /// kilometre apart across the world, and the count is the world's width
-        /// divided by that spacing. Both numbers are the planner's own, so the rivers
-        /// this asks for are rivers it can actually find catchments for.
-        ///
-        /// The channel-head area is passed in rather than read from the constant,
-        /// because the graph's own River Network Trace may state a smaller one for a
-        /// small world. Spacing follows it: halve the catchment a channel needs and its
-        /// valleys sit about seven tenths as far apart, so the same world carries more
-        /// of them. Asking for the constant's count while the planner traced at the
-        /// node's figure would leave a world full of qualifying valleys with one river
-        /// in it.
-        ///
-        /// Spacing is linear, not areal, which is why this is not a percentage of the
-        /// chunk count the way the lakes are: a lake occupies a basin - an area - while
-        /// a river crosses the world. Doubling the world's side gives four times the
-        /// lakes and twice the rivers, which is what a map shows.
-        ///
-        /// Clamped to 1..12. A world too small to hold a full catchment still gets the
-        /// one river its valley can carry, and no world is handed more trunk rivers
-        /// than the 40-80 m band can fit across it without merging into a floodplain.
-        /// </remarks>
-        private static int NativeRiverCount(UniverseCreatorObject world,
-                                            float channelHeadAreaSquareMetres)
-        {
-            if (world == null) return 1;
-
-            float headArea = channelHeadAreaSquareMetres > 0f
-                ? channelHeadAreaSquareMetres
-                : RiverNetworkPlanner.ChannelHeadAreaSquareMetres;
-
-            float worldSide = world.GetChunkSize() * Mathf.Max(1, world.chunkCountPerSide);
-            float trunkCatchment = headArea * RiverNetworkPlanner.TrunkCatchmentMultiple;
-            float spacing = Mathf.Sqrt(Mathf.Max(1f, trunkCatchment));
-
-            return Mathf.Clamp(Mathf.RoundToInt(worldSide / spacing), 1, 12);
         }
 
         /// <summary>How many Hydrology Spawners reach an Output. Drives the readout.</summary>

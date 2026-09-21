@@ -282,6 +282,14 @@ namespace UniverseCreator.Editor.Diagnostics
             try
             {
                 RiverNetworkTraceNode trace = new RiverNetworkTraceNode();
+
+                // A fingerprint, not a plausible default. ResolveHydrology copies this
+                // across ONLY from a trace the walk actually reached, so finding it on
+                // the far side is proof of reachability and not of a shared default.
+                // It used to be targetRiverCount that carried that proof; that field is
+                // gone with procedural river placement, so the settings the spawner
+                // really does inherit carry it instead.
+                trace.maxChannels = 321;
                 WeatherOutputNode weather = new WeatherOutputNode();
 
                 reached.nodes.Add(trace);
@@ -296,11 +304,11 @@ namespace UniverseCreator.Editor.Diagnostics
 
                 HydrologyNode native = UCWaterSystemManager.ResolveHydrology(reached, null);
 
-                Check(native != null && native.targetRiverCount > 0,
+                Check(native != null && native.maxChannels == 321,
                       "a River Network Trace wired into a Weather Output - which implements "
                       + "IOutputNode without deriving from OutputNode, exactly as the evaluator's "
                       + "own seed allows - resolved to "
-                      + (native == null ? "no water at all" : "a spawner asking for no rivers")
+                      + (native == null ? "no water at all" : "a spawner that never inherited the trace's settings")
                       + ". The evaluator builds that graph in full, so a walk that cannot see the "
                       + "terminal reports no water on a world that was just carved for it, and "
                       + "the caller sweeps every river, lake and ocean out of the scene");
@@ -394,8 +402,6 @@ namespace UniverseCreator.Editor.Diagnostics
                 node.targetLakeCount = 2;
                 node.lakeChunkPercentage = 0f;         // the count must stand on its own
                 node.lakeOutletChunkPercentage = 0f;
-                node.targetRiverCount = 1;
-                node.enableDistributaries = false;
                 node.drainageResolution = 256;
 
                 HydrologyGenerator.GenerateFromNode(uc, node);

@@ -3028,16 +3028,11 @@ rivers should begin.</p>
 <thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
 <tr><td colspan="3"><strong>Hydrology Counts</strong></td></tr>
-<tr><td><code>Target River Count</code></td><td>3</td><td>Number of trunk rivers to place. Tributaries are counted separately. Trunk rivers only &mdash; tributaries are traced onto each trunk and are not counted here, so a world set to 3 normally carries more than three visible watercourses.</td></tr>
 <tr><td><code>Target Lake Count</code></td><td>0</td><td>Lakes to place. 0 uses Lake Coverage instead; a typed count overrides it. <strong>Not a ceiling.</strong> A typed count replaces the coverage density outright rather than being clamped down to it; the older build took the smaller of the two, so on a world whose percentage rounded to zero the number you typed was silently discarded. What still limits the result is the ground &mdash; see <a href="#hydro-supply">why you can get fewer than you asked for</a>.</td></tr>
 <tr><td colspan="3"><strong>Lake Coverage</strong></td></tr>
 <tr><td><code>Lake Chunk Percentage</code></td><td>0.24 (0..1)</td><td>Fraction of terrain chunks eligible for procedural lakes. Used only while <code>Target Lake Count</code> is 0. Areal, not linear: doubling the world's side gives four times the lakes.</td></tr>
 <tr><td colspan="3"><strong>Lake Outflow</strong></td></tr>
 <tr><td><code>Lake Outlet Chunk Percentage</code></td><td>0.08 (0..1)</td><td>Fraction of terrain chunks that get a lake drain-out river. Capped at the lake count &mdash; an outlet is a lake's overflow, so there can never be more of them than there are lakes.</td></tr>
-<tr><td colspan="3"><strong>River Networks</strong></td></tr>
-<tr><td><code>Min Tributaries</code></td><td>3</td><td>Merge this many small rivers to form a Big river.</td></tr>
-<tr><td><code>Enable Distributaries</code></td><td>on</td><td>Enable river deltas / distributaries when a big river meets the ocean.</td></tr>
-<tr><td><code>Max Distributaries</code></td><td>4</td><td>Most branches one delta may split into. Ignored when distributaries are off.</td></tr>
 <tr><td colspan="3"><strong>Ocean</strong></td></tr>
 <tr><td><code>Generate Ocean</code></td><td>on</td><td>Spawn one world-sized ocean at the world-edge falloff level, clipped at the shore. Off does <em>not</em> remove the waterline; see <a href="#hydro-datum">sea level without an ocean</a>.</td></tr>
 <tr><td colspan="3"><strong>Mask Solve</strong></td></tr>
@@ -3063,7 +3058,7 @@ rivers should begin.</p>
 <p>The same terrain therefore ranks the same basins and traces the same guide every time, which is what lets a hand-drawn course and a hand-placed lake survive a Regenerate.</p>
 <h5 id="hydro-size">How wide a river comes out</h5>
 <p>Size follows hydraulic geometry, not taste. Leopold and Maddock (1953) measured bankfull width against discharge across real river systems and found width scaling as about the square root of discharge; Hack's law puts discharge at about the 0.8 power of drainage area. Composed, that gives the exponent this system uses: <strong>width &prop; area<sup>0.4</sup></strong>, clamped to <strong>4&ndash;80 m</strong>.</p>
-<p>So a channel is 4 m wide where it first qualifies as one and grows towards 80 m as its catchment grows, each reach graded by the area actually draining through it rather than by its rank in a list. A <em>trunk</em> &mdash; a course that joins no other &mdash; is floored at 40 m, so the rivers the node count asks for measure inside the 40&ndash;80 m band while their tributaries stay honestly smaller. This is the correction to earlier editions, which gave the trunk band alone and left the impression that every river was one of two sizes.</p>
+<p>So a channel is 4 m wide where it first qualifies as one and grows towards 80 m as its catchment grows, each reach graded by the area actually draining through it rather than by its rank in a list. A <em>trunk</em> &mdash; a course that joins no other &mdash; is floored at 40 m, so the trunk rivers you draw measure inside the 40&ndash;80 m band while their tributaries stay honestly smaller. This is the correction to earlier editions, which gave the trunk band alone and left the impression that every river was one of two sizes.</p>
 <p>Downstream of that: width-to-depth runs at about <strong>18:1</strong>, which is the alluvial-channel figure; the last <strong>15&nbsp;%</strong> of a course behaves as its estuary and flares <strong>&times;2.2</strong>; a delta is earned rather than configured, at Strahler order <strong>2</strong> or above &mdash; that is, where two comparable branches actually join; a delta's arms together measure <strong>1.4&times;</strong> the trunk they split from.</p>
 <p>The mask and the object are stamped at the same widths from the same solve, which is the whole reason <code>River Mask</code> is worth wiring into <code>River Carve</code>: the trench is cut to the width of the river that will sit in it. A mask narrower than its river leaves water standing over an uncarved bank; a mask wider leaves a dry trench beside the water.</p>
 <h5 id="hydro-headarea">Channel head area on a small world</h5>
@@ -3084,7 +3079,7 @@ rivers should begin.</p>
 <ul>
 <li>A lake must be a genuine basin holding at least <strong>60 m&sup2;</strong> of water &mdash; a patch about eight metres across &mdash; and standing deeper than <code>Min Lake Depth</code>. A basin that fails either test is passed over rather than inflated into a puddle, and one that could hold more than 90000 m&sup2; is filled to that and no further, because the water beyond it belongs to the ocean pass.</li>
 <li>A river must have a mouth that drains into standing water, and a catchment above it that clears the channel-head area.</li>
-<li>A delta needs <code>Enable Distributaries</code> on <em>and</em> a course that reaches the minimum Strahler order. <code>Max Distributaries</code> is an upper bound on the arms, not a request for them.</li>
+<li>A delta appears where a trunk-order reach meets standing water: the network trace splits the mouth into distributary arms on its own, and River Carve cuts them with the rest of the network. There is no toggle to turn on &mdash; a course that reaches the sea at big-river width gets a delta, one that does not, does not.</li>
 </ul>
 <p>Any shortfall is said out loud. A pass that places fewer lakes than it was asked for logs how many it placed, how many candidate basins were rejected, and which of the two tests they failed &mdash; because &ldquo;I asked for eight and got five&rdquo; is otherwise a mystery rather than a fact about the terrain.</p>
 <p><strong>A body that produced no surface is reported too.</strong> If a water body is built but raises no mesh, the pass warns, names the height its plane stands at, and <em>leaves the object in place</em> so its settings can be inspected. For a lake or the ocean that means no ground inside its footprint lies below that height, so there is no basin for the water to stand in; for a river it means the course was too short or too narrow to raise a mesh. This closes the case where water appeared to have been created and nothing was visible, with no message either way.</p>
@@ -9168,7 +9163,7 @@ Min, Max.</p>
 </ul></div>
 <!--BODY-->
 <h3 id="run-self-test" data-title="Run Self Test">Run Self Test</h3>
-<p><strong>Tools &#9656; Universe Creator &#9656; Run Self Test.</strong> Exercises node evaluation, graph serialisation, chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the shoreline conformer and the scatter placer, the Module 2 water chain enumerated below, and the whole Living-World layer. It writes the result to the console. The most recent passing run recorded here reports <strong>14588 checks</strong>.</p>
+<p><strong>Tools &#9656; Universe Creator &#9656; Run Self Test.</strong> Exercises node evaluation, graph serialisation, chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the shoreline conformer and the scatter placer, the Module 2 water chain enumerated below, and the whole Living-World layer. It writes the result to the console. The most recent passing run recorded here reports <strong>14602 checks</strong>.</p>
 <p>It <strong>never opens a dialog</strong>, so it is safe in batch mode:</p>
 <pre data-lang="shell"><code>Unity.exe -batchmode -quit -silent-crashes \
   -projectPath &quot;&lt;project&gt;&quot; \
@@ -9177,7 +9172,7 @@ Min, Max.</p>
 </code></pre>
 <p>The last three lines of the log are the result:</p>
 <pre data-lang="console"><code>=== UC SELF TEST: PASS ===
-checks run : 14588
+checks run : 14602
 failures   : 0
 </code></pre>
 <p><strong>The process exit code is not a reliable pass signal.</strong> Grep the log for <code>error CS</code> and for the self-test's own failure lines. A batch run that reports success while the log contains compile errors means Unity never got as far as the test.</p>

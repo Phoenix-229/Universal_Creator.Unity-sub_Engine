@@ -55,10 +55,17 @@ namespace UniverseCreator.Nodes.Creators
             get { return "Spawns River, Lake and Ocean bodies, and outputs the masks that describe them."; }
         }
 
-        [Header("Hydrology Counts")]
-        [Tooltip("Number of trunk rivers to place. Tributaries are counted separately.")]
-        public int targetRiverCount = 3;
+        // NO RIVER COUNT LIVES HERE ANY MORE
+        // Rivers are placed by the author, not by a number typed into a spawner.
+        // targetRiverCount, minTributaries, enableDistributaries and maxDistributaries
+        // were all write-only: the resolver filled them in and nothing downstream ever
+        // read one, so the Inspector offered four river controls that changed nothing.
+        // What actually decides the channel network is the drainage solve below -
+        // Channel Head Area sets where a channel begins, Max Channels caps how many are
+        // traced, and the width of each one comes from its own catchment. Those are the
+        // real controls and they are the only ones shown.
 
+        [Header("Hydrology Counts")]
         // AN EXPLICIT COUNT IS AN INSTRUCTION, NOT A CEILING
         // Zero hands the decision to Lake Coverage below, which sizes the lake set
         // from the world's area. Any positive value replaces that density outright -
@@ -86,16 +93,6 @@ namespace UniverseCreator.Nodes.Creators
         [Range(0f, 1f)]
         [Tooltip("Fraction of terrain chunks that get a lake drain-out river.")]
         public float lakeOutletChunkPercentage = 0.08f;
-
-        [Header("River Networks")]
-        [Tooltip("Merge this many small rivers to form a Big river.")]
-        public int minTributaries = 3;
-
-        [Tooltip("Enable river deltas / distributaries when a big river meets the ocean.")]
-        public bool enableDistributaries = true;
-
-        [Tooltip("Most branches one delta may split into. Ignored when distributaries are off.")]
-        public int maxDistributaries = 4;
 
         [Header("Ocean")]
         // One world-sized sea whose level sits at the world-edge falloff. It is a flat

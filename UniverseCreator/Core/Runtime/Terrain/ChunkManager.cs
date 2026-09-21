@@ -58,6 +58,28 @@ namespace UniverseCreator.TerrainSystem
             public volatile bool workerDone;
             public bool applied;
 
+            // Which dispatch a worker belongs to, and whether this cell currently owns a
+            // worker slot. Both exist because a cell can be re-queued while its previous
+            // run is still on the thread pool - QueueGenerate supersedes it, but the
+            // thread does not stop instantly.
+            //
+            // Without runId the superseded worker still sets workerDone on its way out,
+            // so the pump reclaims the slot and stamps applied=true while the REAL run is
+            // mid-flight. The real run then finishes into a cell the pump will never look
+            // at again (applied is already true), so its heights are never written and
+            // its slot is never given back: activeWorkers sits one above the truth for
+            // the rest of the session.
+            //
+            // That single stuck unit is the "chunk 16 of 16" freeze. drained never turns
+            // true, so settlePhase is forced back to 0 on every pump and the settle never
+            // begins - and every water body is placed in SettlePhaseAfter. The terrain
+            // finishes and shows; the ocean and the lakes never arrive.
+            //
+            // So: a worker only reports if it is still the current run, and a re-dispatch
+            // inherits the slot it is replacing instead of taking a second one.
+            public volatile int runId;
+            public bool inFlight;
+
             // Set when this cell was recovered from the scene by its Terrain_x_z name
             // rather than freshly created, so EnsurePool can put it back on the index it
             // already holds terrain for instead of assigning it a new one.
@@ -2064,7 +2086,14 @@ namespace UniverseCreator.TerrainSystem
             // the chunk is neither previewed nor finished.
             ShowWireframe(o, c);
 
-            activeWorkers++;
+            // A re-dispatch INHERITS the slot of the run it supersedes rather than taking
+            // a second one. The superseded worker is still on the pool and will still run
+            // its finally, but it no longer owns anything: runId has moved past it.
+            if (!c.inFlight) activeWorkers++;
+            c.inFlight = true;
+
+            int myRun = ++c.runId;
+
             c.task = Task.Run(() =>
             {
                 try
@@ -2076,7 +2105,10 @@ namespace UniverseCreator.TerrainSystem
                     GraphEvaluator evaluator = new GraphEvaluator(g);
                     evaluator.Evaluate(tile, stop);
 
-                    if (!stop.StopRequested) c.tile = tile;
+                    // Only the current run may hand its heights over. A superseded run
+                    // writing here would hand the pump a tile built against the graph as
+                    // it was before the edit that superseded it.
+                    if (!stop.StopRequested && c.runId == myRun) c.tile = tile;
                 }
                 catch (System.OperationCanceledException) { }
                 catch (System.Exception ex)
@@ -2085,7 +2117,10 @@ namespace UniverseCreator.TerrainSystem
                 }
                 finally
                 {
-                    c.workerDone = true;
+                    // Likewise the done flag: a superseded run that reported here would
+                    // have the pump retire the cell while the run that replaced it was
+                    // still working, stranding both the heights and the worker slot.
+                    if (c.runId == myRun) c.workerDone = true;
                 }
             });
         }
@@ -2190,6 +2225,7 @@ namespace UniverseCreator.TerrainSystem
 
                 // Reclaim the worker slot exactly once per dispatch.
                 activeWorkers = Mathf.Max(0, activeWorkers - 1);
+                c.inFlight = false;
                 c.applied = true;
                 freed = true;
 
@@ -2229,6 +2265,17 @@ namespace UniverseCreator.TerrainSystem
             // as settled. Its queue is legitimately empty at that point, and treating
             // that as "done" both closed the progress item early and ran the settle
             // stitch against a grid whose bakes had not been dispatched yet.
+            // SELF-HEAL. inFlight is the truth - a cell either owns a worker slot or it
+            // does not - so the running counter can be reconciled against it instead of
+            // being trusted. They agree in every ordinary pump; the clamp only matters if
+            // some future path increments without a matching reclaim, and it turns what
+            // used to be a permanent freeze (the settle never starting, so the ocean and
+            // lakes never placing) into a single wasted pump.
+            int claimed = 0;
+            for (int i = 0; i < pool.Count; i++)
+                if (pool[i].inFlight) claimed++;
+            if (activeWorkers > claimed) activeWorkers = claimed;
+
             bool drained = activeWorkers == 0 && pending.Count == 0 && setupDepth == 0;
             bool advancedSettle = false;
 
@@ -4039,6 +4086,12 @@ namespace UniverseCreator.TerrainSystem
             {
                 pool[i].workerDone = false;
                 pool[i].tile = null;
+
+                // The slot accounting is zeroed just below, so every cell must give up
+                // its claim to one here or the next build starts already believing a
+                // worker is out - which is the stuck-unit freeze all over again.
+                pool[i].inFlight = false;
+                pool[i].runId++;
             }
 
             activeWorkers = 0;
