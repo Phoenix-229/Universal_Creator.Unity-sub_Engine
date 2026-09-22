@@ -883,7 +883,13 @@ namespace UniverseCreator.Nodes.Selectors
                     float toBase = (src.arr[i] - sea) / Mathf.Max(1e-5f, depthHere);
                     float mouthFade = Mathf.Clamp01(toBase);
 
-                    float cut = bed - depthHere * profile * mouthFade;
+                    // §28 incision guarantee: measure the cut from the LOWER of the seated
+                    // bed and the local ground. The blurred `smoothed` used for `bed` fills
+                    // valleys in, so a bed alone can sit at/above the ground and the trench
+                    // never sinks below its banks. Taking Min(bed, src) here forces the
+                    // thalweg a full depth BELOW the ground (visible channel), while the bank
+                    // (profile->0) eases back to ground level - banks at ground, depth below.
+                    float cut = Mathf.Min(bed, src.arr[i]) - depthHere * profile * mouthFade;
 
                     // Sea-level floor. A river descends to the sea and meets it at the
                     // shore; it does not cut below the ocean surface and tunnel out under
