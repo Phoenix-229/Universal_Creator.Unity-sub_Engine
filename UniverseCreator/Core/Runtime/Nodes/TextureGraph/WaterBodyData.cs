@@ -47,7 +47,8 @@ namespace UniverseCreator.Nodes
         Ocean = 0,
         Lake = 1,
         River = 2,
-        Pool = 3
+        Pool = 3,
+        Swamp = 4
     }
 
     /// <summary>

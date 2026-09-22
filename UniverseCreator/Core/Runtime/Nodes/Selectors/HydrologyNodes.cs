@@ -671,6 +671,16 @@ namespace UniverseCreator.Nodes.Selectors
         public float floodplainDepthFraction = 0.25f;
 
         /// <summary>
+        /// Angle-of-repose gorge walls (§26). Where a river cuts THROUGH a ridge, a fixed-width
+        /// channel leaves a razor slit. Instead the walls are graded back at a stable slope: the
+        /// wall rises one channel Depth every this-many pixels, so a deeper cut opens a wider
+        /// canyon (UE5's R_carve = R_base + (H_hill-H_river)*tan θ, expressed in the carve's own
+        /// normalised depth + pixels since a per-tile node has no world metre scale). Min-only,
+        /// stops where the natural hillside is already gentler. 0 turns it off - the old slit.
+        /// </summary>
+        public float gorgeReposePixelsPerDepth;
+
+        /// <summary>
         /// How far to EITHER SIDE of the stamped centreline, in world metres, the carve
         /// looks for the true valley floor before it seats the bed. This is what makes the
         /// seating self-correcting: a coarse trace (River Network Trace) can land the mask
@@ -922,6 +932,16 @@ namespace UniverseCreator.Nodes.Selectors
                         GradeFloodplain(src, dst, maskSmooth, x, z, resX, resZ,
                                         fpHalfPixels, benchLevel, depth);
                     }
+
+                    // Angle-of-repose gorge walls (§26): where the channel cuts through a ridge,
+                    // grade the walls back at a stable slope instead of leaving a vertical slit.
+                    // The carved bed here is the wall base; Min-only, opt-in (0 = off).
+                    if (gorgeReposePixelsPerDepth > 0.5f && w > 0.5f)
+                    {
+                        int gorgeMax = Mathf.Clamp(Mathf.RoundToInt(gorgeReposePixelsPerDepth * 3f), 1, 128);
+                        GradeGorgeWalls(src, dst, maskSmooth, x, z, resX, resZ,
+                                        dst.arr[i], depthHere, gorgeReposePixelsPerDepth, gorgeMax);
+                    }
                 }
             }
 
@@ -974,6 +994,46 @@ namespace UniverseCreator.Nodes.Selectors
                     float t = 1f - (k / (float)halfPixels);
                     float ease = t * t * (3f - 2f * t);   // smoothstep
                     float target = Mathf.Lerp(ground, benchLevel, ease);
+
+                    if (target < dst.arr[ai]) dst.arr[ai] = Mathf.Clamp01(target);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Grades a gorge wall back at a stable repose slope (§26) where the channel cuts
+        /// through a ridge. From the carved bed the wall rises one channel depth every
+        /// <paramref name="pixelsPerDepth"/> pixels; each cell is cut DOWN to that sloped line
+        /// (Min-only) until the natural hillside is already below it, where the wall has met the
+        /// terrain. A deeper cut opens a wider canyon, turning a vertical slit into a natural
+        /// sloped gorge. Reads ground from <paramref name="src"/>, writes the minimum into dst,
+        /// so the result does not depend on visit order.
+        /// </summary>
+        private static void GradeGorgeWalls(Matrix src, Matrix dst, Matrix mask,
+                                            int x, int z, int resX, int resZ,
+                                            float bed, float depth, float pixelsPerDepth, int maxPixels)
+        {
+            if (pixelsPerDepth < 1f || depth <= 1e-6f) return;
+
+            float dx, dz;
+            if (!CrossDirection(mask, x, z, resX, resZ, out dx, out dz)) return;
+
+            float slope = depth / pixelsPerDepth;   // normalised rise per pixel up the wall
+
+            for (int sign = -1; sign <= 1; sign += 2)
+            {
+                for (int k = 1; k <= maxPixels; k++)
+                {
+                    int ax = Mathf.Clamp(x + Mathf.RoundToInt(dx * k * sign), 0, resX - 1);
+                    int az = Mathf.Clamp(z + Mathf.RoundToInt(dz * k * sign), 0, resZ - 1);
+                    int ai = az * resX + ax;
+
+                    float ground = src.arr[ai];
+                    float target = bed + k * slope;
+
+                    // Natural slope already gentler than the repose line: the wall has met the
+                    // hillside, so stop - nothing beyond needs cutting.
+                    if (ground <= target) break;
 
                     if (target < dst.arr[ai]) dst.arr[ai] = Mathf.Clamp01(target);
                 }
@@ -2472,6 +2532,102 @@ namespace UniverseCreator.Nodes.Selectors
             }
 
             return outputIndex == 1 ? maskOut : dst;
+        }
+    }
+
+    /// <summary>
+    /// Baked ambient / sky occlusion (§27a — the mobile-safe capture of Lumen's diffuse
+    /// indirect-shadowing intent). For each cell it measures how much of the sky the
+    /// heightfield hides — the maximum upward horizon slope in several directions — and
+    /// outputs a 0..1 sky-visibility mask (1 = open sky, lower = a shadowed crease, valley or
+    /// cliff base). Computed ONCE at generation and read cheaply by the splat/shader, so
+    /// hollows get believable soft indirect darkening at ZERO per-frame cost — the Lumen
+    /// LOOK a phone can afford, with no ray-march, no SDF volume and no runtime GI. Self-
+    /// consistent in the heightfield's own units, so it needs no world vertical scale.
+    /// </summary>
+    [System.Serializable]
+    public class SkyOcclusionNode : Generator
+    {
+        public override string NodeName { get { return "Sky Occlusion"; } }
+        public override NodeCategory Category { get { return NodeCategory.Selector; } }
+        public override string Tooltip { get { return "Baked horizon ambient occlusion from the heightfield: soft indirect darkening in valleys, mobile-cheap."; } }
+
+        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
+        public override Port[] GetOutputs() { return SharedPorts.MaskOut; }
+
+        /// <summary>Directions sampled around each cell. 8 balances quality and phone cost.</summary>
+        public int directions = 8;
+
+        /// <summary>How far, in pixels, to look for occluding terrain along each direction.</summary>
+        public int reachPixels = 16;
+
+        /// <summary>Scales the measured horizon slope into occlusion. Higher = deeper shadows.</summary>
+        public float strength = 6f;
+
+        /// <summary>Floor on sky visibility, so a deep crease never goes pure black.</summary>
+        public float minVisibility = 0.25f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+            if (stop != null && stop.StopRequested) return null;
+
+            int resX = src.rect.size.x;
+            int resZ = src.rect.size.z;
+            Matrix outAo = src.Blank();
+
+            int dirs = Mathf.Clamp(directions, 1, 16);
+            int reach = Mathf.Clamp(reachPixels, 1, 128);
+            float k = Mathf.Max(0f, strength);
+            float floor = Mathf.Clamp01(minVisibility);
+
+            float[] dcx = new float[dirs];
+            float[] dcz = new float[dirs];
+            for (int d = 0; d < dirs; d++)
+            {
+                float a = (Mathf.PI * 2f) * d / dirs;
+                dcx[d] = Mathf.Cos(a);
+                dcz[d] = Mathf.Sin(a);
+            }
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 15) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float h0 = src.arr[i];
+
+                    // Average over directions of the maximum UPWARD horizon slope (normalised
+                    // rise per pixel). More terrain rising around a cell = less visible sky =
+                    // more occlusion. This is horizon-based AO on the heightfield, in its own
+                    // units - no metre scale required, and fully baked so runtime cost is nil.
+                    float horizonSum = 0f;
+                    for (int d = 0; d < dirs; d++)
+                    {
+                        float maxSlope = 0f;
+                        for (int s = 1; s <= reach; s++)
+                        {
+                            int sx = Mathf.Clamp(x + Mathf.RoundToInt(dcx[d] * s), 0, resX - 1);
+                            int sz = Mathf.Clamp(z + Mathf.RoundToInt(dcz[d] * s), 0, resZ - 1);
+                            float rise = src.arr[sz * resX + sx] - h0;
+                            if (rise <= 0f) continue;
+                            float slope = rise / s;
+                            if (slope > maxSlope) maxSlope = slope;
+                        }
+                        horizonSum += maxSlope;
+                    }
+
+                    float occlusion = Mathf.Clamp01((horizonSum / dirs) * k);
+                    outAo.arr[i] = Mathf.Max(floor, 1f - occlusion);
+                }
+            }
+
+            return outAo;
         }
     }
 }

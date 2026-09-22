@@ -76,7 +76,7 @@ namespace UniverseCreator.TerrainSystem
     [AddComponentMenu("Universe Creator/Water Volume")]
     public class UCWaterVolume : MonoBehaviour
     {
-        public enum BodyKind { Ocean = 0, Lake = 1, River = 2, Pool = 3 }
+        public enum BodyKind { Ocean = 0, Lake = 1, River = 2, Pool = 3, Swamp = 4 }
 
         [Header("Body")]
         public BodyKind kind = BodyKind.Lake;

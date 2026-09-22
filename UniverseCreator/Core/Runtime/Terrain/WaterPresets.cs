@@ -22,6 +22,7 @@ namespace UniverseCreator.TerrainSystem
             switch (kind)
             {
                 case WaterBodyKind.Lake: return UCWaterBody.ShapeMode.Polygon;
+                case WaterBodyKind.Swamp: return UCWaterBody.ShapeMode.Polygon; // a still standing body, like a lake
                 case WaterBodyKind.River: return UCWaterBody.ShapeMode.RiverSpline;
                 default: return UCWaterBody.ShapeMode.Rectangle; // Ocean, Pool
             }
@@ -43,6 +44,7 @@ namespace UniverseCreator.TerrainSystem
                 case WaterBodyKind.Lake: ApplyLake(body); break;
                 case WaterBodyKind.River: ApplyRiver(body); break;
                 case WaterBodyKind.Pool: ApplyPool(body); break;
+                case WaterBodyKind.Swamp: ApplySwamp(body); break;
             }
         }
 
@@ -93,6 +95,22 @@ namespace UniverseCreator.TerrainSystem
             body.water.foamEnabled = true;
             body.water.causticsEnabled = true;
             body.water.causticsDepthFadeMetres = 5f;
+        }
+
+        private static void ApplySwamp(UCWaterBody body)
+        {
+            // A swamp is a still, murky, standing body - a tuned lake with almost no wave
+            // motion and a shallow depth-fade so the tannin-dark water reads as opaque, and
+            // no caustics (light does not reach the peat floor).
+            body.sizeMetres = new Vector2(200f, 160f);
+            body.meshResolution = 48;
+            body.currentMetresPerSecond = new Vector2(0.01f, 0.005f);
+
+            body.water.waveHeightMetres = 0.02f;
+            body.water.waveLengthMetres = 8f;
+            body.water.depthFadeMetres = 1.5f;
+            body.water.foamEnabled = false;
+            body.water.causticsEnabled = false;
         }
 
         private static void ApplyRiver(UCWaterBody body)

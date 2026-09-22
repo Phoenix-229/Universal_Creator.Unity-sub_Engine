@@ -892,6 +892,7 @@ where they carve height.
 | River Course Solver | Selector | `Height` (Matrix) | `Height`, `River Mask` (Matrix) |
 | River Carve | Modifier | `Height`, `River Mask`, `Water Mask` (opt) (Matrix) | `Height` (Matrix) |
 | Swamp Basin | Selector | `Height`, `Swamp Mask` (opt) (Matrix) | `Height`, `Swamp Mask` (Matrix) |
+| Sky Occlusion | Selector | `Height` (Matrix) | `Mask` (Matrix) |
 | Ocean Level | Selector | `Height` (Matrix) | `Water Mask`, `Depth`, `Shoreline` (Matrix) |
 | Lake Fill | Selector | `Height`, `Lake Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
 | River Fill | Selector | `Height`, `River Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
@@ -1792,7 +1793,9 @@ sloped region toward a swamp floor, lays low-amplitude hummock micro-relief over
 a **Swamp Mask** whose value is the water-table depth zone: **0** on a dry mound, **~0.5** in
 saturated shallows, **1** in a deep pool. Feed that mask to the splat/scatter so algae sits in
 the pools, reeds in the shallows, and cypress/mangrove on the mound edges. Put the visible
-water in with a **Swamp** water body (placed by hand or procedurally over the basin).
+water in with a **Swamp** water body.
+
+**Placing the swamp water:** **GameObject ▸ 3D Object ▸ Universe Creator ▸ Water ▸ Swamp** (or the Swamp button on the Water System Manager) drops a swamp water body — a still, murky, standing surface (a tuned lake: almost no waves, no foam or caustics, opaque tannin-dark water). Reshape its outline over the basin the Swamp Basin node flattened, and set its height to the node's `Swamp Level`. Manual placement is available now; procedural auto-placement over detected basins is a later addition.
 
 **Ports**
 
@@ -1813,6 +1816,26 @@ water in with a **Swamp** water body (placed by hand or procedurally over the ba
 | `Hummock Amp` | 0.0015 | Micro-relief amplitude, normalised — keep tiny; real hummocks are ~0.3 m |
 | `Hummock Feature Metres` | 25 | Size of the hummock mounds |
 | `Seed` | 4242 | So a swamp is identical on every rebuild |
+
+#### Sky Occlusion
+Bakes **ambient (sky) occlusion** from the heightfield — the mobile-cheap way to get the
+soft indirect darkening that a desktop engine's dynamic GI would give a valley or the base of
+a cliff. For every cell it measures how much of the sky the surrounding terrain hides (the
+maximum upward horizon slope in several directions) and writes a `Mask`: **1 = open sky**,
+lower in creases, hollows and cliff-bases. Feed that `Mask` into a `Biome Splat Output` layer
+mask or a `Blend` to darken shaded ground, or into the shader's ambient term. It is computed
+**once at generation**, so it costs nothing per frame — the "Lumen look" a phone can afford,
+with no ray-marching, no distance-field volume and no runtime global illumination.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Directions` | 8 | How many directions the horizon is sampled around each cell (higher = smoother, costlier bake) |
+| `Reach Pixels` | 16 | How far it looks for occluding terrain along each direction |
+| `Strength` | 6 | How strongly a rising horizon becomes shadow. Higher = deeper occlusion |
+| `Min Visibility` | 0.25 | Floor on the mask, so the deepest crease never goes pure black |
+
+It reads only `Height`, so it can sit anywhere after the terrain is shaped. Baked, mobile-safe,
+and self-consistent in the heightfield's own units — it needs no metre scale.
 
 #### Water Bank Seat
 Cuts a shore so the water surface meets the ground **exactly**. This is the node that stops
@@ -2724,6 +2747,14 @@ produce bare ground by wiring nothing — wire an explicit base layer.
 The full-featured splat writer: builds the splatmap from biome, slope and altitude with a
 rule per biome, plus beach, snow and wetness handling. Twenty fields, and worth all of
 them — this one node replaces a dozen selectors and combiners.
+
+**Wire the `Biome` input — this is the #1 "it did nothing" trap.** With only `Height`
+connected and `Biome` left unwired, there is no biome field to read, so every pixel falls
+back to `Default Layer` (0) and the terrain paints **one flat texture**. That looks exactly
+like the node stubbed or hung — it did not; it ran to completion, but with no biome there are
+no rules to apply. Feed `Biome Classifier`'s `Biome` output into this node's `Biome` input and
+the rule engine (slope/altitude/biome blending) comes alive. `Wetness` and `Override` are
+optional; **`Biome` is the one that makes it work.**
 
 | Field | Default | Meaning |
 |---|---|---|

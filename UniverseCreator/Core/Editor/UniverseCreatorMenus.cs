@@ -86,14 +86,18 @@ namespace UniverseCreator.Editor
         [MenuItem("GameObject/3D Object/Universe Creator/Water/Pool", false, 33)]
         private static void CreatePoolMenu() { SpawnWater(WaterPreset.Pool, null); }
 
-        /// <summary>The four water starting points offered by the menu and by the
+        [MenuItem("GameObject/3D Object/Universe Creator/Water/Swamp", false, 34)]
+        private static void CreateSwampMenu() { SpawnWater(WaterPreset.Swamp, null); }
+
+        /// <summary>The water starting points offered by the menu and by the
         /// Water System Manager inspector.</summary>
         public enum WaterPreset
         {
             Ocean = 0,
             Lake = 1,
             River = 2,
-            Pool = 3
+            Pool = 3,
+            Swamp = 4
         }
 
         /// <summary>
@@ -110,6 +114,7 @@ namespace UniverseCreator.Editor
                 case WaterPreset.Lake: body = PresetLake(parentOverride); break;
                 case WaterPreset.River: body = PresetRiver(parentOverride); break;
                 case WaterPreset.Pool: body = PresetPool(parentOverride); break;
+                case WaterPreset.Swamp: body = PresetSwamp(parentOverride); break;
                 default: body = PresetOcean(parentOverride); break;
             }
 
@@ -282,6 +287,21 @@ namespace UniverseCreator.Editor
                                                UCWaterBody.ShapeMode.Rectangle, parentOverride);
 
             WaterPresets.ApplyDefaults(body);
+            return body;
+        }
+
+        private static UCWaterBody PresetSwamp(Transform parentOverride)
+        {
+            UCWaterBody body = CreateWaterBody("Swamp", WaterBodyKind.Swamp,
+                                               UCWaterBody.ShapeMode.Polygon, parentOverride);
+
+            WaterPresets.ApplyDefaults(body);
+
+            // Seeded like a lake so "I added a swamp and nothing happened" never occurs; the
+            // author reshapes the outline afterwards, or the procedural path sets its own.
+            body.SeedOutline(12);
+            body.SnapCourseToGround();
+
             return body;
         }
 
