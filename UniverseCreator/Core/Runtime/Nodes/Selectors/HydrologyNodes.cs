@@ -163,9 +163,30 @@ namespace UniverseCreator.Nodes.Selectors
 
                 // Real-world course passes, endpoints held so the source and mouth do not
                 // move. Count is preserved by all three, so widths stay aligned.
-                UniverseCreator.TerrainSystem.RiverCourseSolver.SnapToValley(
-                    course, ground, search, pullC, 12, 0f, true, sea);
-                UniverseCreator.TerrainSystem.RiverCourseSolver.Relax(course, 2);
+                // Iterate the cross-flow snap. One pass slides a point at most one search
+                // radius sideways, so on a broad valley - or a coarse solve cell on a large
+                // 4k world - a single pass strands the course partway down the slope, which
+                // is the reported "river on the side of the hill even at 4k". Repeating the
+                // snap walks it the rest of the way onto the thalweg. Shrinking the reach
+                // each pass is coarse-to-fine descent (a fixed-point relaxation onto the
+                // -grad(H) valley line): the first pass crosses the valley, the last seats
+                // the point on the lowest line instead of overshooting to the far bank -
+                // an overshot point is itself on a hillside, which is why a single fixed
+                // large reach cannot fix this and a converging series can. One relax between
+                // passes keeps the D8 stair-steps from fighting the snap.
+                float reach = search;
+                for (int pass = 0; pass < 4; pass++)
+                {
+                    // Last arg = §18.2 slope gate: reject a seat on a face steeper than
+                    // N.U 0.8 (~37 degrees) when a flatter valley candidate exists, so a
+                    // course settles on the valley floor and not on a hillside that merely
+                    // happens to be a hair lower.
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.SnapToValley(
+                        course, ground, reach, pullC, 12, 0f, true, sea, 0.8f);
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.Relax(course, 1);
+                    reach *= 0.6f;
+                    if (reach < 1f) break;
+                }
 
                 if (meanderC > 1e-4f)
                     UniverseCreator.TerrainSystem.RiverCourseSolver.Meander(
@@ -192,11 +213,15 @@ namespace UniverseCreator.Nodes.Selectors
             // A course that sits on a hillside is not a raw river, it is a wrong one, and
             // leaving the seat to whoever wires the graph is what produced the hillside
             // trenches. The search distance is tied to the solve's own cell size because
-            // that is exactly the error being corrected: one cell of the drainage grid.
+            // that is the scale of the error being corrected. It is set to SIX cells, not
+            // one: on a large world the traced centreline can sit several coarse cells up
+            // the slope from the valley floor, so the iterated snap needs a first reach wide
+            // enough to cross the whole valley before the coarse-to-fine passes settle it on
+            // the thalweg. Too small a reach here is why the trace still landed on a hillside.
             float cellMetres = Mathf.Max(1f, Mathf.Sqrt(Mathf.Max(1e-4f, solve.cellArea)));
 
             System.Action<List<Vector2>, List<float>> refine = BuildValleyRefine(
-                solve, cellMetres * 2f, 0.75f, 0f, 0.06f, baseWidth, seaLevel);
+                solve, cellMetres * 6f, 0.75f, 0f, 0.06f, baseWidth, seaLevel);
 
             return StampNetwork(mask, solve, channelHeadArea, baseWidth, widthExponent,
                                 maxWidth, seaLevel, maxChannels, stop, refine) ? mask : null;
@@ -479,7 +504,7 @@ namespace UniverseCreator.Nodes.Selectors
         /// </summary>
         private static readonly Port[] Outs =
         {
-            new Port("Height", PortType.Matrix, PortDirection.Output),
+            new Port("Height", PortType.Matrix, PortDirection.Output, true),
             new Port("River Mask", PortType.Matrix, PortDirection.Output, true)
         };
 
@@ -565,7 +590,10 @@ namespace UniverseCreator.Nodes.Selectors
         private static readonly Port[] Ins =
         {
             new Port("Height", PortType.Matrix, PortDirection.Input),
-            new Port("River Mask", PortType.Matrix, PortDirection.Input)
+            new Port("River Mask", PortType.Matrix, PortDirection.Input),
+            // Optional (§17 / R2-4): a lake/ocean footprint the carve must not cut across,
+            // so a river can never slot through a basin and wall it off. Unconnected = null.
+            new Port("Water Mask", PortType.Matrix, PortDirection.Input)
         };
 
         public override Port[] GetInputs() { return Ins; }
@@ -583,8 +611,44 @@ namespace UniverseCreator.Nodes.Selectors
         /// <summary>Flattens the channel floor so the river bed does not undulate.</summary>
         public float bedFlattening = 0.6f;
 
+        /// <summary>
+        /// Trapezoidal channel (§17.2): the inner fraction of the half-width is a FLAT bed at
+        /// full depth, the rest is a graded wall out to the bank. 0 reproduces the old pure
+        /// power curve exactly (so an existing graph is unchanged until this is raised); ~0.35
+        /// gives the real-world trapezium the floodplain belt then grades a flat bench and a
+        /// U/V valley slope around. The wall shape still follows Profile Power (1 = straight
+        /// trapezoid wall, >1 = concave bank).
+        /// </summary>
+        public float bedWidthFraction = 0.35f;
+
+        /// <summary>
+        /// Hydraulic geometry (§17.3/§17.4). Scales the cut depth by the LOCAL channel width
+        /// relative to the nominal bank width, raised to this power. Leopold-Maddock gives
+        /// depth ~ Q^0.4 and width ~ Q^0.5, so depth ~ width^0.8 - a value near 0.8 makes
+        /// headwaters shallow and trunks deep (the "veins start small and grow") for free,
+        /// because the traced mask already widened with flow. It also deepens a pinch between
+        /// hills, where the wet corridor narrows at constant flow (Manning's squeeze). 0 turns
+        /// this off and uses the flat Depth everywhere - the exact previous behaviour.
+        /// </summary>
+        public float flowDepthExponent = 0.8f;
+
         /// <summary>Raises a levee alongside the channel, as real rivers deposit.</summary>
         public float leveeHeight;
+
+        /// <summary>
+        /// Natural levees form only on BIG rivers (§24). A levee is built only where the local
+        /// channel width is at least this multiple of the nominal bank width; small rivers and
+        /// streams get none, matching the real world (the Mississippi/Yellow build them, a brook
+        /// does not). It is also capped at the untouched ground and broken by noise, so it is a
+        /// low, wide, gap-riddled ridge rather than a dam. Only matters when Levee Height &gt; 0.
+        /// </summary>
+        public float leveeMinWidthRatio = 1.8f;
+
+        /// <summary>
+        /// Below this local-width multiple the channel is a STREAM: it gets no floodplain belt
+        /// (§24 — every river but a stream has a floodplain). At or above it the belt is graded.
+        /// </summary>
+        public float streamWidthRatio = 0.6f;
 
         /// <summary>
         /// Floodplain half-width as a multiple of the local channel width (W_fp ≈ k·w).
@@ -639,6 +703,11 @@ namespace UniverseCreator.Nodes.Selectors
             if (river == null) return new Matrix(src);
             if (stop != null && stop.StopRequested) return null;
 
+            // Optional Water Mask (§17 / R2-4). Where a lake/ocean footprint is wired in, the
+            // carve leaves those cells untouched so it cannot cut a slot through the basin and
+            // wall it off (image 18). Unconnected -> null -> the carve behaves exactly as before.
+            Matrix waterMask = GetInputMatrix(tile, 2, stop);
+
             Matrix dst = new Matrix(src);
 
             int resX = src.rect.size.x;
@@ -691,44 +760,16 @@ namespace UniverseCreator.Nodes.Selectors
             Matrix maskSmooth = MatrixOperations.GaussianBlur(river, sigma);
             if (stop != null && stop.StopRequested) return null;
 
-            // ---------------------------------------------------------------
-            //  THE SEAT. This is what makes valley placement INBUILT.
-            // ---------------------------------------------------------------
-            // Taking the lowest ground across the section fixes the bed's ELEVATION but
-            // not its POSITION: the trench was still cut at the mask's own cells, only
-            // cut deeper, which is precisely the reported fault - a gash down the side of
-            // a hill. Seating the elevation without seating the position makes it worse,
-            // not better.
-            //
-            // So the channel is physically moved. A watercourse occupies the thalweg, the
-            // lowest line of its own valley; that is not a preference, it is where water
-            // is. Every core cell of the incoming mask therefore looks along its
-            // cross-flow line, finds the OFFSET at which the ground is lowest, and the
-            // channel is re-stamped there. The slide is along the cross-section only, so
-            // the course keeps its length, its direction and its continuity - neighbouring
-            // centreline cells slide onto neighbouring thalweg cells - and nothing about
-            // the drainage network's topology changes.
-            //
-            // The pass is idempotent by construction: a mask that is already on the
-            // thalweg finds its minimum at zero offset and does not move. That is why it
-            // can run unconditionally, whichever node drew the mask - River Course Solver,
-            // River Network Trace, a hand-painted layer - and why a badly-placed mask can
-            // no longer produce a hillside trench. Seating is no longer the graph author's
-            // responsibility.
-            int bankPixels = Mathf.Max(1, Mathf.RoundToInt(bankWidth / mpp));
-            Matrix seated = SeatOnThalweg(src, river, maskSmooth, resX, resZ,
-                                          corridor, bankPixels, stop);
-            if (stop != null && stop.StopRequested) return null;
-
-            if (seated != null)
-            {
-                river = seated;
-                // The carve profile, the cross directions and the floodplain march all
-                // read the mask, so they must all read the SEATED one or the bed would be
-                // shaped around a channel that is no longer there.
-                maskSmooth = MatrixOperations.GaussianBlur(river, sigma);
-                if (stop != null && stop.StopRequested) return null;
-            }
+            // PLACEMENT IS NOT DONE HERE. An earlier version re-stamped the channel onto
+            // the cross-flow minimum in this node, which both dropped cells where no cross
+            // direction could be read (destroying reaches of the trench) and replaced the
+            // width-tapered channel with radial discs (the walled, unnatural trenches).
+            // The mask handed to this node is placed by the SOLVE, on the flow field, where
+            // the ordered course and the whole drainage network are available; the carve's
+            // job is only to cut a good profile into the mask it is given. The elevation
+            // seat below (LowestAcross) still drops the BED onto the lowest ground across
+            // the section, which is a cheap correction to the bed height that cannot move
+            // the channel or delete it.
 
             float power = Mathf.Max(0.2f, profilePower);
             float flatten = Mathf.Clamp01(bedFlattening);
@@ -759,9 +800,26 @@ namespace UniverseCreator.Nodes.Selectors
                     float w = Mathf.Clamp01(river.arr[i]);
                     if (w <= 0.001f) continue;
 
+                    // Defer to standing water (§17 / §20.1 / R2-4): a lake/ocean footprint is a
+                    // basin the river feeds, not one it cuts across. Fully inside the water the
+                    // cell is skipped (no work); across the shore band the erosion is tapered to
+                    // 0 below, so the channel melts into the basin instead of slotting through.
+                    float wet = waterMask != null ? Mathf.Clamp01(waterMask.arr[i]) : 0f;
+                    if (wet >= 0.999f) continue;
+
                     // Mask value doubles as distance from the centreline: 1 at the
-                    // thalweg, 0 at the bank. Raising it to a power sets the profile.
-                    float profile = Mathf.Pow(w, power);
+                    // thalweg, 0 at the bank. Trapezoidal cross-section (§17.2): a FLAT bed
+                    // at full depth across the inner bedWidthFraction of the half-width, then
+                    // a Profile-Power wall out to the bank. This is the "trapezium with the
+                    // V/U below it"; the floodplain belt below grades the flat bench and the
+                    // valley slope around it, completing the bed->wall->floodplain->valley
+                    // compound profile. bedWidthFraction 0 -> wEdge 1 -> Pow(w, power), the
+                    // exact old curve, so no existing graph changes until the field is raised.
+                    float bedFrac = Mathf.Clamp01(bedWidthFraction);
+                    float wEdge = 1f - bedFrac;
+                    float profile = (wEdge <= 1e-4f || w >= wEdge)
+                        ? 1f
+                        : Mathf.Pow(w / wEdge, power);
 
                     // Seated on the valley floor, then flattened along it. Taking the
                     // lowest ground across the channel first is what stops a hillside
@@ -770,6 +828,41 @@ namespace UniverseCreator.Nodes.Selectors
                     float floorHere = LowestAcross(src, maskSmooth, x, z, resX, resZ, corridor);
                     float bed = Mathf.Lerp(floorHere, smoothed.arr[i], flatten * w);
 
+                    // LOCAL CHANNEL WIDTH relative to the nominal bank. One measure drives
+                    // three things: depth growth (§17.3), the big-river levee gate and the
+                    // stream/floodplain gate (§24). Measured once (cheap: wet cells only,
+                    // bounded by the corridor), so a stream reads ~0.3, a trunk ~3-4.
+                    float widthRatio = 1f;
+                    if (flowDepthExponent > 1e-4f || leveeHeight > 1e-5f || fpHalfPixels > 0)
+                    {
+                        float dxw, dzw;
+                        if (CrossDirection(maskSmooth, x, z, resX, resZ, out dxw, out dzw))
+                        {
+                            int halfW = 0;
+                            for (int k = 1; k <= corridor; k++)
+                            {
+                                int ax = Mathf.Clamp(x + Mathf.RoundToInt(dxw * k), 0, resX - 1);
+                                int az = Mathf.Clamp(z + Mathf.RoundToInt(dzw * k), 0, resZ - 1);
+                                int bx = Mathf.Clamp(x - Mathf.RoundToInt(dxw * k), 0, resX - 1);
+                                int bz = Mathf.Clamp(z - Mathf.RoundToInt(dzw * k), 0, resZ - 1);
+                                bool wetA = river.arr[az * resX + ax] > 0.001f;
+                                bool wetB = river.arr[bz * resX + bx] > 0.001f;
+                                if (wetA) halfW++;
+                                if (wetB) halfW++;
+                                if (!wetA && !wetB) break;
+                            }
+                            float refHalf = Mathf.Max(1f, bankWidth / mpp);
+                            widthRatio = halfW / refHalf;
+                        }
+                    }
+
+                    // Hydraulic geometry (§17.3/§17.4): the depth grows with the channel it
+                    // is cutting. Leopold-Maddock gives depth ~ Q^0.4 and width ~ Q^0.5, so
+                    // depth ~ width^0.8. Off (exponent 0) it is exactly the flat Depth.
+                    float depthHere = depth;
+                    if (flowDepthExponent > 1e-4f)
+                        depthHere = depth * Mathf.Pow(Mathf.Clamp(widthRatio, 0.25f, 4f), flowDepthExponent);
+
                     // BASE LEVEL. A river cannot cut below the surface it flows into -
                     // that is Playfair's law, and it is why a channel flattens out as it
                     // nears its mouth instead of arriving at full depth. Within one
@@ -777,10 +870,10 @@ namespace UniverseCreator.Nodes.Selectors
                     // trench rises to meet the sea AT the shoreline. Without this the
                     // channel arrived under the water as an open slot and the join
                     // between river and ocean read as a hole rather than a mouth.
-                    float toBase = (src.arr[i] - sea) / Mathf.Max(1e-5f, depth);
+                    float toBase = (src.arr[i] - sea) / Mathf.Max(1e-5f, depthHere);
                     float mouthFade = Mathf.Clamp01(toBase);
 
-                    float cut = bed - depth * profile * mouthFade;
+                    float cut = bed - depthHere * profile * mouthFade;
 
                     // Sea-level floor. A river descends to the sea and meets it at the
                     // shore; it does not cut below the ocean surface and tunnel out under
@@ -792,21 +885,25 @@ namespace UniverseCreator.Nodes.Selectors
                     // force a path to the sea": below the waterline there is nothing to cut.
                     if (src.arr[i] >= sea && cut < sea) cut = sea;
 
+                    // §20.1 lake taper (UE5 H_final = Lerp(H_original, H_trench, 1 - M_lake)):
+                    // erosion fades to 0 as the cell enters standing water, so the channel melts
+                    // into the pre-carved basin floor rather than cutting a slot across it.
+                    if (wet > 0f) cut = Mathf.Lerp(src.arr[i], cut, 1f - wet);
+
                     float value = Mathf.Min(dst.arr[i], cut);
 
-                    if (leveeHeight > 1e-5f)
+                    if (leveeHeight > 1e-5f && widthRatio >= leveeMinWidthRatio)
                     {
-                        // Levees sit on the shoulder: strongest where the mask is
-                        // partial, absent in the channel itself.
-                        //
-                        // Capped at the ground that was here, because this is the one
-                        // place the carve could RAISE terrain. A levee that climbs above
-                        // untouched ground is the ridge-beside-the-channel fault: real
-                        // levees are deposited from the channel's own spoil and stand
-                        // above the FLOODPLAIN, never above the hillside behind them.
-                        // Off by default; this keeps it honest when turned on.
+                        // Natural levees (§24) form only on BIG rivers - the width gate above -
+                        // where overbank flow drops sediment beside the channel; a stream builds
+                        // none. Shoulder strongest where the mask is partial, absent in the
+                        // channel. Capped at the untouched ground, so it can never stand above
+                        // the hillside behind it or dam the valley. Broken by low-frequency noise
+                        // so it reads as a low, gap-riddled ridge (the crevasse-splay gaps real
+                        // levees have) rather than a uniform wall.
                         float shoulder = w * (1f - w) * 4f;
-                        value = Mathf.Min(src.arr[i], value + leveeHeight * shoulder);
+                        float splay = Mathf.PerlinNoise(x * 0.06f, z * 0.06f);
+                        value = Mathf.Min(src.arr[i], value + leveeHeight * shoulder * splay);
                     }
 
                     dst.arr[i] = Mathf.Clamp01(value);
@@ -816,7 +913,10 @@ namespace UniverseCreator.Nodes.Selectors
                     // partial-bank cell. The bench is a shallow bench below the valley floor
                     // and above the channel bed - the near-level ground the river meanders
                     // across.
-                    if (fpHalfPixels > 0 && w > 0.5f)
+                    // Every river but a stream carries a floodplain (§24), so the belt is
+                    // gated off where the local width is below the stream threshold - a brook
+                    // sits in its trench, a river spreads a plain.
+                    if (fpHalfPixels > 0 && w > 0.5f && widthRatio >= streamWidthRatio)
                     {
                         float benchLevel = bed - depth * fpDepthFrac;
                         GradeFloodplain(src, dst, maskSmooth, x, z, resX, resZ,
@@ -880,109 +980,6 @@ namespace UniverseCreator.Nodes.Selectors
             }
         }
 
-        /// <summary>
-        /// Slides the channel sideways onto the thalweg - the lowest line of its own
-        /// valley - and re-stamps it there. Returns null when nothing moved, so the
-        /// caller can skip the rebuild.
-        /// </summary>
-        /// <remarks>
-        /// The offset is searched along the cross-flow line only. Moving a course along
-        /// its own flow direction would shorten or lengthen it and could detach it from
-        /// its confluences; moving it across the flow cannot, because the cross-section
-        /// through a given point is the set of places that point could physically be and
-        /// still be the same reach of river. That is the whole reason the structure
-        /// tensor is used to find the cross direction rather than a plain gradient.
-        ///
-        /// Ties break toward zero offset - the loop only accepts a STRICTLY lower sample -
-        /// so flat ground leaves the course exactly where it was rather than drifting it
-        /// to one side over successive rebuilds.
-        ///
-        /// Only cells at the channel core are moved. The partial-bank cells of the
-        /// incoming mask are discarded and the profile is redrawn from the seated core,
-        /// because a bank that slid by a different amount from its own centreline would
-        /// tear the cross-section apart.
-        /// </remarks>
-        private static Matrix SeatOnThalweg(Matrix src, Matrix mask, Matrix maskSmooth,
-                                            int resX, int resZ, int radius, int bankPixels,
-                                            StopToken stop)
-        {
-            if (radius <= 0 || bankPixels <= 0) return null;
-
-            Matrix outMask = null;
-            bool moved = false;
-            float r2 = bankPixels * bankPixels;
-
-            for (int z = 0; z < resZ; z++)
-            {
-                if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
-
-                int row = z * resX;
-
-                for (int x = 0; x < resX; x++)
-                {
-                    int i = row + x;
-                    float w = mask.arr[i];
-
-                    // Core only. Below this the cell is a bank, and banks are redrawn
-                    // from the seated core rather than carried across.
-                    if (w <= 0.5f) continue;
-
-                    float dx, dz;
-                    if (!CrossDirection(maskSmooth, x, z, resX, resZ, out dx, out dz)) continue;
-
-                    int bestOx = 0, bestOz = 0;
-                    float bestH = src.arr[i];
-
-                    for (int k = 1; k <= radius; k++)
-                    {
-                        int ox = Mathf.RoundToInt(dx * k);
-                        int oz = Mathf.RoundToInt(dz * k);
-
-                        int ax = Mathf.Clamp(x + ox, 0, resX - 1);
-                        int az = Mathf.Clamp(z + oz, 0, resZ - 1);
-                        float a = src.arr[az * resX + ax];
-                        if (a < bestH) { bestH = a; bestOx = ax - x; bestOz = az - z; }
-
-                        int bx = Mathf.Clamp(x - ox, 0, resX - 1);
-                        int bz = Mathf.Clamp(z - oz, 0, resZ - 1);
-                        float b = src.arr[bz * resX + bx];
-                        if (b < bestH) { bestH = b; bestOx = bx - x; bestOz = bz - z; }
-                    }
-
-                    if (outMask == null) outMask = new Matrix(mask.rect);
-                    if (bestOx != 0 || bestOz != 0) moved = true;
-
-                    // Re-stamp the cross-section at the seated centre. The value falls
-                    // off with distance exactly as the incoming mask's did - 1 on the
-                    // thalweg, 0 at the bank - because River Carve reads the mask value
-                    // as the profile coordinate further down.
-                    int cx2 = x + bestOx;
-                    int cz2 = z + bestOz;
-
-                    for (int oz2 = -bankPixels; oz2 <= bankPixels; oz2++)
-                    {
-                        int sz = cz2 + oz2;
-                        if (sz < 0 || sz >= resZ) continue;
-                        int srow = sz * resX;
-
-                        for (int ox2 = -bankPixels; ox2 <= bankPixels; ox2++)
-                        {
-                            int sx = cx2 + ox2;
-                            if (sx < 0 || sx >= resX) continue;
-
-                            float d2 = ox2 * ox2 + oz2 * oz2;
-                            if (d2 > r2) continue;
-
-                            float v = w * (1f - Mathf.Sqrt(d2 / r2));
-                            int si = srow + sx;
-                            if (v > outMask.arr[si]) outMask.arr[si] = v;
-                        }
-                    }
-                }
-            }
-
-            return moved ? outMask : null;
-        }
 
         /// <summary>
         /// Lowest ground on the line ACROSS the channel through (x, z), out to
@@ -2321,6 +2318,160 @@ namespace UniverseCreator.Nodes.Selectors
                     m.arr[i] = Mathf.Clamp(value, 0f, sea - 1e-5f);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Shapes a swamp: a low-energy, flat depression where a static water table sits at or
+    /// just above a hummocky floor (§25). It does NOT trench like a river - it flattens a
+    /// low-lying, gently-sloped region toward a swamp floor and lays low-amplitude hummock
+    /// micro-relief over it, then emits a Swamp Mask whose value is the water-table depth
+    /// zone (0 = dry mound, ~0.5 = saturated shallows, 1 = deep pool) for the splat and
+    /// scatter to read. The swamp region is either hand-painted (wire a mask into Swamp Mask
+    /// in) or detected procedurally (flat AND lying near the water table). Placement is the
+    /// graph author's or a painted mask's; a Swamp water body puts the visible water in.
+    /// </summary>
+    [System.Serializable]
+    public class SwampBasinNode : Generator
+    {
+        public override string NodeName { get { return "Swamp Basin"; } }
+        public override NodeCategory Category { get { return NodeCategory.Selector; } }
+        public override string Tooltip { get { return "Flattens a low-lying basin into a hummocky swamp floor and emits a water-table depth mask."; } }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            new Port("Swamp Mask", PortType.Matrix, PortDirection.Input)
+        };
+
+        private static readonly Port[] Outs =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Output, true),
+            new Port("Swamp Mask", PortType.Matrix, PortDirection.Output, true)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return Outs; }
+
+        /// <summary>Water-table height, 0..1 of world height. The swamp forms around this.</summary>
+        public float swampLevel = 0.4f;
+
+        /// <summary>How far below the water table the flattened floor sits, 0..1. Sets pool depth.</summary>
+        public float floorDrop = 0.02f;
+
+        /// <summary>How strongly the swamp floor is flattened toward the level, 0..1.</summary>
+        public float flatten = 0.85f;
+
+        /// <summary>Procedural detection: max per-pixel height gradient still counted as "flat".</summary>
+        public float detectMaxSlope = 0.02f;
+
+        /// <summary>Detection band below the water table, 0..1 (a basin sits at/below the table).</summary>
+        public float bandBelow = 0.03f;
+
+        /// <summary>Detection band above the water table, 0..1 (micro-islands rise just above).</summary>
+        public float bandAbove = 0.01f;
+
+        /// <summary>Hummock micro-relief amplitude, 0..1 (keep tiny - real hummocks are ~0.3 m).</summary>
+        public float hummockAmp = 0.0015f;
+
+        /// <summary>Hummock feature size in metres.</summary>
+        public float hummockFeatureMetres = 25f;
+
+        /// <summary>Seed, so a swamp is identical on every rebuild.</summary>
+        public int seed = 4242;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+
+            Matrix paint = GetInputMatrix(tile, 1, stop);
+            if (stop != null && stop.StopRequested) return null;
+
+            int resX = src.rect.size.x;
+            int resZ = src.rect.size.z;
+
+            Matrix dst = new Matrix(src);
+            Matrix maskOut = src.Blank();
+
+            Vector2 ps = src.PixelSize;
+            float originX = src.worldPos.x;
+            float originZ = src.worldPos.z;
+            Noise noise = new Noise(seed);
+
+            float level = Mathf.Clamp01(swampLevel);
+            float drop = Mathf.Max(0f, floorDrop);
+            float floor = Mathf.Clamp01(level - drop);
+            float flat = Mathf.Clamp01(flatten);
+            float amp = Mathf.Max(0f, hummockAmp);
+            float feat = Mathf.Max(1f, hummockFeatureMetres);
+            float maxSlope = Mathf.Max(1e-5f, detectMaxSlope);
+            float below = Mathf.Max(1e-4f, bandBelow);
+            float above = Mathf.Max(1e-4f, bandAbove);
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float h = src.arr[i];
+
+                    // Swamp presence 0..1: painted where a mask is wired, else detected as
+                    // FLAT ground lying near the water table (a low-energy depression). A
+                    // steep or high cell scores 0, so a swamp never climbs a hillside.
+                    float weight;
+                    if (paint != null)
+                    {
+                        weight = Mathf.Clamp01(paint.arr[i]);
+                    }
+                    else
+                    {
+                        float band = h > level
+                            ? 1f - Mathf.Clamp01((h - level) / above)
+                            : 1f - Mathf.Clamp01((level - h) / below);
+
+                        int xl = Mathf.Max(0, x - 1), xr = Mathf.Min(resX - 1, x + 1);
+                        int zl = Mathf.Max(0, z - 1), zr = Mathf.Min(resZ - 1, z + 1);
+                        float gx = src.arr[row + xr] - src.arr[row + xl];
+                        float gz = src.arr[zr * resX + x] - src.arr[zl * resX + x];
+                        float grad = Mathf.Sqrt(gx * gx + gz * gz) * 0.5f;
+                        float flatF = 1f - Mathf.Clamp01(grad / maxSlope);
+
+                        weight = Mathf.Clamp01(band) * flatF;
+                    }
+
+                    float outH = h;
+                    if (weight > 0.001f)
+                    {
+                        // Flatten toward the floor, then lay low hummock mounds/hollows over
+                        // it. The mound relief is what makes the shallows read as organic mud
+                        // rather than a flat pond.
+                        outH = Mathf.Lerp(h, floor, flat * weight);
+                        if (amp > 1e-6f)
+                        {
+                            float wx = originX + x * ps.x;
+                            float wz = originZ + z * ps.y;
+                            float n = noise.Fractal(wx, wz, feat, 3) - 0.5f;
+                            outH += n * 2f * amp * weight;
+                        }
+                        outH = Mathf.Clamp01(outH);
+                    }
+
+                    dst.arr[i] = outH;
+
+                    // Water-table depth zone: dz = level - floor-adjusted ground. 0 at a dry
+                    // mound (dz <= 0), rising to 1 at pool depth, scaled by presence so the
+                    // mask is 0 outside the swamp.
+                    float dz = level - outH;
+                    maskOut.arr[i] = weight * Mathf.Clamp01(dz / Mathf.Max(1e-4f, drop));
+                }
+            }
+
+            return outputIndex == 1 ? maskOut : dst;
         }
     }
 }

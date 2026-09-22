@@ -37,6 +37,11 @@ namespace UniverseCreator.Editor.Inspectors
         private bool ownerChanged;
         private bool layoutChanged;
         private bool mapChanged;
+        // True once a MouseDrag happens during a slider grab. A bare click on a built-in
+        // IntSlider/Slider track jumps its value but emits no MouseDrag, so this stays false
+        // and the jumped value is discarded rather than committed - the fix for a stray click
+        // on Resident Window / Height Offset triggering RebuildAll/RefreshSliceMap (R2-10/§19).
+        private bool sliderDragged;
 
         public override void OnInspectorGUI()
         {
@@ -145,12 +150,19 @@ namespace UniverseCreator.Editor.Inspectors
                 // Resident window - 'the 25'. The tiles kept loaded around the player at
                 // runtime. Fixed, not tied to world size, so a big world does not hold
                 // itself resident and crash a phone. Odd only.
+                if (Event.current.type == EventType.MouseDown) sliderDragged = false;
+                if (Event.current.type == EventType.MouseDrag) sliderDragged = true;
                 int window = EditorGUILayout.IntSlider(
                     new GUIContent("Resident Window",
                                    "Tiles per side kept loaded around the player at runtime ('the 25'). " +
                                    "Odd only. Not tied to world size."),
                     owner.residentWindowPerSide, 1, UniverseCreatorObject.MaxResidentWindowPerSide);
-                if (window != owner.residentWindowPerSide)
+                // Accept a change only from a real drag OR a keyboard edit of the number box;
+                // a bare click on the slider track (no drag, not editing text) is discarded so
+                // focusing the row cannot trigger RebuildAll (R2-10 / §19). Typing still works
+                // because editingTextField is true while the field has focus.
+                if (window != owner.residentWindowPerSide &&
+                    (sliderDragged || EditorGUIUtility.editingTextField))
                 {
                     RecordOwner("Change Resident Window");
                     owner.residentWindowPerSide = window;
@@ -271,22 +283,30 @@ namespace UniverseCreator.Editor.Inspectors
                         mapChanged = true;
                     }
 
+                    if (Event.current.type == EventType.MouseDown) sliderDragged = false;
+                    if (Event.current.type == EventType.MouseDrag) sliderDragged = true;
                     float offset = EditorGUILayout.Slider(
                         new GUIContent("Height Offset (m)",
                                        "Metres above the surface, so the lines do not z-fight the terrain."),
                         manager.sliceMapHeightOffset, 0f, 50f);
-                    if (!Mathf.Approximately(offset, manager.sliceMapHeightOffset))
+                    // Drag-or-type only; a stray track-click is ignored (R2-10 / §19).
+                    if (!Mathf.Approximately(offset, manager.sliceMapHeightOffset) &&
+                        (sliderDragged || EditorGUIUtility.editingTextField))
                     {
                         RecordManager("Change Slice Map Offset");
                         manager.sliceMapHeightOffset = offset;
                         mapChanged = true;
                     }
 
+                    if (Event.current.type == EventType.MouseDown) sliderDragged = false;
+                    if (Event.current.type == EventType.MouseDrag) sliderDragged = true;
                     int samples = EditorGUILayout.IntSlider(
                         new GUIContent("Samples Per Cell",
                                        "Points along each cell edge. Higher hugs the surface more closely."),
                         manager.sliceMapSamplesPerCell, 1, 32);
-                    if (samples != manager.sliceMapSamplesPerCell)
+                    // Drag-or-type only; a stray track-click is ignored (R2-10 / §19).
+                    if (samples != manager.sliceMapSamplesPerCell &&
+                        (sliderDragged || EditorGUIUtility.editingTextField))
                     {
                         RecordManager("Change Slice Map Samples");
                         manager.sliceMapSamplesPerCell = samples;

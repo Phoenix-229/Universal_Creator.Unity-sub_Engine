@@ -86,7 +86,8 @@ namespace UniverseCreator.TerrainSystem
                                         float searchMetres, float strength, int samples,
                                         float deadbandMetres = 0f,
                                         bool holdEnds = false,
-                                        float submergedFloorY = float.NegativeInfinity)
+                                        float submergedFloorY = float.NegativeInfinity,
+                                        float bankFlatnessThreshold = 0f)
         {
             if (points == null || points.Count < 2 || ground == null) return;
 
@@ -141,6 +142,17 @@ namespace UniverseCreator.TerrainSystem
                 float bestOffset = 0f;
                 float bestHeight = hereHeight;
 
+                // §18.2 slope gate. cos(theta) = N.U; a station may not seat on a face steeper
+                // than the threshold (a hillside), only on flat valley ground. Among the
+                // candidates LOWER than here we prefer the lowest FLAT one; a genuine gorge
+                // with no flat candidate falls back to the plain lowest, so a course is never
+                // stranded. Off (threshold 0) skips all of this - the original behaviour.
+                bool slopeGate = bankFlatnessThreshold > 1e-4f;
+                float slopeEps = Mathf.Max(0.5f, reach / half);
+                float bestFlatOffset = 0f;
+                float bestFlatHeight = float.PositiveInfinity;
+                bool haveFlat = false;
+
                 for (int s = -half; s <= half; s++)
                 {
                     if (s == 0) continue;
@@ -164,6 +176,25 @@ namespace UniverseCreator.TerrainSystem
                         bestHeight = h;
                         bestOffset = offset;
                     }
+
+                    // Track the lowest FLAT candidate (§18.2). Slope is only sampled when a
+                    // candidate could improve the flat-best, so the extra ground reads stay
+                    // bounded, and only when the gate is on.
+                    if (slopeGate && h < bestFlatHeight - 1e-4f)
+                    {
+                        float cx = p.x + side.x * offset;
+                        float cz = p.z + side.y * offset;
+                        float ghx = ground(cx + slopeEps, cz) - ground(cx - slopeEps, cz);
+                        float ghz = ground(cx, cz + slopeEps) - ground(cx, cz - slopeEps);
+                        float gmag = Mathf.Sqrt(ghx * ghx + ghz * ghz) / (2f * slopeEps);
+                        float ndotu = 1f / Mathf.Sqrt(1f + gmag * gmag);
+                        if (ndotu >= bankFlatnessThreshold)
+                        {
+                            bestFlatHeight = h;
+                            bestFlatOffset = offset;
+                            haveFlat = true;
+                        }
+                    }
                 }
 
                 // Deadband: only correct a point that has genuinely climbed a bank -
@@ -171,13 +202,18 @@ namespace UniverseCreator.TerrainSystem
                 // deadband. A point already on (or within the deadband of) the local low
                 // is left exactly where the planner/designer put it, so a seated course
                 // keeps its planned line instead of drifting into every micro-dip.
-                if (hereHeight - bestHeight <= dead)
+                // Prefer the flat valley floor over a marginally-lower steep face (§18.2);
+                // fall back to the plain lowest when no flat candidate was found.
+                float chosenHeight = (slopeGate && haveFlat) ? bestFlatHeight : bestHeight;
+                float chosenOffset = (slopeGate && haveFlat) ? bestFlatOffset : bestOffset;
+
+                if (hereHeight - chosenHeight <= dead)
                 {
                     moved[i] = p;
                     continue;
                 }
 
-                float take = bestOffset * pull;
+                float take = chosenOffset * pull;
                 moved[i] = new Vector3(p.x + side.x * take, p.y, p.z + side.y * take);
             }
 

@@ -890,7 +890,8 @@ where they carve height.
 |---|---|---|---|
 | River Network Trace | Selector | `Height` (Matrix) | `River Mask` (Matrix) |
 | River Course Solver | Selector | `Height` (Matrix) | `Height`, `River Mask` (Matrix) |
-| River Carve | Modifier | `Height`, `River Mask` (Matrix) | `Height` (Matrix) |
+| River Carve | Modifier | `Height`, `River Mask`, `Water Mask` (opt) (Matrix) | `Height` (Matrix) |
+| Swamp Basin | Selector | `Height`, `Swamp Mask` (opt) (Matrix) | `Height`, `Swamp Mask` (Matrix) |
 | Ocean Level | Selector | `Height` (Matrix) | `Water Mask`, `Depth`, `Shoreline` (Matrix) |
 | Lake Fill | Selector | `Height`, `Lake Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
 | River Fill | Selector | `Height`, `River Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
@@ -1742,20 +1743,20 @@ by preference, or from `River Network Trace`.
 |---|---|---|---|---|
 | `Height` | in | Matrix | **yes** | The height chain. Best taken from `River Course Solver`'s `Height` output, so the carve reads the exact surface the course was seated against. Unwired, there is nothing to carve and the node returns flat ground |
 | `River Mask` | in | Matrix | **yes** | `River Course Solver`'s `River Mask` (preferred) or `River Network Trace`'s. **This is the node's only source of "where"** — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted `Shape`, if you want one channel exactly where you put it |
+| `Water Mask` | in | Matrix | no | *Optional.* The `Water Mask` output of `Lake Fill` or `Ocean Level` — the lake/ocean footprint. Where it is wet the carve **tapers its cut to zero** (`Lerp(original, cut, 1 − mask)`), so the channel melts into the pre-carved basin instead of trenching a slot across it or walling it off. Unwired, the carve behaves exactly as before |
 | `Height` | out | Matrix | — | Onward down the height chain. Feed it to `River Fill`'s `Height` (which must read the *carved* surface) and then to `Water Bank Seat` or `Height Output` |
 
-**The channel seats itself in the valley. You cannot wire this wrong.** Before cutting,
-River Carve slides every core cell of the mask along its **cross-flow** line to the lowest
-ground it can find within `Valley Seat Metres`, and re-stamps the channel there. A
-watercourse occupies the thalweg — the lowest line of its own valley — and that is now
-enforced by the node rather than assumed of the mask. The pass is idempotent: a mask
-already on the thalweg finds its minimum at zero offset and does not move. So a coarse
-trace, a fine solve and a hand-painted line all end up in the same correct place, and the
-old failure — a trench grooved down the side of a hill — cannot be produced by a mask
-that is merely a little off.
-
-The slide is **across** the flow only, never along it, so the course keeps its length, its
-direction, its continuity and its confluences.
+**The channel is placed in the valley by the solver, then seated here.** Placement — moving
+the course onto the valley floor — is done upstream by `River Course Solver` / `River Network
+Trace`, which fit the course to the flow with an iterated cross-flow snap (coarse-to-fine, so a
+course several coarse cells up a slope is walked all the way down) and a slope gate (`N·U`,
+about 37°) that refuses to leave a station on a hillside. River Carve does **not** move the
+channel sideways: an earlier design re-stamped it here and that both dropped cells and printed
+walled, disc-shaped trenches, so it was removed. What the carve still does is seat the **bed
+elevation** — for every cell it takes the lowest ground on the line **across** the flow (out to
+`Valley Seat Metres`) and cuts the profile against that, so a bed is never grooved into the side
+of a slope. Because placement is upstream, feed the carve the solver's own `Height` and `River
+Mask` and the course arrives already on the thalweg.
 
 **Order matters here and nowhere else in the river chain does it matter as much.** The correct
 sequence is `River Course Solver` → `River Carve` → `River Fill` → `Water Bank Seat`, with the
@@ -1770,15 +1771,48 @@ waterline described three times.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Depth` | 0.012 | Channel depth, normalised |
+| `Depth` | 0.012 | Channel depth, normalised (the depth of a nominal-width reach) |
+| `Flow Depth Exponent` | 0.8 | How much depth grows with the local channel width. Leopold–Maddock gives depth ∝ width^0.8, so headwaters cut shallow and trunks deep (the vein network starts small and grows), and a pinch between hills deepens (Manning squeeze). 0 = flat `Depth` everywhere (the old behaviour) |
 | `Bank Width` | 25 | Metres from channel centre to the top of the bank |
 | `Profile Power` | 1.6 | Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon |
 | `Bed Flattening` | 0.6 | How flat the channel floor is. Real rivers have flat beds |
-| `Levee Height` | 0 | Raised banks from deposited sediment, as real rivers build |
+| `Bed Width Fraction` | 0.35 | Trapezoid channel: the inner fraction of the half-width is a flat bed, the rest a `Profile Power`-shaped wall out to the bank. 0 = the old pure power curve; ~0.35 gives the real-world trapezium that the floodplain benches and the U/V valley slopes around |
+| `Levee Height` | 0 | Raised banks from deposited sediment. Off by default. When on, a levee builds **only on big rivers** (see Levee Min Width Ratio), is capped at the untouched ground so it can never dam the valley, and is broken by noise into natural crevasse-splay gaps — a low, wide ridge, not a wall |
+| `Levee Min Width Ratio` | 1.8 | A levee forms only where the local channel is at least this multiple of the nominal bank. Big rivers (Mississippi, Yellow) build them; streams and small rivers do not |
+| `Stream Width Ratio` | 0.6 | Below this local-width multiple the channel is a **stream** and gets no floodplain (a brook stays in its trench); at or above it the floodplain belt is graded. Every river but a stream has a floodplain |
 | `Floodplain Width K` | 5 | Floodplain half-width as a multiple of bank width. 0 turns the floodplain off |
 | `Floodplain Depth Fraction` | 0.25 | How far the floodplain bench sits below the valley floor, as a fraction of `Depth` |
-| `Valley Seat Metres` | 40 | How far across the flow the channel may slide to find the valley floor. Raise it if your drainage solve is coarse relative to the world; the seek reaches the wider of this and `Bank Width` |
+| `Valley Seat Metres` | 40 | How far across the flow the carve looks for the lowest ground when seating the **bed elevation** — it does not move the channel (placement is the solver's job). The seek reaches the wider of this and `Bank Width` |
 | `Sea Level` | 0.35 | The waterline, normalised. The bed is never cut below it, and within one `Depth` of it the cut fades to nothing so the channel **rises to meet the sea at the shoreline** instead of arriving under the water as an open slot |
+
+#### Swamp Basin
+Shapes a swamp — a low-energy, flat depression where a static water table sits at or just
+above a hummocky floor. It does **not** trench like a river. It flattens a low-lying, gently
+sloped region toward a swamp floor, lays low-amplitude hummock micro-relief over it, and emits
+a **Swamp Mask** whose value is the water-table depth zone: **0** on a dry mound, **~0.5** in
+saturated shallows, **1** in a deep pool. Feed that mask to the splat/scatter so algae sits in
+the pools, reeds in the shallows, and cypress/mangrove on the mound edges. Put the visible
+water in with a **Swamp** water body (placed by hand or procedurally over the basin).
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Unwired, there is nothing to shape and the node returns flat ground |
+| `Swamp Mask` | in | Matrix | no | *Optional.* A hand-painted `Shape` marking where the swamp is. Unwired, the node **detects** swamps procedurally: flat ground lying near the water table |
+| `Height` | out | Matrix | — | Onward down the height chain |
+| `Swamp Mask` | out | Matrix | — | The water-table depth zone (0 dry → 1 deep). Feed to `Biome Splat Output` / scatter and to a Swamp water body |
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Swamp Level` | 0.4 | Water-table height, normalised. The swamp forms around this |
+| `Floor Drop` | 0.02 | How far below the table the flattened floor sits — sets pool depth |
+| `Flatten` | 0.85 | How strongly the floor is flattened toward the level |
+| `Detect Max Slope` | 0.02 | Procedural detection: the steepest ground still counted as a flat basin (a swamp never climbs a hillside) |
+| `Band Below` / `Band Above` | 0.03 / 0.01 | Detection height band under and over the water table |
+| `Hummock Amp` | 0.0015 | Micro-relief amplitude, normalised — keep tiny; real hummocks are ~0.3 m |
+| `Hummock Feature Metres` | 25 | Size of the hummock mounds |
+| `Seed` | 4242 | So a swamp is identical on every rebuild |
 
 #### Water Bank Seat
 Cuts a shore so the water surface meets the ground **exactly**. This is the node that stops

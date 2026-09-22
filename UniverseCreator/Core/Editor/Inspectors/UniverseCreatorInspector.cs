@@ -53,6 +53,11 @@ namespace UniverseCreator.Editor.Inspectors
         // Slider drag state. Only one slider can be dragged, so one buffer.
         private string liveSliderField;
         private float liveSliderValue;
+        // True once a real drag (a MouseDrag event) happens during the current slider grab.
+        // A bare click on the track jumps an IMGUI slider's value but produces no MouseDrag,
+        // so this stays false and the click is discarded instead of committing + regenerating
+        // - the fix for "clicking the Max Height slider flattens the terrain" (R2-10 / §19).
+        private bool sliderDragged;
 
         // Set once per OnInspectorGUI so the control helpers can record undo.
         private UniverseCreatorObject ucTarget;
@@ -1585,6 +1590,7 @@ namespace UniverseCreator.Editor.Inspectors
                                                     GUILayout.MinWidth(40));
             if (EditorGUI.EndChangeCheck())
             {
+                if (liveSliderField != fieldName) sliderDragged = false;   // grab just began
                 liveSliderField = fieldName;
                 liveSliderValue = next;
                 dragging = true;
@@ -1595,18 +1601,28 @@ namespace UniverseCreator.Editor.Inspectors
                 GUILayout.Label(liveSliderValue.ToString(format), EditorStyles.miniLabel, GUILayout.Width(58));
                 EditorGUILayout.EndHorizontal();
 
+                // A genuine drag emits MouseDrag events; a bare click on the track does not.
+                if (Event.current.type == EventType.MouseDrag) sliderDragged = true;
+
                 // hotControl drops to 0 the moment the mouse button is released.
                 if (GUIUtility.hotControl == 0)
                 {
-                    float committed = Mathf.Clamp(liveSliderValue, min, max);
                     liveSliderField = null;
 
-                    if (!Mathf.Approximately(committed, value))
+                    // Commit ONLY if the user actually dragged. A stray click that merely
+                    // jumped the track is discarded, so focusing the row cannot flatten the
+                    // world (R2-10 / §19); the value is left exactly as it was.
+                    if (sliderDragged)
                     {
-                        Undo.RecordObject(ucTarget, "Change " + label);
-                        value = committed;
-                        valueChanged = true;
+                        float committed = Mathf.Clamp(liveSliderValue, min, max);
+                        if (!Mathf.Approximately(committed, value))
+                        {
+                            Undo.RecordObject(ucTarget, "Change " + label);
+                            value = committed;
+                            valueChanged = true;
+                        }
                     }
+                    sliderDragged = false;
                 }
                 return;
             }
@@ -1643,6 +1659,7 @@ namespace UniverseCreator.Editor.Inspectors
                                                     GUILayout.MinWidth(40));
             if (EditorGUI.EndChangeCheck())
             {
+                if (liveSliderField != fieldName) sliderDragged = false;   // grab just began
                 liveSliderField = fieldName;
                 liveSliderValue = Mathf.Round(next);   // snap so the label never shows a fraction
                 dragging = true;
@@ -1654,17 +1671,26 @@ namespace UniverseCreator.Editor.Inspectors
                                 EditorStyles.miniLabel, GUILayout.Width(58));
                 EditorGUILayout.EndHorizontal();
 
+                // A genuine drag emits MouseDrag events; a bare click on the track does not.
+                if (Event.current.type == EventType.MouseDrag) sliderDragged = true;
+
                 if (GUIUtility.hotControl == 0)
                 {
-                    int committed = Mathf.Clamp(Mathf.RoundToInt(liveSliderValue), min, max);
                     liveSliderField = null;
 
-                    if (committed != value)
+                    // Commit ONLY on a real drag - a stray click that jumped the track is
+                    // discarded so focusing the row cannot regenerate (R2-10 / §19).
+                    if (sliderDragged)
                     {
-                        Undo.RecordObject(ucTarget, "Change " + label);
-                        value = committed;
-                        valueChanged = true;
+                        int committed = Mathf.Clamp(Mathf.RoundToInt(liveSliderValue), min, max);
+                        if (committed != value)
+                        {
+                            Undo.RecordObject(ucTarget, "Change " + label);
+                            value = committed;
+                            valueChanged = true;
+                        }
                     }
+                    sliderDragged = false;
                 }
                 return;
             }
