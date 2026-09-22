@@ -3458,31 +3458,54 @@ redesigning the graph.</p>
 </tbody>
 </table></div>
 <h4 id="river-carve" data-title="River Carve">River Carve</h4>
-<p>Cuts a channel profile into the terrain along a river mask — normally from
-<code>River Network Trace</code>.</p>
+<p>Cuts a channel profile into the terrain along a river mask — from <code>River Course Solver</code>
+by preference, or from <code>River Network Trace</code>.</p>
 <p><strong>Ports</strong></p>
 <div class="tablewrap"><table>
 <thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Required</th><th>Wire it to</th></tr></thead>
 <tbody>
-<tr><td><code>Height</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td>The height chain, after <code>River Network Trace</code> has been given the same height. Unwired, there is nothing to carve and the node returns flat ground</td></tr>
-<tr><td><code>River Mask</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td><code>River Network Trace</code>'s <code>River Mask</code>. <strong>This is the node's only source of &quot;where&quot;</strong> — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted <code>Shape</code>, if you want one channel exactly where you put it</td></tr>
+<tr><td><code>Height</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td>The height chain. Best taken from <code>River Course Solver</code>'s <code>Height</code> output, so the carve reads the exact surface the course was seated against. Unwired, there is nothing to carve and the node returns flat ground</td></tr>
+<tr><td><code>River Mask</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td><code>River Course Solver</code>'s <code>River Mask</code> (preferred) or <code>River Network Trace</code>'s. <strong>This is the node's only source of &quot;where&quot;</strong> — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted <code>Shape</code>, if you want one channel exactly where you put it</td></tr>
+<tr><td><code>Water Mask</code></td><td>in</td><td>Matrix</td><td>no</td><td><em>Optional.</em> The <code>Water Mask</code> output of <code>Lake Fill</code> or <code>Ocean Level</code> — the lake/ocean footprint. Where it is wet the carve <strong>tapers its cut to zero</strong> (<code>Lerp(original, cut, 1 − mask)</code>), so the channel melts into the pre-carved basin instead of trenching a slot across it or walling it off. Unwired, the carve behaves exactly as before</td></tr>
 <tr><td><code>Height</code></td><td>out</td><td>Matrix</td><td>—</td><td>Onward down the height chain. Feed it to <code>River Fill</code>'s <code>Height</code> (which must read the <em>carved</em> surface) and then to <code>Water Bank Seat</code> or <code>Height Output</code></td></tr>
 </tbody>
 </table></div>
+<p><strong>The channel is placed in the valley by the solver, then seated here.</strong> Placement — moving
+the course onto the valley floor — is done upstream by <code>River Course Solver</code> / <code>River Network
+Trace</code>, which fit the course to the flow with an iterated cross-flow snap (coarse-to-fine, so a
+course several coarse cells up a slope is walked all the way down) and a slope gate (<code>N·U</code>,
+about 37°) that refuses to leave a station on a hillside. River Carve does <strong>not</strong> move the
+channel sideways: an earlier design re-stamped it here and that both dropped cells and printed
+walled, disc-shaped trenches, so it was removed. What the carve still does is seat the <strong>bed
+elevation</strong> — for every cell it takes the lowest ground on the line <strong>across</strong> the flow (out to
+<code>Valley Seat Metres</code>) and cuts the profile against that, so a bed is never grooved into the side
+of a slope. Because placement is upstream, feed the carve the solver's own <code>Height</code> and <code>River
+Mask</code> and the course arrives already on the thalweg.</p>
 <p><strong>Order matters here and nowhere else in the river chain does it matter as much.</strong> The correct
-sequence is <code>River Network Trace</code> → <code>River Carve</code> → <code>River Fill</code> → <code>Water Bank Seat</code>, with the
-same <code>River Mask</code> fanned out from the trace to both the carve and the fill. Put <code>River Fill</code>
+sequence is <code>River Course Solver</code> → <code>River Carve</code> → <code>River Fill</code> → <code>Water Bank Seat</code>, with the
+same <code>River Mask</code> fanned out from the solver to both the carve and the fill. Put <code>River Fill</code>
 before <code>River Carve</code> and it measures a bed that has not been dug yet.</p>
 <p>Set <code>Bank Width</code> the same on <code>River Carve</code> and <code>River Fill</code>. It is one bank described twice, and
 the two nodes disagreeing about how wide it is puts the waterline in the wrong place.</p>
+<p>Set <code>Sea Level</code> the same on <code>River Carve</code>, <code>River Course Solver</code> and <code>Ocean Level</code>. They are one
+waterline described three times.</p>
 <div class="tablewrap"><table>
 <thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
-<tr><td><code>Depth</code></td><td>0.012</td><td>Channel depth, normalised</td></tr>
+<tr><td><code>Depth</code></td><td>0.012</td><td>Channel depth, normalised (the depth of a nominal-width reach)</td></tr>
+<tr><td><code>Flow Depth Exponent</code></td><td>0.8</td><td>How much depth grows with <strong>discharge</strong> — the local channel width. Leopold–Maddock gives depth ∝ width^0.8, so headwaters cut shallow and trunks deep (the vein network starts small and grows). 0 = flat <code>Depth</code> everywhere (the old behaviour). Confinement is a separate term, <code>Squeeze Strength</code></td></tr>
+<tr><td><code>Squeeze Strength</code></td><td>1</td><td>Manning's squeeze: where a <strong>valley pinches</strong> the channel narrower than its discharge width (both walls close in), depth rises to carry the same flow, D ∝ (W_open/W_confined)^0.67. This is confinement — the <em>same</em> river is deeper in a gorge than on a plain — so it composes with <code>Flow Depth Exponent</code> (discharge). A one-sided wall does not squeeze (the flow spreads to the open bank). Bounded so a pinch cannot run depth away. 0 turns it off</td></tr>
 <tr><td><code>Bank Width</code></td><td>25</td><td>Metres from channel centre to the top of the bank</td></tr>
 <tr><td><code>Profile Power</code></td><td>1.6</td><td>Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon</td></tr>
 <tr><td><code>Bed Flattening</code></td><td>0.6</td><td>How flat the channel floor is. Real rivers have flat beds</td></tr>
-<tr><td><code>Levee Height</code></td><td>0</td><td>Raised banks from deposited sediment, as real rivers build</td></tr>
+<tr><td><code>Bed Width Fraction</code></td><td>0.35</td><td>Trapezoid channel: the inner fraction of the half-width is a flat bed, the rest a <code>Profile Power</code>-shaped wall out to the bank. 0 = the old pure power curve; ~0.35 gives the real-world trapezium that the floodplain benches and the U/V valley slopes around</td></tr>
+<tr><td><code>Levee Height</code></td><td>0</td><td>Raised banks from deposited sediment. Off by default. When on, a levee builds <strong>only on big rivers</strong> (see Levee Min Width Ratio), is capped at the untouched ground so it can never dam the valley, and is broken by noise into natural crevasse-splay gaps — a low, wide ridge, not a wall</td></tr>
+<tr><td><code>Levee Min Width Ratio</code></td><td>1.8</td><td>A levee forms only where the local channel is at least this multiple of the nominal bank. Big rivers (Mississippi, Yellow) build them; streams and small rivers do not</td></tr>
+<tr><td><code>Stream Width Ratio</code></td><td>0.6</td><td>Below this local-width multiple the channel is a <strong>stream</strong> and gets no floodplain (a brook stays in its trench); at or above it the floodplain belt is graded. Every river but a stream has a floodplain</td></tr>
+<tr><td><code>Floodplain Width K</code></td><td>5</td><td>Floodplain half-width as a multiple of bank width. 0 turns the floodplain off</td></tr>
+<tr><td><code>Floodplain Depth Fraction</code></td><td>0.25</td><td>How far the floodplain bench sits below the valley floor, as a fraction of <code>Depth</code></td></tr>
+<tr><td><code>Valley Seat Metres</code></td><td>40</td><td>How far across the flow the carve looks for the lowest ground when seating the <strong>bed elevation</strong> — it does not move the channel (placement is the solver's job). The seek reaches the wider of this and <code>Bank Width</code></td></tr>
+<tr><td><code>Sea Level</code></td><td>0.35</td><td>The waterline, normalised. The bed is never cut below it, and within one <code>Depth</code> of it the cut fades to nothing so the channel <strong>rises to meet the sea at the shoreline</strong> instead of arriving under the water as an open slot</td></tr>
 </tbody>
 </table></div>
 <h4 id="water-bank-seat" data-title="Water Bank Seat">Water Bank Seat</h4>
