@@ -515,7 +515,24 @@ namespace UniverseCreator.Editor.Windows
                 "UC Map Camera", HideFlags.HideAndDontSave, typeof(Camera));
             Camera cam = camGo.GetComponent<Camera>();
 
-            RenderTexture rt = RenderTexture.GetTemporary(mapWidth, mapHeight, 24, RenderTextureFormat.ARGB32);
+            // NOT RenderTexture.GetTemporary.
+            //
+            // The temporary pool is aged out by a check that Unity only registers from
+            // inside a render frame. Taking a temporary from editor code - an OnGUI, an
+            // EditorApplication.update - takes it from outside any frame, and the age
+            // check then runs having never been registered: "Checking lifetime of
+            // RenderTextures but m_AgeCheckAdded = false", logged once per allocation and
+            // so climbing every time the map is redrawn. Releasing it correctly, which
+            // the finally below always did, does not prevent the message; the pool is the
+            // wrong tool in an editor context, not the usage.
+            //
+            // A texture we own outright has no pool and no age check. It is created here,
+            // released in the finally, and cannot contribute to that warning at all.
+            RenderTexture rt = new RenderTexture(mapWidth, mapHeight, 24, RenderTextureFormat.ARGB32);
+            rt.name = "UC Topographic Map";
+            rt.hideFlags = HideFlags.HideAndDontSave;
+            rt.Create();
+
             RenderTexture prevActive = RenderTexture.active;
 
             try
@@ -548,7 +565,7 @@ namespace UniverseCreator.Editor.Windows
             {
                 RenderTexture.active = prevActive;
                 cam.targetTexture = null;
-                RenderTexture.ReleaseTemporary(rt);
+                if (rt != null) { rt.Release(); DestroyImmediate(rt); }
                 DestroyImmediate(camGo);
             }
         }

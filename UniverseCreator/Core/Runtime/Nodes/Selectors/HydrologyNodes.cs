@@ -111,6 +111,73 @@ namespace UniverseCreator.Nodes.Selectors
         /// <summary>Most courses traced. Guards pathological heightfields.</summary>
         public int maxChannels = 512;
 
+        /// <summary>
+        /// Builds the per-course refinement pass that seats a traced planform in the
+        /// valley it belongs to. ONE copy of this math, used by every node that traces a
+        /// network, so a course cannot come out of one node fitted and out of another raw.
+        /// </summary>
+        /// <remarks>
+        /// The trace itself is a D8 walk on a drainage solve a few hundred cells across.
+        /// One cell is twenty metres or more on a normal world, so the thread it returns
+        /// is only ever accurate to a cell - and on a slope a cell of error puts the line
+        /// up the hillside from the low ground it is meant to follow. That is the whole
+        /// origin of "the river trench is on the side of the hill": nothing downstream was
+        /// ever told where the valley floor is.
+        ///
+        /// SnapToValley fixes it at the source by sliding each point across the flow onto
+        /// the lowest ground it can see, refusing any sample already under the waterline
+        /// so a course can never be pulled out into the sea. Relax removes the stair-steps
+        /// the D8 walk leaves behind - a D8 path can only move on eight headings, which is
+        /// what makes an unrelaxed course read as joined straight stones. Meander is
+        /// optional and off for the raw trace.
+        ///
+        /// Passing <paramref name="meander"/> as 0 gives a fitted but unembellished course.
+        /// </remarks>
+        internal static System.Action<List<Vector2>, List<float>> BuildValleyRefine(
+            WorldDrainage solve, float searchMetres, float pull, float meander,
+            float maxGrade, float baseWidth, float seaLevel)
+        {
+            if (solve == null) return null;
+
+            UniverseCreator.TerrainSystem.RiverCourseSolver.GroundSampler ground =
+                delegate (float wx, float wz) { return solve.height.GetWorldHeight(wx, wz); };
+
+            float search = Mathf.Max(0f, searchMetres);
+            float pullC = Mathf.Clamp01(pull);
+            float meanderC = Mathf.Clamp01(meander);
+            float grade = Mathf.Max(0.002f, maxGrade);
+            float sea = Mathf.Clamp01(seaLevel);
+            float bw = Mathf.Max(0.5f, baseWidth);
+
+            // Scratch list reused across every course; the delegate is called once per
+            // course by StampNetwork, in-between the trace and the stamp.
+            List<Vector3> course = new List<Vector3>();
+
+            return delegate (List<Vector2> pts, List<float> widths)
+            {
+                if (pts == null || pts.Count < 2) return;
+
+                course.Clear();
+                for (int i = 0; i < pts.Count; i++)
+                    course.Add(new Vector3(pts[i].x, ground(pts[i].x, pts[i].y), pts[i].y));
+
+                // Real-world course passes, endpoints held so the source and mouth do not
+                // move. Count is preserved by all three, so widths stay aligned.
+                UniverseCreator.TerrainSystem.RiverCourseSolver.SnapToValley(
+                    course, ground, search, pullC, 12, 0f, true, sea);
+                UniverseCreator.TerrainSystem.RiverCourseSolver.Relax(course, 2);
+
+                if (meanderC > 1e-4f)
+                    UniverseCreator.TerrainSystem.RiverCourseSolver.Meander(
+                        course, ground, widths, meanderC, grade, bw);
+
+                // Write the fitted planform back; the stamp reads XZ only.
+                int n = Mathf.Min(pts.Count, course.Count);
+                for (int i = 0; i < n; i++)
+                    pts[i] = new Vector2(course[i].x, course[i].z);
+            };
+        }
+
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             Matrix mask = tile.CreateMatrix();
@@ -120,8 +187,19 @@ namespace UniverseCreator.Nodes.Selectors
             if (solve == null) return mask;
             if (stop != null && stop.StopRequested) return null;
 
+            // Seated even here. This node is the RAW network - no meander, no
+            // embellishment - but "raw" describes the planform's shape, not its placement.
+            // A course that sits on a hillside is not a raw river, it is a wrong one, and
+            // leaving the seat to whoever wires the graph is what produced the hillside
+            // trenches. The search distance is tied to the solve's own cell size because
+            // that is exactly the error being corrected: one cell of the drainage grid.
+            float cellMetres = Mathf.Max(1f, Mathf.Sqrt(Mathf.Max(1e-4f, solve.cellArea)));
+
+            System.Action<List<Vector2>, List<float>> refine = BuildValleyRefine(
+                solve, cellMetres * 2f, 0.75f, 0f, 0.06f, baseWidth, seaLevel);
+
             return StampNetwork(mask, solve, channelHeadArea, baseWidth, widthExponent,
-                                maxWidth, seaLevel, maxChannels, stop) ? mask : null;
+                                maxWidth, seaLevel, maxChannels, stop, refine) ? mask : null;
         }
 
         /// <summary>
@@ -389,11 +467,19 @@ namespace UniverseCreator.Nodes.Selectors
         public override Port[] GetOutputs() { return Outs; }
 
         /// <summary>
-        /// The fitted course, emitted under the SAME name River Network Trace uses so
-        /// River Carve / River Fill / Water Bank Seat consume it with no rewiring.
+        /// Two outputs, in the order River Carve reads them:
+        ///   0 Height     - the input heightfield passed straight through, so a single node
+        ///                  feeds BOTH of River Carve's inputs (Height AND River Mask) and
+        ///                  the carve seats its bed on the SAME ground the course was fitted
+        ///                  to. This is the "two ports into one carve" wiring: no need to
+        ///                  route the terrain height around the solver by hand.
+        ///   1 River Mask - the fitted, valley-seated, meandered course, under the SAME name
+        ///                  River Network Trace uses, so River Fill / Water Bank Seat consume
+        ///                  it with no rewiring.
         /// </summary>
         private static readonly Port[] Outs =
         {
+            new Port("Height", PortType.Matrix, PortDirection.Output),
             new Port("River Mask", PortType.Matrix, PortDirection.Output, true)
         };
 
@@ -432,6 +518,15 @@ namespace UniverseCreator.Nodes.Selectors
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            // Output 0 is the input height passed straight through, so the ONE solver node
+            // can drive both of River Carve's inputs. The solver never alters the terrain
+            // itself - it only draws the course - so the passthrough is the untouched input.
+            if (outputIndex == 0)
+            {
+                Matrix passthrough = GetInputMatrix(tile, 0, stop);
+                return passthrough != null ? new Matrix(passthrough) : tile.CreateMatrix();
+            }
+
             Matrix mask = tile.CreateMatrix();
 
             WorldDrainage solve = WorldDrainage.Solve(this, 0, tile, drainageResolution,
@@ -439,43 +534,15 @@ namespace UniverseCreator.Nodes.Selectors
             if (solve == null) return mask;
             if (stop != null && stop.StopRequested) return null;
 
-            // The course solver samples the SAME world height the drainage was solved on,
-            // so the valley it seeks is the valley the network was traced through. XZ is a
-            // plan-view line; Y is whatever the ground under it turns out to be.
-            UniverseCreator.TerrainSystem.RiverCourseSolver.GroundSampler ground =
-                delegate (float wx, float wz) { return solve.height.GetWorldHeight(wx, wz); };
-
-            float search = Mathf.Max(0f, valleySearchMetres);
-            float pull = Mathf.Clamp01(valleyPull);
-            float meander = Mathf.Clamp01(meanderStrength);
-            float grade = Mathf.Max(0.002f, meanderMaxGrade);
-
-            // Scratch lists reused across every course; the delegate is called once per
-            // course by StampNetwork, in-between the trace and the stamp.
-            List<Vector3> course = new List<Vector3>();
-
+            // ONE copy of the valley-fitting math, shared with River Network Trace. This
+            // node differs from the raw trace only in that it also meanders and lets you
+            // set the search distance by hand - the seating itself is identical, because
+            // there is only one right answer to "where is the valley floor" and two
+            // implementations of it would eventually disagree.
             System.Action<List<Vector2>, List<float>> refine =
-                delegate (List<Vector2> pts, List<float> widths)
-                {
-                    if (pts == null || pts.Count < 2) return;
-
-                    course.Clear();
-                    for (int i = 0; i < pts.Count; i++)
-                        course.Add(new Vector3(pts[i].x, ground(pts[i].x, pts[i].y), pts[i].y));
-
-                    // Real-world course passes, endpoints held so the source and mouth do
-                    // not move. Count is preserved by all three, so widths stay aligned.
-                    UniverseCreator.TerrainSystem.RiverCourseSolver.SnapToValley(
-                        course, ground, search, pull, 12, 0f, true);
-                    UniverseCreator.TerrainSystem.RiverCourseSolver.Relax(course, 2);
-                    UniverseCreator.TerrainSystem.RiverCourseSolver.Meander(
-                        course, ground, widths, meander, grade, Mathf.Max(0.5f, baseWidth));
-
-                    // Write the fitted planform back; the stamp reads XZ only.
-                    int n = Mathf.Min(pts.Count, course.Count);
-                    for (int i = 0; i < n; i++)
-                        pts[i] = new Vector2(course[i].x, course[i].z);
-                };
+                RiverNetworkTraceNode.BuildValleyRefine(
+                    solve, valleySearchMetres, valleyPull, meanderStrength,
+                    meanderMaxGrade, baseWidth, seaLevel);
 
             return RiverNetworkTraceNode.StampNetwork(
                 mask, solve, channelHeadArea, baseWidth, widthExponent, maxWidth,
@@ -539,6 +606,30 @@ namespace UniverseCreator.Nodes.Selectors
         /// </summary>
         public float floodplainDepthFraction = 0.25f;
 
+        /// <summary>
+        /// How far to EITHER SIDE of the stamped centreline, in world metres, the carve
+        /// looks for the true valley floor before it seats the bed. This is what makes the
+        /// seating self-correcting: a coarse trace (River Network Trace) can land the mask
+        /// up a hillside by a solve cell or more, and a seat search only as wide as the bank
+        /// then finds "lowest" still on the hill and grooves the slope - the reported "river
+        /// on the side of a hill". Searching a real metre distance across the flow finds the
+        /// actual thalweg and drops the bed onto it, so the channel sits in the valley no
+        /// matter which node drew the mask. 0 disables the widened seek and uses only the
+        /// bank-width corridor (the old behaviour).
+        /// </summary>
+        public float valleySeatMetres = 40f;
+
+        /// <summary>
+        /// The waterline, 0-1 of world height, shared with every other water node. The
+        /// carved bed is never cut below this: a river descends to the sea and MEETS it at
+        /// the shore, it does not tunnel under it. Without this floor the profile keeps
+        /// cutting past the last above-water cell and the trench continues below the ocean
+        /// surface - the reported "river trench exits inside the ocean", which breaks the
+        /// river-to-ocean connection. Set it to the same value as Sea Level everywhere else
+        /// (0.35).
+        /// </summary>
+        public float seaLevel = 0.35f;
+
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             Matrix src = GetInputMatrix(tile, 0, stop);
@@ -584,7 +675,15 @@ namespace UniverseCreator.Nodes.Selectors
             // steps, and the window's own corners printed the axis-aligned rectangular
             // footprints around every channel. A line across the flow has neither fault,
             // and costs less because it is only read where the mask is wet.
-            int corridor = Mathf.Clamp(Mathf.RoundToInt(bankWidth / mpp), 1, 64);
+            //
+            // The seat corridor reaches the WIDER of the bank and the valley-seat distance.
+            // The bank width alone is only a few pixels, too short to climb back down off a
+            // hillside the coarse trace stamped the mask onto; extending the cross-flow seek
+            // to Valley Seat Metres lets the bed find the real thalweg and drop onto it, so
+            // the channel is seated in the valley whatever node drew the mask. Bounded so a
+            // large distance on a fine chunk cannot run the seek away.
+            float seatMetres = Mathf.Max(bankWidth, Mathf.Max(0f, valleySeatMetres));
+            int corridor = Mathf.Clamp(Mathf.RoundToInt(seatMetres / mpp), 1, 96);
 
             // The mask at the corridor's own scale. The raw mask is a hard stamp whose
             // gradient is meaningless between cells; blurred, it is a smooth ridge whose
@@ -592,8 +691,48 @@ namespace UniverseCreator.Nodes.Selectors
             Matrix maskSmooth = MatrixOperations.GaussianBlur(river, sigma);
             if (stop != null && stop.StopRequested) return null;
 
+            // ---------------------------------------------------------------
+            //  THE SEAT. This is what makes valley placement INBUILT.
+            // ---------------------------------------------------------------
+            // Taking the lowest ground across the section fixes the bed's ELEVATION but
+            // not its POSITION: the trench was still cut at the mask's own cells, only
+            // cut deeper, which is precisely the reported fault - a gash down the side of
+            // a hill. Seating the elevation without seating the position makes it worse,
+            // not better.
+            //
+            // So the channel is physically moved. A watercourse occupies the thalweg, the
+            // lowest line of its own valley; that is not a preference, it is where water
+            // is. Every core cell of the incoming mask therefore looks along its
+            // cross-flow line, finds the OFFSET at which the ground is lowest, and the
+            // channel is re-stamped there. The slide is along the cross-section only, so
+            // the course keeps its length, its direction and its continuity - neighbouring
+            // centreline cells slide onto neighbouring thalweg cells - and nothing about
+            // the drainage network's topology changes.
+            //
+            // The pass is idempotent by construction: a mask that is already on the
+            // thalweg finds its minimum at zero offset and does not move. That is why it
+            // can run unconditionally, whichever node drew the mask - River Course Solver,
+            // River Network Trace, a hand-painted layer - and why a badly-placed mask can
+            // no longer produce a hillside trench. Seating is no longer the graph author's
+            // responsibility.
+            int bankPixels = Mathf.Max(1, Mathf.RoundToInt(bankWidth / mpp));
+            Matrix seated = SeatOnThalweg(src, river, maskSmooth, resX, resZ,
+                                          corridor, bankPixels, stop);
+            if (stop != null && stop.StopRequested) return null;
+
+            if (seated != null)
+            {
+                river = seated;
+                // The carve profile, the cross directions and the floodplain march all
+                // read the mask, so they must all read the SEATED one or the bed would be
+                // shaped around a channel that is no longer there.
+                maskSmooth = MatrixOperations.GaussianBlur(river, sigma);
+                if (stop != null && stop.StopRequested) return null;
+            }
+
             float power = Mathf.Max(0.2f, profilePower);
             float flatten = Mathf.Clamp01(bedFlattening);
+            float sea = Mathf.Clamp01(seaLevel);
 
             // Floodplain belt (§4). Half-width scales with the channel (W_fp ≈ k·w), so it
             // is NOT a constant: a wider channel carries a wider plain. Bounded in pixels so
@@ -630,7 +769,28 @@ namespace UniverseCreator.Nodes.Selectors
                     // wherever on the cross-section that turns out to be.
                     float floorHere = LowestAcross(src, maskSmooth, x, z, resX, resZ, corridor);
                     float bed = Mathf.Lerp(floorHere, smoothed.arr[i], flatten * w);
-                    float cut = bed - depth * profile;
+
+                    // BASE LEVEL. A river cannot cut below the surface it flows into -
+                    // that is Playfair's law, and it is why a channel flattens out as it
+                    // nears its mouth instead of arriving at full depth. Within one
+                    // channel depth of the waterline the cut is faded to nothing, so the
+                    // trench rises to meet the sea AT the shoreline. Without this the
+                    // channel arrived under the water as an open slot and the join
+                    // between river and ocean read as a hole rather than a mouth.
+                    float toBase = (src.arr[i] - sea) / Mathf.Max(1e-5f, depth);
+                    float mouthFade = Mathf.Clamp01(toBase);
+
+                    float cut = bed - depth * profile * mouthFade;
+
+                    // Sea-level floor. A river descends to the sea and meets it at the
+                    // shore; it does not cut below the ocean surface and tunnel out under
+                    // the water. Where the ground here is already above the waterline the
+                    // bed is held at or above it, so the channel eases to the shoreline and
+                    // stops. Where the ground is already below sea level (an inlet, a lagoon)
+                    // the carve leaves it alone rather than lifting it. This is the fix for
+                    // both "trench exits inside the ocean" and "digs through a low rise to
+                    // force a path to the sea": below the waterline there is nothing to cut.
+                    if (src.arr[i] >= sea && cut < sea) cut = sea;
 
                     float value = Mathf.Min(dst.arr[i], cut);
 
@@ -718,6 +878,110 @@ namespace UniverseCreator.Nodes.Selectors
                     if (target < dst.arr[ai]) dst.arr[ai] = Mathf.Clamp01(target);
                 }
             }
+        }
+
+        /// <summary>
+        /// Slides the channel sideways onto the thalweg - the lowest line of its own
+        /// valley - and re-stamps it there. Returns null when nothing moved, so the
+        /// caller can skip the rebuild.
+        /// </summary>
+        /// <remarks>
+        /// The offset is searched along the cross-flow line only. Moving a course along
+        /// its own flow direction would shorten or lengthen it and could detach it from
+        /// its confluences; moving it across the flow cannot, because the cross-section
+        /// through a given point is the set of places that point could physically be and
+        /// still be the same reach of river. That is the whole reason the structure
+        /// tensor is used to find the cross direction rather than a plain gradient.
+        ///
+        /// Ties break toward zero offset - the loop only accepts a STRICTLY lower sample -
+        /// so flat ground leaves the course exactly where it was rather than drifting it
+        /// to one side over successive rebuilds.
+        ///
+        /// Only cells at the channel core are moved. The partial-bank cells of the
+        /// incoming mask are discarded and the profile is redrawn from the seated core,
+        /// because a bank that slid by a different amount from its own centreline would
+        /// tear the cross-section apart.
+        /// </remarks>
+        private static Matrix SeatOnThalweg(Matrix src, Matrix mask, Matrix maskSmooth,
+                                            int resX, int resZ, int radius, int bankPixels,
+                                            StopToken stop)
+        {
+            if (radius <= 0 || bankPixels <= 0) return null;
+
+            Matrix outMask = null;
+            bool moved = false;
+            float r2 = bankPixels * bankPixels;
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float w = mask.arr[i];
+
+                    // Core only. Below this the cell is a bank, and banks are redrawn
+                    // from the seated core rather than carried across.
+                    if (w <= 0.5f) continue;
+
+                    float dx, dz;
+                    if (!CrossDirection(maskSmooth, x, z, resX, resZ, out dx, out dz)) continue;
+
+                    int bestOx = 0, bestOz = 0;
+                    float bestH = src.arr[i];
+
+                    for (int k = 1; k <= radius; k++)
+                    {
+                        int ox = Mathf.RoundToInt(dx * k);
+                        int oz = Mathf.RoundToInt(dz * k);
+
+                        int ax = Mathf.Clamp(x + ox, 0, resX - 1);
+                        int az = Mathf.Clamp(z + oz, 0, resZ - 1);
+                        float a = src.arr[az * resX + ax];
+                        if (a < bestH) { bestH = a; bestOx = ax - x; bestOz = az - z; }
+
+                        int bx = Mathf.Clamp(x - ox, 0, resX - 1);
+                        int bz = Mathf.Clamp(z - oz, 0, resZ - 1);
+                        float b = src.arr[bz * resX + bx];
+                        if (b < bestH) { bestH = b; bestOx = bx - x; bestOz = bz - z; }
+                    }
+
+                    if (outMask == null) outMask = new Matrix(mask.rect);
+                    if (bestOx != 0 || bestOz != 0) moved = true;
+
+                    // Re-stamp the cross-section at the seated centre. The value falls
+                    // off with distance exactly as the incoming mask's did - 1 on the
+                    // thalweg, 0 at the bank - because River Carve reads the mask value
+                    // as the profile coordinate further down.
+                    int cx2 = x + bestOx;
+                    int cz2 = z + bestOz;
+
+                    for (int oz2 = -bankPixels; oz2 <= bankPixels; oz2++)
+                    {
+                        int sz = cz2 + oz2;
+                        if (sz < 0 || sz >= resZ) continue;
+                        int srow = sz * resX;
+
+                        for (int ox2 = -bankPixels; ox2 <= bankPixels; ox2++)
+                        {
+                            int sx = cx2 + ox2;
+                            if (sx < 0 || sx >= resX) continue;
+
+                            float d2 = ox2 * ox2 + oz2 * oz2;
+                            if (d2 > r2) continue;
+
+                            float v = w * (1f - Mathf.Sqrt(d2 / r2));
+                            int si = srow + sx;
+                            if (v > outMask.arr[si]) outMask.arr[si] = v;
+                        }
+                    }
+                }
+            }
+
+            return moved ? outMask : null;
         }
 
         /// <summary>

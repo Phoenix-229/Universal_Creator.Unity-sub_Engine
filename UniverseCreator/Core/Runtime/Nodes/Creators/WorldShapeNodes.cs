@@ -27,8 +27,27 @@ namespace UniverseCreator.Nodes.Creators
 
         public int seed = 777;
 
-        /// <summary>Coastline detail size in world metres.</summary>
-        public float size = 6000f;
+        /// <summary>
+        /// Coastline detail size in world metres: the wavelength of the largest bay or
+        /// headland. Read it against the world, not on its own - it is a length, and a
+        /// length only means something next to another length.
+        /// </summary>
+        /// <remarks>
+        /// This used to default to 6000 m, which on the default 4 km world is a base
+        /// octave LONGER THAN THE WORLD. Less than one cycle fits, so the largest and
+        /// loudest octave contributes a near-constant offset instead of a shape, and the
+        /// landmass comes out as the bare radial falloff: a smooth ellipse with a rim of
+        /// small wrinkles. Everything downstream inherits it - no real bays means no real
+        /// valleys behind them, and no valleys means the rivers have nowhere correct to
+        /// go.
+        ///
+        /// Two to three cycles across the world is what reads as a coastline, so a
+        /// sensible value is between a third and a half of the world span: 2000 m on a
+        /// 4 km world, 5000 m on a 10 km one. That is the new default. Values above the
+        /// world span are clamped in Create, because below one cycle there is no
+        /// coastline left to shape.
+        /// </remarks>
+        public float size = 2000f;
 
         /// <summary>Fraction of the world radius that stays fully land.</summary>
         public float landRadius = 0.55f;
@@ -60,7 +79,13 @@ namespace UniverseCreator.Nodes.Creators
             float halfX = Mathf.Max(1f, tile.fullWorldSize.x * 0.5f);
             float halfZ = Mathf.Max(1f, tile.fullWorldSize.z * 0.5f);
 
-            float safeSize = Mathf.Max(1f, size);
+            // Clamped to the world span. A base octave longer than the world cannot
+            // complete a cycle inside it, so it stops being a shape and becomes a
+            // constant: the coast noise silently switches itself off and the landmass
+            // degenerates to the bare radial falloff. Holding it at the span keeps at
+            // least one full bay-and-headland in view whatever the field is set to.
+            float worldSpan = Mathf.Max(1f, Mathf.Max(tile.fullWorldSize.x, tile.fullWorldSize.z));
+            float safeSize = Mathf.Clamp(size, 1f, worldSpan);
             float safeLand = Mathf.Clamp(landRadius, 0.05f, 0.99f);
             float safeFall = Mathf.Max(0.1f, falloff);
 

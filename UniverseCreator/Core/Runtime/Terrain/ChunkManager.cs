@@ -3271,6 +3271,16 @@ namespace UniverseCreator.TerrainSystem
                 m.name = "UC_WireframePreview";
                 m.hideFlags = HideFlags.DontSave;
                 c.wireframeFilter.sharedMesh = m;
+
+#if UNITY_EDITOR
+                // The wireframe preview is a cosmetic overlay laid directly over the
+                // terrain surface. Left pickable it intercepts every scene-view click on
+                // the ground, so selecting a Terrain chunk to use the native Terrain tools
+                // silently fails wherever the overlay covers it - the reported "can't click
+                // the terrain, only works from some angles". Take it out of picking (same
+                // as the water surface) so clicks fall through to the Terrain underneath.
+                UnityEditor.SceneVisibilityManager.instance.DisablePicking(holder, false);
+#endif
             }
 
             ChunkWireframePreview.Build(c.wireframeFilter.sharedMesh, c.appliedHeights,

@@ -889,6 +889,7 @@ where they carve height.
 | Node | Category | Inputs | Outputs |
 |---|---|---|---|
 | River Network Trace | Selector | `Height` (Matrix) | `River Mask` (Matrix) |
+| River Course Solver | Selector | `Height` (Matrix) | `Height`, `River Mask` (Matrix) |
 | River Carve | Modifier | `Height`, `River Mask` (Matrix) | `Height` (Matrix) |
 | Ocean Level | Selector | `Height` (Matrix) | `Water Mask`, `Depth`, `Shoreline` (Matrix) |
 | Lake Fill | Selector | `Height`, `Lake Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
@@ -1138,7 +1139,7 @@ Low-frequency noise inside a radial falloff — the classic "island or continent
 | Field | Default | Meaning |
 |---|---|---|
 | `Seed` | 777 | Coastline pattern |
-| `Size` | 6000 | Metres per period of the coastline noise. Large: this is continental scale |
+| `Size` | 2000 | Metres per period of the coastline noise — the wavelength of the largest bay or headland. **Read it against your world size, never on its own.** Two to three periods across the world is what reads as a coastline, so aim for a third to a half of the world span: 2000 m on a 4 km world, 5000 m on a 10 km one. A value larger than the world cannot complete one period inside it, so the largest and loudest octave degenerates to a constant and the landmass comes out as the bare falloff — a smooth ellipse with a rim of wrinkles. Values above the world span are clamped to it for that reason |
 | `Land Radius` | 0.55 | Fraction of the world that is land before noise. 0.55 is an island with sea around it |
 | `Falloff` | 2.5 | Sharpness of the land-to-sea transition. Higher gives cliffs, lower gives shallows |
 | `Coast Noise` | 0.45 | How ragged the coastline is. 0 is a circle; 1 is deeply fjorded |
@@ -1732,24 +1733,40 @@ redesigning the graph.
 | `Iterations` | 4 | Passes. Slope is a derivative, so reaching a target takes iteration |
 
 #### River Carve
-Cuts a channel profile into the terrain along a river mask — normally from
-`River Network Trace`.
+Cuts a channel profile into the terrain along a river mask — from `River Course Solver`
+by preference, or from `River Network Trace`.
 
 **Ports**
 
 | Port | Dir | Type | Required | Wire it to |
 |---|---|---|---|---|
-| `Height` | in | Matrix | **yes** | The height chain, after `River Network Trace` has been given the same height. Unwired, there is nothing to carve and the node returns flat ground |
-| `River Mask` | in | Matrix | **yes** | `River Network Trace`'s `River Mask`. **This is the node's only source of "where"** — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted `Shape`, if you want one channel exactly where you put it |
+| `Height` | in | Matrix | **yes** | The height chain. Best taken from `River Course Solver`'s `Height` output, so the carve reads the exact surface the course was seated against. Unwired, there is nothing to carve and the node returns flat ground |
+| `River Mask` | in | Matrix | **yes** | `River Course Solver`'s `River Mask` (preferred) or `River Network Trace`'s. **This is the node's only source of "where"** — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted `Shape`, if you want one channel exactly where you put it |
 | `Height` | out | Matrix | — | Onward down the height chain. Feed it to `River Fill`'s `Height` (which must read the *carved* surface) and then to `Water Bank Seat` or `Height Output` |
 
+**The channel seats itself in the valley. You cannot wire this wrong.** Before cutting,
+River Carve slides every core cell of the mask along its **cross-flow** line to the lowest
+ground it can find within `Valley Seat Metres`, and re-stamps the channel there. A
+watercourse occupies the thalweg — the lowest line of its own valley — and that is now
+enforced by the node rather than assumed of the mask. The pass is idempotent: a mask
+already on the thalweg finds its minimum at zero offset and does not move. So a coarse
+trace, a fine solve and a hand-painted line all end up in the same correct place, and the
+old failure — a trench grooved down the side of a hill — cannot be produced by a mask
+that is merely a little off.
+
+The slide is **across** the flow only, never along it, so the course keeps its length, its
+direction, its continuity and its confluences.
+
 **Order matters here and nowhere else in the river chain does it matter as much.** The correct
-sequence is `River Network Trace` → `River Carve` → `River Fill` → `Water Bank Seat`, with the
-same `River Mask` fanned out from the trace to both the carve and the fill. Put `River Fill`
+sequence is `River Course Solver` → `River Carve` → `River Fill` → `Water Bank Seat`, with the
+same `River Mask` fanned out from the solver to both the carve and the fill. Put `River Fill`
 before `River Carve` and it measures a bed that has not been dug yet.
 
 Set `Bank Width` the same on `River Carve` and `River Fill`. It is one bank described twice, and
 the two nodes disagreeing about how wide it is puts the waterline in the wrong place.
+
+Set `Sea Level` the same on `River Carve`, `River Course Solver` and `Ocean Level`. They are one
+waterline described three times.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1758,6 +1775,10 @@ the two nodes disagreeing about how wide it is puts the waterline in the wrong p
 | `Profile Power` | 1.6 | Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon |
 | `Bed Flattening` | 0.6 | How flat the channel floor is. Real rivers have flat beds |
 | `Levee Height` | 0 | Raised banks from deposited sediment, as real rivers build |
+| `Floodplain Width K` | 5 | Floodplain half-width as a multiple of bank width. 0 turns the floodplain off |
+| `Floodplain Depth Fraction` | 0.25 | How far the floodplain bench sits below the valley floor, as a fraction of `Depth` |
+| `Valley Seat Metres` | 40 | How far across the flow the channel may slide to find the valley floor. Raise it if your drainage solve is coarse relative to the world; the seek reaches the wider of this and `Bank Width` |
+| `Sea Level` | 0.35 | The waterline, normalised. The bed is never cut below it, and within one `Depth` of it the cut fades to nothing so the channel **rises to meet the sea at the shoreline** instead of arriving under the water as an open slot |
 
 #### Water Bank Seat
 Cuts a shore so the water surface meets the ground **exactly**. This is the node that stops
@@ -2112,6 +2133,48 @@ join.
 **The output is a course, not water.** Feed it to `River Carve` to get a valley and to
 `River Fill` to get a water surface. Feeding it to neither leaves a mask nothing reads, and the
 terrain will look exactly as it did before.
+
+**The course is seated in the valley before it is stamped.** A D8 walk on a 256-cell solve
+is only accurate to one solve cell — sixteen metres on a 4 km world, more on a larger one —
+and on a slope one cell of error puts the line up the hillside from the low ground it is
+meant to follow. So every traced course is slid across the flow onto the lowest ground
+within two solve cells, then relaxed to take out the stair-steps a D8 walk leaves behind
+(a D8 path can only move on eight headings, which is what makes an unrelaxed course read
+as a row of joined straight stones). Samples already below `Sea Level` are refused, so a
+course can never be pulled out into the water. This node adds no meander — that is
+`River Course Solver`'s job — but its placement is fitted, not raw.
+
+#### River Course Solver
+The same network as `River Network Trace`, fitted harder: seated in the valley with a
+search distance you set, relaxed, and given a **meander** planform. Use this when the
+river is the thing you care about; use the plain trace when you just need a drainage
+pattern.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain after erosion, before any river carving |
+| `Height` | out | Matrix | — | **The input height, passed straight through.** The solver never alters terrain — it only draws a course — so this is the untouched surface. Wire it to `River Carve`'s `Height` so the carve reads the exact surface the course was seated against, from the one node |
+| `River Mask` | out | Matrix | — | The fitted course. Wire it to `River Carve`'s `River Mask` and `River Fill`'s `River Mask` |
+
+**One solver drives both of River Carve's inputs.** That is what the two outputs are for.
+Taking the height from somewhere else works, but then the course was fitted to one surface
+and cut into another, and the two only agree by luck.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Drainage Resolution` | 256 | Cells per side of the world solve — see [the shared drainage solve](#the-shared-drainage-solve) |
+| `Channel Head Area` | 250,000 | Land a channel must drain before it counts as a river, in square metres |
+| `Base Width` | 6 | Width in metres where a channel first forms |
+| `Width Exponent` | 0.5 | How width grows with flow. 0.5 matches real hydraulic geometry |
+| `Max Width` | 60 | Cap in metres |
+| `Sea Level` | 0.35 | Where rivers terminate. Also refuses any valley sample already below the waterline, so a course cannot be pulled out to sea |
+| `Max Channels` | 512 | Safety cap on traced channels |
+| `Valley Search Metres` | 40 | How far across the flow a point may slide to find the valley floor. Raise it on a coarse solve or a large world |
+| `Valley Pull` | 0.6 | How hard a point is pulled toward the floor it found, 0..1 |
+| `Meander Strength` | 0.5 | Meander amplitude, 0..1. 0 leaves the course straight-ish |
+| `Meander Max Grade` | 0.06 | Steepest grade a meander loop may climb into a bank before it is refused — this is what stops a meander wandering up a hillside |
 
 #### River Fill
 Turns a traced channel into water: how much of the channel the flow actually covers, how
