@@ -608,9 +608,6 @@ namespace UniverseCreator.Nodes.Selectors
         /// <summary>Cross-section shape. 1 is V-shaped, 2+ approaches a flat bed.</summary>
         public float profilePower = 1.6f;
 
-        /// <summary>Flattens the channel floor so the river bed does not undulate.</summary>
-        public float bedFlattening = 0.6f;
-
         /// <summary>
         /// Trapezoidal channel (§17.2): the inner fraction of the half-width is a FLAT bed at
         /// full depth, the rest is a graded wall out to the bank. 0 reproduces the old pure
@@ -622,15 +619,28 @@ namespace UniverseCreator.Nodes.Selectors
         public float bedWidthFraction = 0.35f;
 
         /// <summary>
-        /// Hydraulic geometry (§17.3/§17.4). Scales the cut depth by the LOCAL channel width
+        /// Hydraulic geometry (§17.3). Scales the cut depth by the LOCAL channel width
         /// relative to the nominal bank width, raised to this power. Leopold-Maddock gives
         /// depth ~ Q^0.4 and width ~ Q^0.5, so depth ~ width^0.8 - a value near 0.8 makes
         /// headwaters shallow and trunks deep (the "veins start small and grow") for free,
-        /// because the traced mask already widened with flow. It also deepens a pinch between
-        /// hills, where the wet corridor narrows at constant flow (Manning's squeeze). 0 turns
-        /// this off and uses the flat Depth everywhere - the exact previous behaviour.
+        /// because the traced mask already widened with flow. This is the DISCHARGE effect (a
+        /// trunk is deeper than a brook); confinement (the same river deeper in a gorge) is a
+        /// separate term, SqueezeStrength. 0 turns this off and uses the flat Depth everywhere -
+        /// the exact previous behaviour.
         /// </summary>
         public float flowDepthExponent = 0.8f;
+
+        /// <summary>
+        /// Manning's squeeze (§17.4). Where the terrain VALLEY pinches the channel narrower
+        /// than its discharge width, depth rises to carry the same flow: Manning gives
+        /// D ~ (W_open/W_confined)^(2/3). The discharge width is the wet mask width (set by the
+        /// trace from drainage area); the valley width is how far the terrain walls stand apart
+        /// (the first cells rising a full channel depth above the bed). This is CONFINEMENT, not
+        /// discharge - the SAME river is deeper in a gorge than on a plain - so it composes with
+        /// flowDepthExponent rather than duplicating it. Bounded (ratio capped at 2.5) so a pinch
+        /// cannot run the depth away. 0..1: 0 off, 1 the full 2/3 law.
+        /// </summary>
+        public float squeezeStrength = 1f;
 
         /// <summary>Raises a levee alongside the channel, as real rivers deposit.</summary>
         public float leveeHeight;
@@ -726,10 +736,8 @@ namespace UniverseCreator.Nodes.Selectors
             Vector2 ps = src.PixelSize;
             float mpp = Mathf.Max(1e-4f, (ps.x + ps.y) * 0.5f);
 
-            // Bank width in pixels sets the blur sigma used to find the local river
-            // grade: the bed follows the smoothed valley floor, not every bump.
+            // Bank width in pixels sets the blur sigma for the mask smoothing below.
             float sigma = Mathf.Clamp(bankWidth / mpp, 0.5f, 32f);
-            Matrix smoothed = MatrixOperations.GaussianBlur(src, sigma);
 
             if (stop != null && stop.StopRequested) return null;
 
@@ -776,13 +784,13 @@ namespace UniverseCreator.Nodes.Selectors
             // width-tapered channel with radial discs (the walled, unnatural trenches).
             // The mask handed to this node is placed by the SOLVE, on the flow field, where
             // the ordered course and the whole drainage network are available; the carve's
-            // job is only to cut a good profile into the mask it is given. The elevation
-            // seat below (LowestAcross) still drops the BED onto the lowest ground across
-            // the section, which is a cheap correction to the bed height that cannot move
-            // the channel or delete it.
+            // job is only to cut a good profile into the mask it is given. The bed reference
+            // is the channel's OWN descending profile (LowestAlong: the lowest ground along
+            // the flow plus a gentle downstream grade), and the depth is subtracted from it -
+            // a cheap per-cell cut that breaches a rise the course crosses without moving or
+            // deleting the channel.
 
             float power = Mathf.Max(0.2f, profilePower);
-            float flatten = Mathf.Clamp01(bedFlattening);
             float sea = Mathf.Clamp01(seaLevel);
 
             // Floodplain belt (§4). Half-width scales with the channel (W_fp ≈ k·w), so it
@@ -831,24 +839,37 @@ namespace UniverseCreator.Nodes.Selectors
                         ? 1f
                         : Mathf.Pow(w / wEdge, power);
 
-                    // Seated on the valley floor, then flattened along it. Taking the
-                    // lowest ground across the channel first is what stops a hillside
-                    // course from being cut as a perched groove: bed is the low ground,
-                    // wherever on the cross-section that turns out to be.
-                    float floorHere = LowestAcross(src, maskSmooth, x, z, resX, resZ, corridor);
-                    float bed = Mathf.Lerp(floorHere, smoothed.arr[i], flatten * w);
+                    // DESCENDING BED (UE5 H_final = min(H_hill, H_spline(t) − Depth)). The
+                    // reference the depth is cut below is NOT the local ground but H_spline: the
+                    // lowest ground found ALONG the channel within the seat corridor, raised by a
+                    // gentle downstream grade so it is a monotonically descending profile. Where
+                    // the course crosses a rise the profile stays below the crest, so the cut
+                    // breaches the hill instead of the channel riding over it (the reported
+                    // "impossible uphill water path"). In open valley the local ground IS the
+                    // along-channel minimum, so the bed equals the ground and no slot canyon
+                    // forms. Marching along the flow - never across it - is why it cannot reach a
+                    // distant unrelated low, the fault that produced the old cross-section slot.
+                    // Seating on the channel's own line (not the ground the mask happens to sit
+                    // on) is also what makes a depth or width edit actually move the bed.
+                    float bed = LowestAlong(src, maskSmooth, x, z, resX, resZ, corridor, depth);
 
                     // LOCAL CHANNEL WIDTH relative to the nominal bank. One measure drives
                     // three things: depth growth (§17.3), the big-river levee gate and the
                     // stream/floodplain gate (§24). Measured once (cheap: wet cells only,
                     // bounded by the corridor), so a stream reads ~0.3, a trunk ~3-4.
                     float widthRatio = 1f;
-                    if (flowDepthExponent > 1e-4f || leveeHeight > 1e-5f || fpHalfPixels > 0)
+                    float squeezeFactor = 1f;
+                    if (flowDepthExponent > 1e-4f || leveeHeight > 1e-5f || fpHalfPixels > 0 || squeezeStrength > 1e-4f)
                     {
                         float dxw, dzw;
                         if (CrossDirection(maskSmooth, x, z, resX, resZ, out dxw, out dzw))
                         {
+                            bool needWalls = squeezeStrength > 1e-4f;
+                            float wallRise = Mathf.Max(1e-4f, depth);   // ground one channel-depth up = the valley lip
                             int halfW = 0;
+                            bool wetRun = true;                          // still inside the contiguous wet band
+                            int wetEndK = corridor;                      // px where the wet band ended
+                            int wallA = corridor, wallB = corridor;      // px across-flow to the confining wall each side
                             for (int k = 1; k <= corridor; k++)
                             {
                                 int ax = Mathf.Clamp(x + Mathf.RoundToInt(dxw * k), 0, resX - 1);
@@ -857,39 +878,78 @@ namespace UniverseCreator.Nodes.Selectors
                                 int bz = Mathf.Clamp(z - Mathf.RoundToInt(dzw * k), 0, resZ - 1);
                                 bool wetA = river.arr[az * resX + ax] > 0.001f;
                                 bool wetB = river.arr[bz * resX + bx] > 0.001f;
-                                if (wetA) halfW++;
-                                if (wetB) halfW++;
-                                if (!wetA && !wetB) break;
+                                if (wetRun)
+                                {
+                                    if (wetA) halfW++;
+                                    if (wetB) halfW++;
+                                    if (!wetA && !wetB) { wetRun = false; wetEndK = k; }
+                                }
+                                if (needWalls)
+                                {
+                                    // src is the UNCARVED input, so a rise here is a real terrain
+                                    // wall, not the channel we are about to cut.
+                                    if (wallA == corridor && src.arr[az * resX + ax] - bed >= wallRise) wallA = k;
+                                    if (wallB == corridor && src.arr[bz * resX + bx] - bed >= wallRise) wallB = k;
+                                }
+                                // Stop once the width is known and either both walls are found or
+                                // we are past the confinement zone (~2x the channel): a wall farther
+                                // than that is not squeezing this reach, so an open plain breaks
+                                // early instead of scanning the whole corridor every cell.
+                                if (!wetRun &&
+                                    (!needWalls
+                                     || (wallA < corridor && wallB < corridor)
+                                     || k >= wetEndK * 2 + 4)) break;
                             }
                             float refHalf = Mathf.Max(1f, bankWidth / mpp);
                             widthRatio = halfW / refHalf;
+
+                            // §17.4 Manning squeeze. Discharge width = the wet mask width; valley
+                            // width = the walls' separation. A confining valley (BOTH walls close)
+                            // narrower than the discharge width deepens the channel; a one-sided
+                            // wall (open on the far bank) does not, because the flow can still
+                            // spread. Bounded so a pinch cannot run the depth away.
+                            if (needWalls && halfW > 0)
+                            {
+                                float valleyW = wallA + wallB;
+                                if (valleyW > 0f && valleyW < halfW)
+                                {
+                                    float ratio = Mathf.Clamp(halfW / valleyW, 1f, 2.5f);
+                                    squeezeFactor = Mathf.Pow(ratio, 0.6667f * Mathf.Clamp01(squeezeStrength));
+                                }
+                            }
                         }
                     }
 
-                    // Hydraulic geometry (§17.3/§17.4): the depth grows with the channel it
-                    // is cutting. Leopold-Maddock gives depth ~ Q^0.4 and width ~ Q^0.5, so
-                    // depth ~ width^0.8. Off (exponent 0) it is exactly the flat Depth.
+                    // Hydraulic geometry: the depth grows with the channel it is cutting.
+                    // Leopold-Maddock (§17.3) gives depth ~ Q^0.4 and width ~ Q^0.5, so
+                    // depth ~ width^0.8 (discharge). Manning's squeeze (§17.4) then deepens a
+                    // confined reach on top of that (confinement). Off (exponent 0, squeeze 0) it
+                    // is exactly the flat Depth.
                     float depthHere = depth;
                     if (flowDepthExponent > 1e-4f)
                         depthHere = depth * Mathf.Pow(Mathf.Clamp(widthRatio, 0.25f, 4f), flowDepthExponent);
+                    depthHere *= squeezeFactor;
 
                     // BASE LEVEL. A river cannot cut below the surface it flows into -
                     // that is Playfair's law, and it is why a channel flattens out as it
-                    // nears its mouth instead of arriving at full depth. Within one
-                    // channel depth of the waterline the cut is faded to nothing, so the
-                    // trench rises to meet the sea AT the shoreline. Without this the
-                    // channel arrived under the water as an open slot and the join
-                    // between river and ocean read as a hole rather than a mouth.
+                    // nears its mouth instead of arriving at full depth. The taper is
+                    // EXPONENTIAL in the height above the waterline (UE5 Depth_final =
+                    // Depth_base·(1 − e^(−D_ocean/λ)), D_ocean proxied by height-above-sea in
+                    // channel-depths, λ = 1 depth): the cut is nothing AT the shore
+                    // (toBase→0 ⇒ fade→0) and eases in over about three depths, a smoother and
+                    // wider blend into the basin than the old linear clamp - so the channel
+                    // melts into the ocean instead of ending at an abrupt wall, and never
+                    // arrives under the water as an open slot.
                     float toBase = (src.arr[i] - sea) / Mathf.Max(1e-5f, depthHere);
-                    float mouthFade = Mathf.Clamp01(toBase);
+                    float mouthFade = toBase <= 0f ? 0f : 1f - Mathf.Exp(-toBase);
 
-                    // §28 incision guarantee: measure the cut from the LOWER of the seated
-                    // bed and the local ground. The blurred `smoothed` used for `bed` fills
-                    // valleys in, so a bed alone can sit at/above the ground and the trench
-                    // never sinks below its banks. Taking Min(bed, src) here forces the
-                    // thalweg a full depth BELOW the ground (visible channel), while the bank
-                    // (profile->0) eases back to ground level - banks at ground, depth below.
-                    float cut = Mathf.Min(bed, src.arr[i]) - depthHere * profile * mouthFade;
+                    // The cut: a full depth below the DESCENDING bed reference at the
+                    // thalweg, scaled to nothing at the bank by the cross-section profile and
+                    // eased out toward the mouth by mouthFade. Because bed is H_spline (the
+                    // along-channel descending minimum) rather than the local ground, the
+                    // Min against dst below realises UE5's H_final = min(H_hill, H_spline −
+                    // Depth): a crossed rise is clipped down to the water profile.
+                    float cut = bed - depthHere * profile * mouthFade;
 
                     // Sea-level floor. A river descends to the sea and meets it at the
                     // shore; it does not cut below the ocean surface and tunnel out under
@@ -1048,39 +1108,69 @@ namespace UniverseCreator.Nodes.Selectors
 
 
         /// <summary>
-        /// Lowest ground on the line ACROSS the channel through (x, z), out to
-        /// <paramref name="radius"/> pixels either side. Returns the cell's own height
-        /// when no cross direction can be read.
+        /// The descending channel-bed reference (H_spline) at (x, z): the lowest ground
+        /// found by marching ALONG the flow - perpendicular to the cross-section - out to
+        /// <paramref name="radius"/> pixels each way, every candidate raised by a gentle
+        /// downstream grade so the result is a monotonically descending profile and not a
+        /// flat pool. This is H_spline(t) in UE5's H_final = min(H_hill, H_spline − Depth):
+        /// on a rise the profile stays below the crest so the cut breaches the hill, in a
+        /// valley the local ground is the minimum so the bed equals the ground. Marching
+        /// along the flow - never across it - is why it cannot reach a distant unrelated low
+        /// and cut a slot canyon, the fault of the earlier cross-section seat. Returns the
+        /// cell's own height where no cross direction can be read.
         /// </summary>
         /// <remarks>
         /// Clamped at the edges rather than wrapped: a chunk's neighbour is a different
-        /// matrix, so the line is measured against the ground this chunk has.
+        /// matrix. The march stops on each side the moment it leaves the (smoothed) mask
+        /// corridor, so it follows the watercourse and never wanders onto a hillside.
         /// </remarks>
-        private static float LowestAcross(Matrix src, Matrix mask, int x, int z,
-                                          int resX, int resZ, int radius)
+        private static float LowestAlong(Matrix src, Matrix mask, int x, int z,
+                                         int resX, int resZ, int radius, float depth)
         {
-            float low = src.arr[z * resX + x];
+            float here = src.arr[z * resX + x];
+            float low = here;
 
-            float dx, dz;
-            if (!CrossDirection(mask, x, z, resX, resZ, out dx, out dz)) return low;
+            float cx, cz;
+            if (!CrossDirection(mask, x, z, resX, resZ, out cx, out cz)) return low;
 
-            for (int k = 1; k <= radius; k++)
+            // Flow runs perpendicular to the cross-section direction.
+            float ax = -cz;
+            float az = cx;
+
+            // A gentle grade added per pixel of distance, scaled to the channel depth over
+            // the whole reach: a lower reach downstream then sets this bed a little ABOVE it
+            // (a descending line) instead of dragging the profile flat, and the residual
+            // slope stays shallow while still clearly descending through a rise.
+            float slopePerPx = Mathf.Max(0f, depth) / Mathf.Max(1f, radius);
+
+            for (int sign = -1; sign <= 1; sign += 2)
             {
-                float ox = dx * k;
-                float oz = dz * k;
+                for (int k = 1; k <= radius; k++)
+                {
+                    int sx = Mathf.Clamp(x + Mathf.RoundToInt(ax * k * sign), 0, resX - 1);
+                    int sz = Mathf.Clamp(z + Mathf.RoundToInt(az * k * sign), 0, resZ - 1);
+                    int si = sz * resX + sx;
 
-                int ax = Mathf.Clamp(x + Mathf.RoundToInt(ox), 0, resX - 1);
-                int az = Mathf.Clamp(z + Mathf.RoundToInt(oz), 0, resZ - 1);
-                float a = src.arr[az * resX + ax];
-                if (a < low) low = a;
+                    // Left the watercourse: beyond the smoothed mask this direction is
+                    // hillside, so stop before sampling it into the bed.
+                    if (mask.arr[si] <= 1e-3f) break;
 
-                int bx = Mathf.Clamp(x - Mathf.RoundToInt(ox), 0, resX - 1);
-                int bz = Mathf.Clamp(z - Mathf.RoundToInt(oz), 0, resZ - 1);
-                float b = src.arr[bz * resX + bx];
-                if (b < low) low = b;
+                    float candidate = src.arr[si] + slopePerPx * k;
+                    if (candidate < low) low = candidate;
+                }
             }
 
-            return low;
+            // BOUND THE DESCENT (fix.md §29 + unreal Phase 1-2). The reference is the LOCAL
+            // ground, allowed to descend by at most one channel depth toward a lower reach so
+            // it breaches a small rise the course crosses (the "impossible uphill path" fix) -
+            // but never further. Without this cap a steep reach downstream drags the bed to a
+            // distant absolute low and the cut plunges tens of metres below its neighbours: the
+            // slot-canyon / floating-cliff artefact from the screenshots. The cap = the reach's
+            // own gentle-grade budget (slopePerPx·radius), i.e. the monotonic ε-descent the
+            // author's Phase 1-2 rules describe, so the bed follows the valley floor and no
+            // distant low can reach it. In open valley the along-channel min already equals the
+            // local ground, so this changes nothing there.
+            return Mathf.Max(low, here - Mathf.Max(0f, depth));
         }
 
         /// <summary>

@@ -1773,7 +1773,8 @@ waterline described three times.
 | Field | Default | Meaning |
 |---|---|---|
 | `Depth` | 0.012 | Channel depth, normalised (the depth of a nominal-width reach) |
-| `Flow Depth Exponent` | 0.8 | How much depth grows with the local channel width. Leopold–Maddock gives depth ∝ width^0.8, so headwaters cut shallow and trunks deep (the vein network starts small and grows), and a pinch between hills deepens (Manning squeeze). 0 = flat `Depth` everywhere (the old behaviour) |
+| `Flow Depth Exponent` | 0.8 | How much depth grows with **discharge** — the local channel width. Leopold–Maddock gives depth ∝ width^0.8, so headwaters cut shallow and trunks deep (the vein network starts small and grows). 0 = flat `Depth` everywhere (the old behaviour). Confinement is a separate term, `Squeeze Strength` |
+| `Squeeze Strength` | 1 | Manning's squeeze: where a **valley pinches** the channel narrower than its discharge width (both walls close in), depth rises to carry the same flow, D ∝ (W_open/W_confined)^0.67. This is confinement — the *same* river is deeper in a gorge than on a plain — so it composes with `Flow Depth Exponent` (discharge). A one-sided wall does not squeeze (the flow spreads to the open bank). Bounded so a pinch cannot run depth away. 0 turns it off |
 | `Bank Width` | 25 | Metres from channel centre to the top of the bank |
 | `Profile Power` | 1.6 | Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon |
 | `Bed Flattening` | 0.6 | How flat the channel floor is. Real rivers have flat beds |
