@@ -588,6 +588,34 @@ namespace UniverseCreator.TerrainSystem
             return true;
         }
 
+        /// <summary>
+        /// Locks the sea level onto a fraction the build has already committed to - the
+        /// level a fresh procedural ocean is about to be placed at - when there is no
+        /// ocean body standing yet for <see cref="SyncSeaLevelFromOcean"/> to read.
+        ///
+        /// This is the BEFORE-the-bake half of the same reconciliation. SyncSeaLevelFromOcean
+        /// runs AFTER the terrain settles and, when it finds the two out of step, forces a
+        /// full second RebuildAll to repaint the beach - which was firing on nearly every
+        /// Generate, because the manager began at its 0.35 default while the graph placed the
+        /// ocean at the Hydrology node's own fraction, so they always disagreed and the world
+        /// "regenerated again the moment it finished". Adopting the spawn's fraction here, and
+        /// pushing it to the shoreline readers, means the FIRST bake already paints the true
+        /// waterline and the post-settle sync has nothing to move.
+        ///
+        /// Deliberately no FindOcean: this is the path taken precisely when no ocean exists
+        /// yet. The clamp-and-apply is shared with SyncSeaLevelFromOcean rather than copied,
+        /// so the two cannot drift. Returns true when the value moved.
+        /// </summary>
+        public bool AdoptNodeSeaLevel(float fraction, Graph graph)
+        {
+            float clamped = Mathf.Clamp01(fraction);
+            if (Mathf.Abs(clamped - nodeSeaLevel) <= SeaLevelEpsilon) return false;
+
+            nodeSeaLevel = clamped;
+            ApplyToGraph(graph);
+            return true;
+        }
+
         // The world's sea, if it has one. Matched on kind, not on name, so a renamed
         // ocean is still found and a lake someone called "Ocean" is not.
         private UCWaterBody FindOcean()

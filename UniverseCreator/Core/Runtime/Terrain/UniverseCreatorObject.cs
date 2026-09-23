@@ -492,6 +492,22 @@ namespace UniverseCreator.TerrainSystem
                 {
                     UniverseCreator.Nodes.Creators.HydrologyNode hydrologyToRun = connectedHydrology;
 
+                    // SEA LEVEL RECONCILED BEFORE THE BAKE, NOT ONLY AFTER IT.
+                    // The post-settle SyncSeaLevelFromOcean (armed as step 3 below) locks the
+                    // manager's nodeSeaLevel onto the ocean's real surface and, when that moved
+                    // the number, fires a full second RebuildAll to repaint the beach. That
+                    // re-bake was firing on nearly every Generate: the manager began at its 0.35
+                    // default while the graph placed the ocean at the Hydrology node's own
+                    // fraction, so the two always disagreed - the "it regenerates again the
+                    // moment it finishes" report. Reconcile them HERE so the FIRST bake already
+                    // paints the true waterline and the post-settle sync moves nothing. If an
+                    // ocean already stands (kept or hand-dragged) lock onto its surface; if not,
+                    // adopt the fraction this spawn is about to place the fresh ocean at and push
+                    // it to the shoreline readers. A genuinely dragged ocean is still reconciled -
+                    // now on the first bake instead of a redundant second one.
+                    if (water != null && !water.SyncSeaLevelFromOcean(this))
+                        water.AdoptNodeSeaLevel(hydrologyToRun.seaLevel, graph);
+
                     // Armed as ordered steps, not one closure (freeze Fix A). Each is a
                     // bounded piece of the old single blocking finish, and
                     // SettlePhaseAfter runs one per pump so the Scene view repaints
