@@ -735,6 +735,7 @@ html[data-find="1"] .rail .grp>ol{display:block}
         <li><a class="lv4" href="#coastal-erosion"><span class="n"></span>Coastal Erosion</a></li>
         <li><a class="lv4" href="#coastal-shelf-shaper"><span class="n"></span>Coastal Shelf Shaper</a></li>
         <li><a class="lv4" href="#underwater-terrain-extend"><span class="n"></span>Underwater Terrain Extend</a></li>
+        <li><a class="lv4" href="#sea-level-land-floor"><span class="n"></span>Sea Level Land Floor</a></li>
         <li><a class="lv3" href="#geological-structure"><span class="n"></span>Geological structure</a></li>
         <li><a class="lv4" href="#fault-line-displacement"><span class="n"></span>Fault Line Displacement</a></li>
         <li><a class="lv4" href="#voronoi-rock-strata"><span class="n"></span>Voronoi Rock Strata</a></li>
@@ -2560,6 +2561,7 @@ where they carve height.</p>
 <tr><td>Watershed Basin Segment</td><td>Selector</td><td><code>Height</code> (Matrix)</td><td><code>Basin Id</code>, <code>Divides</code>, <code>Basin Size</code> (Matrix)</td></tr>
 <tr><td>Groundwater Wetland Mask</td><td>Selector</td><td><code>Height</code>, <code>Water Mask</code> (Matrix)</td><td><code>Mask</code> (Matrix)</td></tr>
 <tr><td>Underwater Terrain Extend</td><td>Modifier</td><td><code>Height</code> (Matrix)</td><td><code>Height</code> (Matrix)</td></tr>
+<tr><td>Sea Level Land Floor</td><td>Modifier</td><td><code>Height</code>, <code>Land Mask</code> (opt), <code>Water Mask</code> (opt) (Matrix)</td><td><code>Height</code> (Matrix)</td></tr>
 <tr><td>Ecology</td><td>Selector</td><td><code>Height</code> (Matrix)</td><td><code>Soil Moisture</code>, <code>Wetness Index</code>, <code>Aridity</code>, <code>Wind Exposure</code>, <code>Light</code>, <code>Zone Id</code>, <code>Zone Mask</code> (Matrix)</td></tr>
 </tbody>
 </table></div>
@@ -3172,6 +3174,7 @@ tiling it, so the DEM lands exactly where it should.</p>
 <li><a href="#coastal-erosion" class="sub"><span class="n"></span> Coastal Erosion</a></li>
 <li><a href="#coastal-shelf-shaper" class="sub"><span class="n"></span> Coastal Shelf Shaper</a></li>
 <li><a href="#underwater-terrain-extend" class="sub"><span class="n"></span> Underwater Terrain Extend</a></li>
+<li><a href="#sea-level-land-floor" class="sub"><span class="n"></span> Sea Level Land Floor</a></li>
 <li><a href="#geological-structure"><span class="n"></span> Geological structure</a></li>
 <li><a href="#fault-line-displacement" class="sub"><span class="n"></span> Fault Line Displacement</a></li>
 <li><a href="#voronoi-rock-strata" class="sub"><span class="n"></span> Voronoi Rock Strata</a></li>
@@ -3405,6 +3408,36 @@ simply has nothing to do.</p>
 <tr><td><code>Seamount Height</code></td><td>0.06</td><td>Height of undersea peaks</td></tr>
 <tr><td><code>Seamount Spacing</code></td><td>2200</td><td>Metres between them</td></tr>
 <tr><td><code>Sediment Detail</code></td><td>0.004</td><td>Fine sea-floor texture</td></tr>
+</tbody>
+</table></div>
+<h4 id="sea-level-land-floor" data-title="Sea Level Land Floor">Sea Level Land Floor</h4>
+<p>Enforces the real-world rule that <strong>dry continental land never sits below sea level</strong> — the
+only ground under the waterline is the sea bed and intended (endorheic) basins. Everywhere the
+<code>Land Mask</code> says is land, any height below <code>Sea Level</code> is lifted <strong>up</strong> to the waterline with a
+smooth coastal grade. This is the fix for <em>a river that climbs out of a sub-sea valley as it
+nears the ocean or a lake</em>: once the dry basin below the sea no longer exists, the river reaches
+a coast at sea level and drains cleanly.</p>
+<p><strong>Ports</strong></p>
+<div class="tablewrap"><table>
+<thead><tr><th>Port</th><th>Dir</th><th>Type</th><th>Required</th><th>Wire it to</th></tr></thead>
+<tbody>
+<tr><td><code>Height</code></td><td>in</td><td>Matrix</td><td><strong>yes</strong></td><td>The base height chain, <strong>after</strong> the creators (<code>Continental Shape Mask</code> + <code>Hybrid Multifractal</code> etc.) and <strong>before</strong> the river/lake/ocean nodes, so the water bodies still carve their basins into the floored land</td></tr>
+<tr><td><code>Land Mask</code></td><td>in</td><td>Matrix</td><td>no</td><td><em>The land-vs-sea oracle.</em> Wire <code>Continental Shape Mask</code>'s output here (its value is ~1 on land, ~0 at sea). <strong>Unconnected the node is a deliberate no-op</strong> — a chunk cannot tell open ocean from an inland pit on its own, and a blind clamp would raise the whole sea bed to the waterline and erase the ocean</td></tr>
+<tr><td><code>Water Mask</code></td><td>in</td><td>Matrix</td><td>no</td><td><em>Optional.</em> An intended below-sea water footprint (an endorheic <code>Lake Fill</code> or <code>Ocean Level</code> <code>Water Mask</code>) whose floor must <strong>not</strong> be lifted. Unwired, nothing is exempted</td></tr>
+<tr><td><code>Height</code></td><td>out</td><td>Matrix</td><td>—</td><td>Onward down the height chain, into <code>River Carve</code> / the water bodies</td></tr>
+</tbody>
+</table></div>
+<p>The operation only ever <strong>raises</strong> on land (a <code>Max</code>), so it can add a coastal plain but never gouge
+a valley — carving stays the river and lake nodes' job downstream. The sea region and any wired
+<code>Water Mask</code> are left untouched, so the sea bed keeps its depth.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Field</th><th>Default</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>Sea Level</code></td><td>0.35</td><td>The waterline. <strong>Set it equal to <code>Ocean Level</code> and <code>River Carve</code></strong> — it is one sea level described in several nodes</td></tr>
+<tr><td><code>Land Threshold</code></td><td>0.5</td><td><code>Land Mask</code> value at or above which a cell counts as land and is floored. Below it (the sea side of the coast) the ground is left alone</td></tr>
+<tr><td><code>Coast Grade</code></td><td>0.03</td><td>Vertical band <strong>above</strong> sea level over which the floor eases off, so a filled coastal plain grades into the existing slope instead of ending in a flat shelf with a crease at its rim. 0 is a hard clamp exactly at the waterline</td></tr>
+<tr><td><code>Water Threshold</code></td><td>0.5</td><td><code>Water Mask</code> value at or above which a cell is treated as intended water and skipped</td></tr>
+<tr><td><code>Strength</code></td><td>1</td><td>Overall blend, 0–1. 0 disables the node; 1 lifts fully to sea level</td></tr>
 </tbody>
 </table></div>
 <h3 id="geological-structure" data-title="Geological structure">Geological structure</h3>
@@ -3734,12 +3767,13 @@ single most common mistake, so here is the whole family on one page before the d
 <tr><td><code>Watershed Basin Segment</code></td><td>Selector</td><td>Divides the world into drainage basins</td><td>this chapter</td></tr>
 <tr><td><code>Groundwater Wetland Mask</code></td><td>Selector</td><td>Marks marsh ground</td><td>this chapter</td></tr>
 <tr><td><code>Underwater Terrain Extend</code></td><td>Modifier</td><td>Submarine canyons and seamounts</td><td><a href="#15-modifier-nodes">15</a></td></tr>
+<tr><td><code>Sea Level Land Floor</code></td><td>Modifier</td><td>Lifts dry land that sits below sea level up to the waterline</td><td><a href="#15-modifier-nodes">15</a></td></tr>
 </tbody>
 </table></div>
 <p>The three jobs, and this is the distinction that matters:</p>
 <ol>
 <li><strong>Creating water objects</strong> — <code>Hydrology Spawner</code>, and nothing else. Rivers, lakes and the sea are <code>UCWaterBody</code> components in the scene. One node spawns them.</li>
-<li><strong>Shaping the ground water sits in</strong> — <code>River Carve</code>, <code>Water Bank Seat</code>, <code>Underwater Terrain Extend</code>. These output <code>Height</code>. They are the only water nodes whose product reaches the terrain.</li>
+<li><strong>Shaping the ground water sits in</strong> — <code>River Carve</code>, <code>Water Bank Seat</code>, <code>Underwater Terrain Extend</code>, <code>Sea Level Land Floor</code>. These output <code>Height</code>. They are the only water nodes whose product reaches the terrain.</li>
 <li><strong>Producing masks that describe water</strong> — <code>River Network Trace</code>, <code>River Fill</code>, <code>Lake Fill</code>, <code>Ocean Level</code>, <code>Watershed Basin Segment</code>, <code>Groundwater Wetland Mask</code>. These output matrices for <em>texturing, scatter and other nodes to read.</em> <em>They do not create water.</em> A <code>Lake Fill</code> alone floods nothing you can swim in — it hands you a mask of where a lake would be.</li>
 </ol>
 <p><strong>So the masks look like they hang, and mostly they should.</strong> <code>Water Mask</code>, <code>Depth</code>,

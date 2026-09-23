@@ -891,6 +891,7 @@ where they carve height.
 | River Network Trace | Selector | `Height` (Matrix) | `River Mask` (Matrix) |
 | River Course Solver | Selector | `Height` (Matrix) | `Height`, `River Mask` (Matrix) |
 | River Carve | Modifier | `Height`, `River Mask`, `Water Mask` (opt) (Matrix) | `Height` (Matrix) |
+| Sea Level Land Floor | Modifier | `Height`, `Land Mask` (opt), `Water Mask` (opt) (Matrix) | `Height` (Matrix) |
 | Swamp Basin | Selector | `Height`, `Swamp Mask` (opt) (Matrix) | `Height`, `Swamp Mask` (Matrix) |
 | Sky Occlusion | Selector | `Height` (Matrix) | `Mask` (Matrix) |
 | Ocean Level | Selector | `Height` (Matrix) | `Water Mask`, `Depth`, `Shoreline` (Matrix) |
@@ -1683,6 +1684,35 @@ simply has nothing to do.
 | `Seamount Spacing` | 2200 | Metres between them |
 | `Sediment Detail` | 0.004 | Fine sea-floor texture |
 
+#### Sea Level Land Floor
+Enforces the real-world rule that **dry continental land never sits below sea level** — the
+only ground under the waterline is the sea bed and intended (endorheic) basins. Everywhere the
+`Land Mask` says is land, any height below `Sea Level` is lifted **up** to the waterline with a
+smooth coastal grade. This is the fix for *a river that climbs out of a sub-sea valley as it
+nears the ocean or a lake*: once the dry basin below the sea no longer exists, the river reaches
+a coast at sea level and drains cleanly.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The base height chain, **after** the creators (`Continental Shape Mask` + `Hybrid Multifractal` etc.) and **before** the river/lake/ocean nodes, so the water bodies still carve their basins into the floored land |
+| `Land Mask` | in | Matrix | no | *The land-vs-sea oracle.* Wire `Continental Shape Mask`'s output here (its value is ~1 on land, ~0 at sea). **Unconnected the node is a deliberate no-op** — a chunk cannot tell open ocean from an inland pit on its own, and a blind clamp would raise the whole sea bed to the waterline and erase the ocean |
+| `Water Mask` | in | Matrix | no | *Optional.* An intended below-sea water footprint (an endorheic `Lake Fill` or `Ocean Level` `Water Mask`) whose floor must **not** be lifted. Unwired, nothing is exempted |
+| `Height` | out | Matrix | — | Onward down the height chain, into `River Carve` / the water bodies |
+
+The operation only ever **raises** on land (`Max`), so it can add a coastal plain but never gouge
+a valley — carving stays the river and lake nodes' job downstream. The sea region and any wired
+`Water Mask` are left untouched, so the sea bed keeps its depth.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Sea Level` | 0.35 | The waterline. **Set it equal to `Ocean Level` and `River Carve`** — it is one sea level described in several nodes |
+| `Land Threshold` | 0.5 | `Land Mask` value at or above which a cell counts as land and is floored. Below it (the sea side of the coast) the ground is left alone |
+| `Coast Grade` | 0.03 | Vertical band **above** sea level over which the floor eases off, so a filled coastal plain grades into the existing slope instead of ending in a flat shelf with a crease at its rim. 0 is a hard clamp exactly at the waterline |
+| `Water Threshold` | 0.5 | `Water Mask` value at or above which a cell is treated as intended water and skipped |
+| `Strength` | 1 | Overall blend, 0–1. 0 disables the node; 1 lifts fully to sea level |
+
 ### Geological structure
 
 #### Fault Line Displacement
@@ -2044,14 +2074,15 @@ single most common mistake, so here is the whole family on one page before the d
 | `Watershed Basin Segment` | Selector | Divides the world into drainage basins | this chapter |
 | `Groundwater Wetland Mask` | Selector | Marks marsh ground | this chapter |
 | `Underwater Terrain Extend` | Modifier | Submarine canyons and seamounts | [15](#15-modifier-nodes) |
+| `Sea Level Land Floor` | Modifier | Lifts dry land that sits below sea level up to the waterline | [15](#15-modifier-nodes) |
 
 The three jobs, and this is the distinction that matters:
 
 1. **Creating water objects** — `Hydrology Spawner`, and nothing else. Rivers, lakes and the sea
    are `UCWaterBody` components in the scene. One node spawns them.
 2. **Shaping the ground water sits in** — `River Carve`, `Water Bank Seat`,
-   `Underwater Terrain Extend`. These output `Height`. They are the only water nodes whose
-   product reaches the terrain.
+   `Underwater Terrain Extend`, `Sea Level Land Floor`. These output `Height`. They are the only
+   water nodes whose product reaches the terrain.
 3. **Producing masks that describe water** — `River Network Trace`, `River Fill`, `Lake Fill`,
    `Ocean Level`, `Watershed Basin Segment`, `Groundwater Wetland Mask`. These output matrices for
    *texturing, scatter and other nodes to read.* *They do not create water.* A `Lake Fill` alone

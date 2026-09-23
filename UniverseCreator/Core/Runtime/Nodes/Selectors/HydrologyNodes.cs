@@ -2058,6 +2058,128 @@ namespace UniverseCreator.Nodes.Selectors
     }
 
     /// <summary>
+    /// Sea Level Land Floor (§28). Enforces the real-world rule that DRY continental
+    /// land does not sit below sea level: the only ground below the waterline is the
+    /// sea bed and intended (endorheic) basins. Everywhere the Land Mask says is land,
+    /// any height below sea level is lifted UP to the waterline with a smooth coastal
+    /// grade. This is the fix for "a river climbs out of a sub-sea valley as it nears
+    /// the ocean/lake" - there is no longer a dry basin below the sea for it to climb.
+    ///
+    /// WHY THIS IS A SEPARATE MODIFIER, NOT A CLAMP INSIDE THE CREATORS
+    /// A creator like Hybrid Multifractal has no notion of sea or land - the same noise
+    /// builds a mountain, a warp field or a mask - so clamping it to sea level would
+    /// corrupt every other use of it. And Continental Shape Mask emits a 0..1 landness
+    /// MASK, not a height, so it has nothing to clamp. The land/sea decision therefore
+    /// lives here, AFTER the creators are combined into a height, gated by the same
+    /// landness the coastline is drawn from. This is the "LOW priority layer,
+    /// safe-clamped to never drop below sea level" as one node: wire it directly after
+    /// the base terrain and BEFORE the river/lake/ocean nodes, so the water bodies
+    /// (higher priority) still carve their basins into the floored land.
+    ///
+    /// WHY A GLOBAL LAND MASK IS REQUIRED
+    /// Each chunk is evaluated on its own, so "is this below-sea cell the open ocean or
+    /// an inland pit" cannot be answered from the chunk alone - the ocean is defined by
+    /// connectivity to the world edge, which is not chunk-local. Continental Shape Mask
+    /// already answers land-vs-sea globally (radial landness + coast noise, in world
+    /// space), so it is the oracle: wire its output into Land Mask. With NO Land Mask
+    /// connected the node is a deliberate no-op - it cannot tell land from sea, and a
+    /// blind clamp would raise the whole sea bed to the waterline and erase the ocean.
+    ///
+    /// RAISE-ONLY ON LAND, SEA LEFT ALONE
+    /// On land the operation only ever RAISES (Mathf.Max), so it can add a coastal plain
+    /// but never gouge a valley - carving stays the river/lake nodes' job downstream.
+    /// The sea region is untouched, so the sea bed keeps its depth. Baked once at
+    /// generation, bounded per cell: mobile-safe.
+    /// </summary>
+    [System.Serializable]
+    public class SeaLevelLandFloorNode : Generator
+    {
+        public override string NodeName { get { return "Sea Level Land Floor"; } }
+        public override NodeCategory Category { get { return NodeCategory.Modifier; } }
+        public override string Tooltip { get { return "Lifts dry land that sits below sea level up to the waterline; leaves the sea bed alone."; } }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            // The land-vs-sea oracle. Wire Continental Shape Mask here. Unconnected = the
+            // node is a safe no-op (see class remarks).
+            new Port("Land Mask", PortType.Matrix, PortDirection.Input),
+            // Optional: intended below-sea water (an endorheic lake, the sea itself) whose
+            // floor must NOT be lifted. Wire a lake/ocean Water Mask here. Unconnected = null.
+            new Port("Water Mask", PortType.Matrix, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
+
+        /// <summary>Sea level, 0..1 of world height. Keep equal to Ocean Level / River Carve.</summary>
+        public float seaLevel = 0.35f;
+
+        /// <summary>Landness (0..1) at or above which a cell counts as land and is floored.</summary>
+        public float landThreshold = 0.5f;
+
+        /// <summary>
+        /// Vertical band ABOVE sea level, 0..1, over which the floor eases off, so a filled
+        /// coastal plain grades into the existing slope instead of ending in a flat shelf
+        /// with a crease at its rim. 0 = a hard clamp exactly at sea level.
+        /// </summary>
+        public float coastGrade = 0.03f;
+
+        /// <summary>Water-mask value at or above which a cell is treated as intended water and skipped.</summary>
+        public float waterThreshold = 0.5f;
+
+        /// <summary>Overall strength, 0..1. 0 disables; 1 lifts fully to sea level.</summary>
+        public float strength = 1f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+            if (stop != null && stop.StopRequested) return null;
+
+            Matrix land = GetInputMatrix(tile, 1, stop);
+            // No land oracle -> cannot tell land from sea -> pass the terrain through
+            // untouched rather than risk raising the sea bed. (Documented no-op.)
+            if (land == null || strength <= 1e-5f) return new Matrix(src);
+
+            Matrix water = GetInputMatrix(tile, 2, stop);
+
+            Matrix dst = src.Blank();
+
+            float sea = Mathf.Clamp01(seaLevel);
+            float band = Mathf.Max(1e-5f, coastGrade);
+            float landCut = Mathf.Clamp01(landThreshold);
+            float landSpan = Mathf.Max(1e-5f, 1f - landCut);
+            float wThresh = Mathf.Clamp01(waterThreshold);
+            float amt = Mathf.Clamp01(strength);
+
+            for (int i = 0; i < src.arr.Length; i++)
+            {
+                if (stop != null && (i & 8191) == 0 && stop.StopRequested) return null;
+
+                float h = src.arr[i];
+
+                // Intended water keeps its below-sea floor.
+                if (water != null && water.arr[i] >= wThresh) { dst.arr[i] = h; continue; }
+
+                // How land-like this cell is: 0 at/below the threshold (sea), 1 well inland.
+                float landW = Mathf.Clamp01((land.arr[i] - landCut) / landSpan);
+                if (landW <= 0f) { dst.arr[i] = h; continue; } // sea side of the coast: untouched
+
+                // Smooth sea-level floor. t: 0 at/below sea, 1 a coastGrade band above sea.
+                float t = Mathf.Clamp01((h - sea) / band);
+                float floored = Mathf.Lerp(sea, h, InterpolationMath.SmoothStep(t));
+                float lifted = Mathf.Max(h, floored);        // never lower the land
+
+                // Fade the lift in across the coastline and by strength; a raise only.
+                dst.arr[i] = h + (lifted - h) * landW * amt;
+            }
+
+            return dst;
+        }
+    }
+
+    /// <summary>
     /// Segments the world into drainage basins. Port 0 is a basin id for texturing or
     /// biome variation, port 1 marks the divides - the ridge lines that separate one
     /// catchment from the next - and port 2 how large each basin is.
