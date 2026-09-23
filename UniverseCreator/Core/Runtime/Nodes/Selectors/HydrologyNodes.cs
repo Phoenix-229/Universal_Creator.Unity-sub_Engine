@@ -329,7 +329,22 @@ namespace UniverseCreator.Nodes.Selectors
                 // is a fitted course, not a raw drainage thread. Null for the plain Trace
                 // node and the spawner, so their behaviour is unchanged. Point count is
                 // preserved by the passes used, so widths stay index-aligned.
-                if (refineCourse != null) refineCourse(points, widths);
+                if (refineCourse != null)
+                {
+                    refineCourse(points, widths);
+
+                    // The refine passes (valley-seek + Leopold-Wolman meander) slide the
+                    // traced points sideways but leave them a whole solve cell apart, so a
+                    // meander bend is a run of straight chords with a corner at every point -
+                    // the "polygonal meander" and the "joined stones" valley the author saw.
+                    // StampReach draws one straight capsule per chord, so those facets would
+                    // survive into the carve mask. Run the moved planform back through the
+                    // SAME centripetal Catmull-Rom the manual river path uses and resample to
+                    // mask spacing, so the curve passes smoothly THROUGH each moved point.
+                    // Only the refined (River Course Solver) path reaches here; the plain
+                    // Trace node and the spawner pass no refine and are left untouched.
+                    ReTessellateCourse(points, widths, mask.PixelSize);
+                }
 
                 for (int p = 1; p < points.Count; p++)
                     StampReach(mask, points[p - 1], widths[p - 1], points[p], widths[p]);
@@ -368,6 +383,51 @@ namespace UniverseCreator.Nodes.Selectors
                 Vector2 here = points[i];
                 points[i] = (previous + here + points[i + 1]) / 3f;
                 previous = here;
+            }
+        }
+
+        /// <summary>
+        /// Turns a refined-but-still-polygonal course into a smooth curve before it is
+        /// stamped. Rewrites <paramref name="points"/> and <paramref name="widths"/> in
+        /// place with the re-tessellated, mask-spaced planform.
+        /// </summary>
+        /// <remarks>
+        /// This is the node-graph twin of the re-tessellation the manual river path runs
+        /// in UCWaterBody.SolveRiverCourse. Both call the ONE shared centripetal
+        /// Catmull-Rom in <see cref="SplineOperations"/> - the smoothing lives in the
+        /// shared spline core, not in two copies - so a bend becomes a curve on whichever
+        /// path drew it. Width travels as the polyline's per-point weight, which
+        /// TessellateCatmullRom and Resample both interpolate in step, so the
+        /// hydraulic-geometry sizing is preserved with no separate width resample.
+        /// </remarks>
+        private static void ReTessellateCourse(List<Vector2> points, List<float> widths,
+                                               Vector2 maskPixel)
+        {
+            if (points == null || widths == null) return;
+            if (points.Count < 3) return;   // two points are already a straight chord
+
+            // A course is a plan-view line, so y is unused: the curve is fitted in the XZ
+            // plane the stamp reads, with width carried as the per-point weight.
+            Polyline moved = new Polyline(points.Count);
+            for (int i = 0; i < points.Count; i++)
+                moved.Add(new Vector3(points[i].x, 0f, points[i].y),
+                          i < widths.Count ? widths[i] : 0f);
+
+            // Tessellate finer than the mask, then resample to it: any tighter and the
+            // extra points fall between mask pixels and buy nothing; any coarser and the
+            // curve re-facets at the resolution the capsules are actually drawn on.
+            float spacing = Mathf.Max(0.5f, Mathf.Min(maskPixel.x, maskPixel.y));
+            Polyline curved = SplineOperations.TessellateCatmullRom(moved, spacing * 0.5f);
+            Polyline respaced = SplineOperations.Resample(curved, spacing, true);
+            if (respaced == null || respaced.Count < 2) return;
+
+            points.Clear();
+            widths.Clear();
+            for (int i = 0; i < respaced.Count; i++)
+            {
+                Vector3 p = respaced.PointAt(i);
+                points.Add(new Vector2(p.x, p.z));
+                widths.Add(respaced.WeightAt(i));
             }
         }
 
