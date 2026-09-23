@@ -238,6 +238,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestTerrainDensityController();
             TestDerivedDrawDistances();
             TestDrawInstancedPairing();
+            TestSplatLayerReconcile();
             TestAcuityTier();
             TestAutoConnectDisabled();
             TestOriginClamp();

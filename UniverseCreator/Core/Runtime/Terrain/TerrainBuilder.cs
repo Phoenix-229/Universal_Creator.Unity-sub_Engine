@@ -174,7 +174,22 @@ namespace UniverseCreator.TerrainSystem
             // Splatmap (texture layers)
             if (outputs.splatmap != null)
             {
-                data.SetAlphamaps(0, 0, outputs.splatmap);
+                // The graph paints channel L meaning "terrain layer L". Unity's
+                // SetAlphamaps throws "Float array size wrong (layers should be N)"
+                // the instant the map's depth differs from alphamapLayers, and that
+                // throw lands inside the chunk pump - it aborts ApplyChunk and the
+                // whole generation stalls. That is exactly what a Biome Splat Output
+                // (8 channels) wired onto a world with one authored layer produced.
+                // A matching resolution throw follows if the map's width/height differ
+                // from alphamapResolution (nothing assigns it, so it sits at the default
+                // while the graph paints at the heightmap's resolution). Reconcile both
+                // here, the last gate before the write, the way Unreal's Landscape
+                // auto-provisions a layer info per weight channel rather than refusing
+                // the paint. A splatmap whose depth and resolution already match (worlds
+                // where those line up) passes through untouched.
+                float[,,] splat = ReconcileSplatResolution(data, outputs.splatmap);
+                splat = ReconcileSplatLayers(data, splat, ChunkLabel(chunkWorldBounds));
+                data.SetAlphamaps(0, 0, splat);
             }
             else if (data.terrainLayers != null && data.terrainLayers.Length > 0 && data.alphamapResolution > 0)
             {
@@ -295,52 +310,208 @@ namespace UniverseCreator.TerrainSystem
                     if (current[i] != null) return;
             }
 
-            if (fallbackLayer == null)
-            {
-                // Earth, not a test pattern. The old stand-in was a light-grey/white
-                // checker, and white is the one colour that cannot be read as ground:
-                // against a blue water surface it reads exactly as "this material
-                // failed to assign", which is precisely the bug reported at the
-                // shoreline when in fact the terrain was drawing correctly with the
-                // stand-in it was given.
-                //
-                // 4x4 rather than 2x2 with bilinear filtering and a several-metre tile,
-                // so it reads as soil breaking up over distance instead of as squares.
-                const int size = 4;
-                Texture2D tex = new Texture2D(size, size);
-                tex.name = "UC_DefaultGroundTex";
-                tex.hideFlags = HideFlags.HideAndDontSave;
-                tex.filterMode = FilterMode.Bilinear;
-                tex.wrapMode = TextureWrapMode.Repeat;
-
-                // Damp earth, with the value walked by a small fixed pattern rather than
-                // a random draw: the stand-in has to look identical on every machine and
-                // after every reload, or a screenshot comparison is worthless.
-                Color[] px = new Color[size * size];
-                for (int i = 0; i < px.Length; i++)
-                {
-                    // Two coprime strides over the 16 cells, so light and dark never line
-                    // up into rows or a checker.
-                    float v = 0.88f + 0.06f * (i % 3) + 0.04f * (i % 5);
-                    px[i] = new Color(0.42f * v, 0.35f * v, 0.26f * v, 1f);
-                }
-
-                tex.SetPixels(px);
-                tex.Apply();
-
-                fallbackLayer = new TerrainLayer();
-                fallbackLayer.name = "Default_Terrain_Layer";
-                fallbackLayer.diffuseTexture = tex;
-                // Metres per texture repeat. Large enough that the 4x4 never resolves as
-                // a grid underfoot, small enough to still break up a hillside.
-                fallbackLayer.tileSize = new Vector2(6f, 6f);
-                fallbackLayer.hideFlags = HideFlags.HideAndDontSave;
-            }
+            EnsureFallbackLayer();
 
             if (data.terrainLayers == null || data.terrainLayers.Length == 0)
             {
                 data.terrainLayers = new TerrainLayer[] { fallbackLayer };
             }
+        }
+
+        /// <summary>
+        /// Builds the shared neutral stand-in layer once. Split out of
+        /// EnsureVisibleLayer so the splat reconciler can hang autofill layers off the
+        /// same texture. HideAndDontSave, so a domain reload destroys it and every
+        /// caller must null-check before use.
+        /// </summary>
+        private static void EnsureFallbackLayer()
+        {
+            if (fallbackLayer != null) return;
+
+            // Earth, not a test pattern. The old stand-in was a light-grey/white
+            // checker, and white is the one colour that cannot be read as ground:
+            // against a blue water surface it reads exactly as "this material
+            // failed to assign", which is precisely the bug reported at the
+            // shoreline when in fact the terrain was drawing correctly with the
+            // stand-in it was given.
+            //
+            // 4x4 rather than 2x2 with bilinear filtering and a several-metre tile,
+            // so it reads as soil breaking up over distance instead of as squares.
+            const int size = 4;
+            Texture2D tex = new Texture2D(size, size);
+            tex.name = "UC_DefaultGroundTex";
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Repeat;
+
+            // Damp earth, with the value walked by a small fixed pattern rather than
+            // a random draw: the stand-in has to look identical on every machine and
+            // after every reload, or a screenshot comparison is worthless.
+            Color[] px = new Color[size * size];
+            for (int i = 0; i < px.Length; i++)
+            {
+                // Two coprime strides over the 16 cells, so light and dark never line
+                // up into rows or a checker.
+                float v = 0.88f + 0.06f * (i % 3) + 0.04f * (i % 5);
+                px[i] = new Color(0.42f * v, 0.35f * v, 0.26f * v, 1f);
+            }
+
+            tex.SetPixels(px);
+            tex.Apply();
+
+            fallbackLayer = new TerrainLayer();
+            fallbackLayer.name = "Default_Terrain_Layer";
+            fallbackLayer.diffuseTexture = tex;
+            // Metres per texture repeat. Large enough that the 4x4 never resolves as
+            // a grid underfoot, small enough to still break up a hillside.
+            fallbackLayer.tileSize = new Vector2(6f, 6f);
+            fallbackLayer.hideFlags = HideFlags.HideAndDontSave;
+        }
+
+        // Stand-in layers minted to fill splat channels the world has not authored.
+        // Cached so a 25-chunk grid does not create a fresh set per chunk, and rebuilt
+        // lazily because HideAndDontSave entries die on a domain reload.
+        private static readonly List<TerrainLayer> autofillLayers = new List<TerrainLayer>();
+
+        /// <summary>
+        /// A distinct, valid TerrainLayer for splatmap channel <paramref name="index"/>
+        /// that the world has not authored. The channel is real - it simply draws the
+        /// neutral stand-in until the user assigns a texture to that slot, the same way
+        /// an unpainted Unreal landscape layer reads. Distinct instances rather than one
+        /// shared reference, so the terrain inspector does not flag "layer used more
+        /// than once".
+        /// </summary>
+        private static TerrainLayer AutofillLayer(int index)
+        {
+            EnsureFallbackLayer();
+            while (autofillLayers.Count <= index) autofillLayers.Add(null);
+            if (autofillLayers[index] == null)
+            {
+                TerrainLayer layer = new TerrainLayer();
+                layer.name = "UC_Autofill_Layer_" + index;
+                layer.diffuseTexture = fallbackLayer.diffuseTexture;
+                layer.tileSize = fallbackLayer.tileSize;
+                layer.hideFlags = HideFlags.HideAndDontSave;
+                autofillLayers[index] = layer;
+            }
+            return autofillLayers[index];
+        }
+
+        // Highest channel deficit already reported this session, so the autofill
+        // notice is logged once rather than once per chunk (25+ times a generation).
+        private static int loggedAutofillDepth = -1;
+
+        /// <summary>
+        /// Makes a produced splatmap and the terrain's layer set agree in depth before
+        /// SetAlphamaps sees them, so the write can never throw "Float array size wrong"
+        /// and stall the chunk pump. Pure given the map depth and the current layer
+        /// count, so a self-test can pin it without a live Terrain.
+        ///
+        ///   layers &lt; map depth : grow the layer set with autofill stand-ins (Unreal
+        ///                          provisions a layer info per channel; it never refuses
+        ///                          the weightmap). Real authored layers are kept.
+        ///   layers &gt; map depth : pad the map with empty trailing channels, which does
+        ///                          not disturb the per-pixel normalisation.
+        ///   equal              : returned unchanged.
+        /// </summary>
+        public static float[,,] ReconcileSplatLayers(TerrainData data, float[,,] splat, string chunkLabel)
+        {
+            if (data == null || splat == null) return splat;
+
+            int want = splat.GetLength(2);
+            int have = data.terrainLayers != null ? data.terrainLayers.Length : 0;
+            if (want == have) return splat;
+
+            if (have < want)
+            {
+                // Grow the layer set. Keep every real layer the world already has and
+                // fill the remainder with stand-ins, so channel L still maps to layer L.
+                TerrainLayer[] grown = new TerrainLayer[want];
+                TerrainLayer[] current = data.terrainLayers;
+                for (int i = 0; i < want; i++)
+                {
+                    grown[i] = current != null && i < current.Length && current[i] != null
+                             ? current[i]
+                             : AutofillLayer(i);
+                }
+                data.terrainLayers = grown;
+
+                if (want > loggedAutofillDepth)
+                {
+                    loggedAutofillDepth = want;
+                    Debug.LogWarning(
+                        "Universe Creator: a splat output addresses " + want +
+                        " layer(s) but the world had " + have +
+                        " authored - auto-provisioned the missing slot(s) with a neutral " +
+                        "stand-in so generation continues (was: the SetAlphamaps throw that " +
+                        "stalled the build at " + (chunkLabel ?? "a chunk") + "). Assign " +
+                        "textures to those layers on the Universe Creator object, or lower " +
+                        "the node's Layer Count, to control them.");
+                }
+                return splat;
+            }
+
+            // have > want: pad the map's depth up to the layer count. The extra
+            // channels stay at zero, so each pixel's weights still sum as before.
+            int h = splat.GetLength(0);
+            int w = splat.GetLength(1);
+            float[,,] padded = new float[h, w, have];
+            for (int z = 0; z < h; z++)
+                for (int x = 0; x < w; x++)
+                    for (int L = 0; L < want; L++)
+                        padded[z, x, L] = splat[z, x, L];
+            return padded;
+        }
+
+        /// <summary>
+        /// Makes a produced splatmap's width/height agree with the terrain's
+        /// alphamapResolution before SetAlphamaps sees them - the sibling of
+        /// <see cref="ReconcileSplatLayers"/>. SetAlphamaps validates depth (layers)
+        /// in managed code first, then the map's w/h against alphamapResolution in the
+        /// native call; the second throw ("Array size does not match the dimensions of
+        /// the TerrainData") is just as uncaught and lands on the same main-thread pump,
+        /// so fixing only the depth would swap one stall for another. The graph paints
+        /// the splat at the heightmap's sample resolution while nothing ever assigns
+        /// alphamapResolution (it sits at the TerrainData default), so the two are
+        /// essentially never equal until reconciled here.
+        ///
+        /// Prefer making the control texture match the map, so no fidelity is lost and
+        /// the splat stays per-sample like the heightmap the same graph wrote. If Unity
+        /// keeps a different resolution than requested (or the map is not square), fall
+        /// back to a nearest-neighbour resample onto whatever alphamapResolution actually
+        /// became - the weights are already normalised per pixel, so a nearest copy keeps
+        /// each pixel summing to 1. Returns the map to hand to SetAlphamaps.
+        /// </summary>
+        public static float[,,] ReconcileSplatResolution(TerrainData data, float[,,] splat)
+        {
+            if (data == null || splat == null) return splat;
+
+            int mapH = splat.GetLength(0);
+            int mapW = splat.GetLength(1);
+            int layers = splat.GetLength(2);
+
+            // Only a square map can be described by a single alphamapResolution, and
+            // every terrain chunk is square (the heightmap is resolution x resolution).
+            if (mapW == mapH && data.alphamapResolution != mapW)
+                data.alphamapResolution = mapW;
+
+            int aRes = data.alphamapResolution;
+            if (aRes == mapW && aRes == mapH) return splat;
+
+            // Unity kept a resolution of its own, or the map was non-square: resample to
+            // exactly what the terrain now expects so the write can never be rejected.
+            float[,,] resized = new float[aRes, aRes, layers];
+            for (int z = 0; z < aRes; z++)
+            {
+                int srcZ = mapH == aRes ? z : Mathf.Min(mapH - 1, (int)((long)z * mapH / aRes));
+                for (int x = 0; x < aRes; x++)
+                {
+                    int srcX = mapW == aRes ? x : Mathf.Min(mapW - 1, (int)((long)x * mapW / aRes));
+                    for (int L = 0; L < layers; L++)
+                        resized[z, x, L] = splat[srcZ, srcX, L];
+                }
+            }
+            return resized;
         }
 
         /// <summary>

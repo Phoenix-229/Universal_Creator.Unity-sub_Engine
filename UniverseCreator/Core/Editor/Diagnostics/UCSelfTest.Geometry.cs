@@ -2102,6 +2102,119 @@ namespace UniverseCreator.Editor.Diagnostics
         }
 
         /// <summary>
+        /// The splat/layer reconciliation that stops a Biome Splat Output (or any splat
+        /// producer, including Texture Output) from hard-stopping generation.
+        ///
+        /// The claim under test is the done-when for §35: Unity's SetAlphamaps throws
+        /// "Float array size wrong" the moment the map depth differs from the terrain's
+        /// layer count, and "Array size does not match the dimensions of the TerrainData"
+        /// the moment its w/h differ from alphamapResolution - and either throw, being
+        /// uncaught on the main-thread apply, aborts the chunk pump. ReconcileSplatLayers
+        /// and ReconcileSplatResolution are the two places the map and the terrain are
+        /// made to agree before the write, so all three depth relations are pinned (grow
+        /// when deeper, pad when shallower, pass through when equal), the resolution
+        /// reconcile is pinned, and finally the exact shape that stalled the pump is
+        /// driven end-to-end through a real SetAlphamaps to prove it no longer throws.
+        /// </summary>
+        private static void TestSplatLayerReconcile()
+        {
+            var data = new TerrainData();
+            try
+            {
+                // Fewer layers than the map depth: the exact Biome Splat crash. One
+                // authored layer, an 8-channel splat with a weight parked on channel 3.
+                var one = new TerrainLayer { name = "UC_SelfTest_Layer0", hideFlags = HideFlags.HideAndDontSave };
+                data.terrainLayers = new[] { one };
+                float[,,] deep = new float[2, 2, 8];
+                deep[0, 0, 3] = 1f;
+                float[,,] r1 = TerrainBuilder.ReconcileSplatLayers(data, deep, "selftest 1,1");
+                Check(r1.GetLength(2) == 8,
+                    "Reconcile must return a map whose depth equals the deepest splat (8), not let SetAlphamaps throw.");
+                Check(data.terrainLayers.Length == 8,
+                    "Reconcile must grow the layer set to match the splat depth (Unreal-style auto-provision).");
+                Check(ReferenceEquals(data.terrainLayers[0], one),
+                    "The real authored layer 0 must survive the grow, not be replaced by a stand-in.");
+                Check(data.terrainLayers[7] != null,
+                    "Every auto-provisioned trailing layer must be a real TerrainLayer, so the write is accepted.");
+                Check(Mathf.Approximately(r1[0, 0, 3], 1f),
+                    "Growing the layer set must not disturb the painted weights.");
+
+                // More layers than the map depth: pad the map, keep the layers.
+                float[,,] shallow = new float[2, 2, 2];
+                shallow[1, 1, 0] = 1f;
+                float[,,] r2 = TerrainBuilder.ReconcileSplatLayers(data, shallow, "selftest 2,2");
+                Check(r2.GetLength(2) == data.terrainLayers.Length,
+                    "A map shallower than the layer set must be padded up to the layer count, not rejected.");
+                Check(Mathf.Approximately(r2[1, 1, 0], 1f),
+                    "Padding must preserve the existing channels; the extra channels stay zero.");
+
+                // Exact match: a no-op, returned by reference.
+                float[,,] exact = new float[2, 2, data.terrainLayers.Length];
+                float[,,] r3 = TerrainBuilder.ReconcileSplatLayers(data, exact, "selftest 3,3");
+                Check(ReferenceEquals(r3, exact),
+                    "A splat whose depth already equals the layer count must pass through untouched.");
+
+                // Resolution reconcile: a map painted at the heightmap's sample
+                // resolution must be made to agree with alphamapResolution, which
+                // nothing assigns, or SetAlphamaps throws the size-mismatch sibling.
+                var resData = new TerrainData();
+                try
+                {
+                    resData.heightmapResolution = 513;   // Unity snaps to 2^n+1.
+                    resData.alphamapResolution = 512;    // deliberately different from the map.
+                    float[,,] atHeightRes = new float[513, 513, 1];
+                    atHeightRes[10, 20, 0] = 1f;
+                    float[,,] rr = TerrainBuilder.ReconcileSplatResolution(resData, atHeightRes);
+                    Check(rr.GetLength(0) == resData.alphamapResolution &&
+                          rr.GetLength(1) == resData.alphamapResolution,
+                        "Reconcile must return a map whose w/h equal alphamapResolution, so SetAlphamaps' native size check passes.");
+                    Check(rr.GetLength(2) == 1,
+                        "Resolution reconcile must not change the layer depth.");
+                }
+                finally
+                {
+                    Object.DestroyImmediate(resData);
+                }
+
+                // End-to-end: the exact shape that stalled the pump - an 8-channel splat
+                // painted at heightmap resolution onto a one-layer, default-alphamap
+                // terrain - must now reach SetAlphamaps without throwing.
+                var e2e = new TerrainData();
+                try
+                {
+                    e2e.heightmapResolution = 129;
+                    var only = new TerrainLayer { name = "UC_SelfTest_E2E", hideFlags = HideFlags.HideAndDontSave };
+                    e2e.terrainLayers = new[] { only };
+                    float[,,] biomeSplat = new float[129, 129, 8];
+                    for (int z = 0; z < 129; z++)
+                        for (int x = 0; x < 129; x++)
+                            biomeSplat[z, x, 0] = 1f;
+                    bool threw = false;
+                    try
+                    {
+                        float[,,] s = TerrainBuilder.ReconcileSplatResolution(e2e, biomeSplat);
+                        s = TerrainBuilder.ReconcileSplatLayers(e2e, s, "selftest e2e");
+                        e2e.SetAlphamaps(0, 0, s);
+                    }
+                    catch (System.Exception)
+                    {
+                        threw = true;
+                    }
+                    Check(!threw,
+                        "The reconciled Biome Splat write (8 layers at heightmap resolution onto a 1-layer default terrain) must not throw - that throw is the pump stall §35 fixes.");
+                }
+                finally
+                {
+                    Object.DestroyImmediate(e2e);
+                }
+            }
+            finally
+            {
+                Object.DestroyImmediate(data);
+            }
+        }
+
+        /// <summary>
         /// The per-tier acuity caps (L-49) and the single dial that carries them.
         ///
         /// The claim under test is the done-when: the four device classes differ in
