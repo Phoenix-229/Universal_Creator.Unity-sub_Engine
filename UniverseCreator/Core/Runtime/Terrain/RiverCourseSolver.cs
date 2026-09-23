@@ -525,6 +525,12 @@ namespace UniverseCreator.TerrainSystem
             NoWayDown = 2
         }
 
+        // §33 Fix D: how hard an over-steep step is penalised, per unit of grade above
+        // the allowed maximum. Large relative to the drop*2 reward so an in-limit oblique
+        // step beats a fall-line plunge, but finite so a true cliff (every candidate
+        // over-steep) still yields the least-steep step rather than stalling the walk.
+        private const float SteepGradePenalty = 4f;
+
         /// <summary>
         /// Rewrites the course as a path that never climbs.
         ///
@@ -548,11 +554,18 @@ namespace UniverseCreator.TerrainSystem
         /// is not monotonic to the millimetre, and a zero tolerance makes the walk
         /// zig-zag across every one-centimetre bump in the heightfield.</param>
         /// <param name="water">Optional test for arriving at joinable water; null for none.</param>
+        /// <param name="maxSlopeDegrees">§33 Fix D - the steepest descent grade the walk
+        /// may reward. A step steeper than this earns no extra descent credit and is
+        /// penalised, so the walk prefers a gentle oblique line (steering AROUND a
+        /// mountain into a valley corridor) over plunging straight down the fall line -
+        /// the "water slide". A true cliff with no gentler way still takes the least-steep
+        /// step rather than stalling. <= 0 disables the gate (the pre-§33 behaviour).</param>
         public static DescentEnding WalkDownhill(List<Vector3> drawn, List<Vector3> result,
                                                  GroundSampler ground,
                                                  float stepMetres, float fanDegrees,
                                                  float climbToleranceMetres,
-                                                 System.Func<Vector3, bool> water)
+                                                 System.Func<Vector3, bool> water,
+                                                 float maxSlopeDegrees = 0f)
         {
             if (result == null) return DescentEnding.ReachedEnd;
             result.Clear();
@@ -566,6 +579,13 @@ namespace UniverseCreator.TerrainSystem
             float step = Mathf.Max(0.5f, stepMetres);
             float fan = Mathf.Clamp(fanDegrees, 0f, 170f);
             float tolerance = Mathf.Max(0f, climbToleranceMetres);
+
+            // §33 Fix D: the maximum rewarded descent grade (rise/run == tan(theta)).
+            // PositiveInfinity when the gate is off, so Min/Max below become no-ops and
+            // the scoring is exactly the old drop*2 + alignment.
+            float maxGrade = maxSlopeDegrees > 0f
+                ? Mathf.Tan(Mathf.Clamp(maxSlopeDegrees, 1f, 85f) * Mathf.Deg2Rad)
+                : float.PositiveInfinity;
 
             Vector3 at = drawn[0];
             at.y = ground(at.x, at.z);
@@ -624,9 +644,19 @@ namespace UniverseCreator.TerrainSystem
                     // Drop is what the water wants; alignment is what the designer
                     // wants. Weighting drop by the step keeps the two in the same
                     // units, so neither silently dominates at a different scale.
-                    float drop = (here - h) / step;
+                    float drop = (here - h) / step;    // grade == rise/run == tan(theta)
                     float alignment = Vector2.Dot(dir, heading);
-                    float score = drop * 2f + alignment;
+
+                    // §33 Fix D: reward descent only up to maxGrade; a steeper step buys
+                    // no extra credit and is penalised by its excess grade, so a gentle
+                    // oblique line beats plunging down the fall line. With the gate off
+                    // (maxGrade == +inf) rewardGrade == drop and overSteep == 0, i.e. the
+                    // original score. If EVERY candidate is over-steep (a true cliff), the
+                    // least-steep one still wins, so the walk steers to the gentlest way
+                    // down instead of stalling.
+                    float rewardGrade = Mathf.Min(drop, maxGrade);
+                    float overSteep = Mathf.Max(0f, drop - maxGrade);
+                    float score = rewardGrade * 2f + alignment - overSteep * SteepGradePenalty;
 
                     if (score > bestScore)
                     {

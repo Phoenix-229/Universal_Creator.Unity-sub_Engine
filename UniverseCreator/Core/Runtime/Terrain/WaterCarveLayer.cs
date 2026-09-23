@@ -104,6 +104,23 @@ namespace UniverseCreator.TerrainSystem
         /// surface mean "not confined here". Empty means no confinement anywhere.</summary>
         public List<float> courseConfineY = new List<float>();
 
+        /// <summary>
+        /// §33 Fix E - slope-dependent dilated carving. Per-course-node horizontal
+        /// dilation factor (1 + alpha*tan(theta)) computed from the local CROSS-VALLEY
+        /// slope by UCWaterBody, one entry per course point. 1 = flat valley floor (the
+        /// trench stays narrow and precise); larger on a steep reach, where the valley
+        /// band fans out to turn a vertical slot into a graded V-canyon. Clamped to
+        /// <see cref="ValleyWidenMax"/> so a near-vertical probe can never request an
+        /// unbounded carve. Empty (or 1 everywhere) reproduces the pre-§33 shape exactly,
+        /// so this is inert unless UCWaterBody actually measured a steep reach.
+        /// </summary>
+        public List<float> courseValleyWiden = new List<float>();
+
+        /// <summary>Hard cap on the §33 Fix E dilation factor. tan(theta) diverges toward
+        /// the vertical, so without a ceiling a cliff reach would ask for an effectively
+        /// infinite trench; 6x the base valley reach is already a broad canyon.</summary>
+        public const float ValleyWidenMax = 6f;
+
         // ---- Ring bodies (lakes, oceans, pools) -----------------------------
 
         public List<Vector3> ringPoints = new List<Vector3>();
@@ -333,10 +350,14 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>How far outside the shape this dig can still change a height. One
         /// answer for the bounds, the chunk test and the sample window, because three
         /// separate ones drift apart and the symptom is a channel clipped flat at a
-        /// chunk edge.</summary>
+        /// chunk edge. For a course the corridor is scaled by the §33 Fix E maximum
+        /// dilation, so a chunk the fanned V-valley reaches is never rejected; the
+        /// actual per-node widen (<= this) is applied inside the shape.</summary>
         private float OutsideReach()
         {
-            return Mathf.Max(0f, bevelMetres) + Mathf.Max(0f, corridorMetres);
+            float corridorReach = Mathf.Max(0f, corridorMetres);
+            if (isCourse) corridorReach *= ValleyWidenMax;
+            return Mathf.Max(0f, bevelMetres) + corridorReach;
         }
 
         /// <summary>Cheap rejection for a chunk that this dig cannot reach.</summary>
@@ -528,10 +549,20 @@ namespace UniverseCreator.TerrainSystem
                 for (int lx = x0; lx <= x1; lx++)
                 {
                     int w = (lz - z0) * ww + (lx - x0);
+
+                    // §33 Fix A - Minimum Penetration Constraint (strict subtractive).
+                    // A river course may NEVER add height: the only sanctioned raise is the
+                    // opt-in confining wall (confineBanks). With it off, hard-clamp the
+                    // composited result to the original ground so that no branch, and no
+                    // smoothing pass, can ever build a ridge or dam out of raw terrain -
+                    // corrected = min(original, blendedTrench), enforced once at the sink.
+                    float dv = dugBuf[w];
+                    if (isCourse && !confineBanks) dv = Mathf.Min(dv, origBuf[w]);
+
                     // Only ever assigned, never accumulated. Two applications of the
                     // same dig to the same terrain give the same answer, which is
                     // what makes the order of chunk builds irrelevant.
-                    heights[lz, lx] = Mathf.Clamp01(dugBuf[w] * invMax);
+                    heights[lz, lx] = Mathf.Clamp01(dv * invMax);
                 }
         }
 
@@ -610,8 +641,8 @@ namespace UniverseCreator.TerrainSystem
 
             if (isCourse)
             {
-                float signed, s, d, r, c;
-                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r, out c)) return false;
+                float signed, s, d, r, c, vw;
+                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r, out c, out vw)) return false;
                 return signed > 0f;
             }
 
@@ -665,11 +696,13 @@ namespace UniverseCreator.TerrainSystem
             float localDepth;
             float localRun;
             float localConfineY = float.NegativeInfinity;
+            float localValleyWiden = 1f;
 
             if (isCourse)
             {
                 if (!CourseFrame(worldX, worldZ, out signed, out localSurfaceY,
-                                 out localDepth, out localRun, out localConfineY))
+                                 out localDepth, out localRun, out localConfineY,
+                                 out localValleyWiden))
                     return existingY;
             }
             else
@@ -687,7 +720,11 @@ namespace UniverseCreator.TerrainSystem
             if (signed > 0f)
             {
                 float bevel = Mathf.Max(0f, bevelMetres);
-                float corridor = Mathf.Max(0f, corridorMetres);
+                // §33 Fix E: the corridor (valley) reach fans out on a steep cross slope so
+                // the walls grade back over a wide run instead of standing as a slot wall.
+                // The bevel (the immediate bank round-off) is left alone - only the valley
+                // footprint dilates. widen is 1 on flat reaches, so this is a no-op there.
+                float corridor = Mathf.Max(0f, corridorMetres) * localValleyWiden;
 
                 if (signed >= bevel + corridor) return existingY;
 
@@ -734,7 +771,7 @@ namespace UniverseCreator.TerrainSystem
                 // Two separate questions: this one is how low the valley floor is,
                 // that one is how fast the valley's sides may rise.
                 outside = ValleySag(signed, bevel, corridor, localSurfaceY,
-                                    localDepth, localRun, outside);
+                                    localDepth, localRun, localValleyWiden, outside);
 
                 outside = ConfineWall(signed, bevel, localConfineY, outside);
 
@@ -859,7 +896,7 @@ namespace UniverseCreator.TerrainSystem
         /// </remarks>
         private float ValleySag(float signed, float bevel, float corridor,
                                 float localSurfaceY, float localDepth, float localRun,
-                                float current)
+                                float widen, float current)
         {
             // Rings never get one: a lake's valley is the basin it sits in, and its
             // shore is the bevel. This is the river path only.
@@ -877,8 +914,12 @@ namespace UniverseCreator.TerrainSystem
             if (strength <= 1e-4f) return current;
 
             // Big rivers only, gated on the LOCAL width, which is what lets one river
-            // run in a notch at its head and a floodplain at its mouth.
-            float width = Mathf.Max(0f, localRun) * 2f;
+            // run in a notch at its head and a floodplain at its mouth. §33 Fix E: a
+            // steep reach reads as a wider river for this onset gate (width *= widen), so
+            // the graded V-valley also engages for a narrow channel that is forced across
+            // a slope - the water-slide case. On flat ground widen==1 and this is the
+            // unchanged big-river behaviour.
+            float width = Mathf.Max(0f, localRun) * 2f * Mathf.Max(1f, widen);
             float size = Mathf.InverseLerp(ValleyOnsetWidthMetres, ValleyFullWidthMetres, width);
             if (size <= 1e-4f) return current;
 
@@ -1074,13 +1115,14 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         private bool CourseFrame(float worldX, float worldZ, out float signedDistance,
                                  out float localSurfaceY, out float localDepth, out float localRun,
-                                 out float localConfineY)
+                                 out float localConfineY, out float localValleyWiden)
         {
             signedDistance = 0f;
             localSurfaceY = surfaceY;
             localDepth = maxDepthMetres;
             localRun = 1f;
             localConfineY = float.NegativeInfinity;
+            localValleyWiden = 1f;
 
             int count = coursePoints.Count;
             if (count < 2) return false;
@@ -1127,6 +1169,10 @@ namespace UniverseCreator.TerrainSystem
             float halfWidth = Mathf.Max(0.05f, Mathf.Lerp(wA, wB, bestT) * 0.5f);
 
             // Nothing beyond the bank and its corridor is this river's business.
+            // OutsideReach() already opens the corridor to the §33 Fix E maximum for a
+            // course, so a sample the fanned V-valley might touch is admitted; the actual
+            // per-node widen is interpolated below and applied to the shape. Admitting a
+            // few unwidened samples only costs a HeightAt that returns existingY.
             if (distance > halfWidth + OutsideReach()) return false;
 
             localDepth = Mathf.Lerp(DepthAt(bestSeg), DepthAt(bestSeg + 1), bestT);
@@ -1140,6 +1186,11 @@ namespace UniverseCreator.TerrainSystem
             localConfineY = (float.IsNegativeInfinity(cA) || float.IsNegativeInfinity(cB))
                 ? float.NegativeInfinity
                 : Mathf.Lerp(cA, cB, bestT);
+
+            // §33 Fix E dilation, interpolated along the segment so the canyon fans in and
+            // out smoothly rather than stepping at each node. Both accessors clamp, so this
+            // is always >= 1 and <= ValleyWidenMax.
+            localValleyWiden = Mathf.Lerp(WidenAt(bestSeg), WidenAt(bestSeg + 1), bestT);
 
             // A channel is deepest at its middle, so the run from bank to deepest
             // point is half the width.
@@ -1165,6 +1216,18 @@ namespace UniverseCreator.TerrainSystem
         {
             if (courseSurfaceY == null || courseSurfaceY.Count == 0) return surfaceY;
             return courseSurfaceY[Mathf.Clamp(i, 0, courseSurfaceY.Count - 1)];
+        }
+
+        /// <summary>The §33 Fix E dilation factor at node i (>= 1), or 1 where the list is
+        /// empty/short - so "no data" reads as "no widening" and the shape is unchanged.
+        /// Clamped to <see cref="ValleyWidenMax"/> at read time so a stale large value from
+        /// serialisation can never blow up the carve.</summary>
+        private float WidenAt(int i)
+        {
+            if (courseValleyWiden == null || courseValleyWiden.Count == 0) return 1f;
+            float f = courseValleyWiden[Mathf.Clamp(i, 0, courseValleyWiden.Count - 1)];
+            if (f < 1f || float.IsNaN(f)) return 1f;
+            return Mathf.Min(f, ValleyWidenMax);
         }
 
         /// <summary>The elevation the low bank is confined to at node i, or negative
@@ -1305,8 +1368,8 @@ namespace UniverseCreator.TerrainSystem
         {
             if (!isCourse) return surfaceY;
 
-            float signed, s, d, run, c;
-            if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out run, out c))
+            float signed, s, d, run, c, vw;
+            if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out run, out c, out vw))
                 return surfaceY;
 
             return s;
@@ -1335,6 +1398,7 @@ namespace UniverseCreator.TerrainSystem
             if (courseDepths != null) courseDepths.Clear();
             if (courseSurfaceY != null) courseSurfaceY.Clear();
             if (courseConfineY != null) courseConfineY.Clear();
+            if (courseValleyWiden != null) courseValleyWiden.Clear();
             if (ringPoints != null) ringPoints.Clear();
             if (ringDepths != null) ringDepths.Clear();
 

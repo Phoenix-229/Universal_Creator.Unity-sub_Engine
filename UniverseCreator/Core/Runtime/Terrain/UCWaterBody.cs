@@ -378,6 +378,15 @@ namespace UniverseCreator.TerrainSystem
                  "bumps far smaller than the channel it is cutting.")]
         public float climbToleranceMetres = 0.05f;
 
+        [Tooltip("§33 Fix D - the steepest slope, in degrees, the course may descend or " +
+                 "cross. Real subaerial rivers follow the path of least resistance into " +
+                 "valley corridors; they do not run straight down a rock face. The valley " +
+                 "seek prefers ground flatter than this, and the downhill walk rejects a " +
+                 "step steeper than this (steering around a mountain into a gentler line), " +
+                 "which is what stops the 'water slide' of a channel draped down a cliff. " +
+                 "25 deg is the classic hydrology threshold.")]
+        [Range(5f, 60f)] public float maxCourseSlopeDegrees = 25f;
+
         [Tooltip("Length of the fade where a river that found no way down disappears, " +
                  "in metres. The channel narrows and shallows over this run so it " +
                  "reads as water sinking underground rather than as a trench that " +
@@ -1401,7 +1410,56 @@ namespace UniverseCreator.TerrainSystem
                 // valley seek, not walled in place.
                 carve.courseConfineY.Add(
                     carve.confineBanks ? ConfineTargetAt(i) : float.NegativeInfinity);
+
+                // §33 Fix E - slope-dependent dilated carving. The horizontal dilation
+                // factor (1 + alpha*tan(theta)) from the LOCAL terrain gradient at this
+                // node. 1 on flat ground (trench stays narrow); larger on a steep reach,
+                // where the valley band fans out to a graded V-canyon instead of a slot.
+                carve.courseValleyWiden.Add(ValleyWidenAt(i));
             }
+        }
+
+        // §33 Fix E scaling factor, alpha in R_carve = W_base * (1 + alpha*tan(theta)).
+        // Physically tied to the angle of repose / structural stability of the material:
+        // it sets how far the trench must fan to grade a steep wall back to a stable
+        // slope. At the Fix-D cap slope (25 deg, tan~0.47) this widens the valley ~1.9x;
+        // at 45 deg ~3x; a near-vertical face saturates at ValleyWidenMax. Bounded, so
+        // the carve can never run away.
+        private const float ValleyWidenAlpha = 2.0f;
+
+        /// <summary>
+        /// The §33 Fix E dilation factor at solved station i: 1 + alpha*tan(theta), where
+        /// theta is the LOCAL terrain slope measured as the gradient magnitude of the
+        /// surrounding ground (the CPU equivalent of the Sobel slope map in the UE
+        /// pipeline). Read over a channel-width run so it tracks the hillside the reach
+        /// crosses, not sub-metre ruggedness. Clamped to [1, ValleyWidenMax]; returns 1
+        /// on flat ground so the shape is unchanged there.
+        /// </summary>
+        private float ValleyWidenAt(int i)
+        {
+            if (solvedPoints == null || i < 0 || i >= solvedPoints.Count)
+                return 1f;
+
+            Vector3 at = solvedPoints[i];
+            float width = (solvedWidths != null && i < solvedWidths.Count)
+                ? Mathf.Max(0.5f, solvedWidths[i]) : 1f;
+
+            // Central-difference gradient over a run scaled to the channel, so the slope
+            // read is the landform's, not the bed ruggedness'.
+            float e = Mathf.Clamp(width, 4f, 60f);
+            float hx1 = SampleGround(at.x + e, at.z);
+            float hx0 = SampleGround(at.x - e, at.z);
+            float hz1 = SampleGround(at.x, at.z + e);
+            float hz0 = SampleGround(at.x, at.z - e);
+
+            float gx = (hx1 - hx0) / (2f * e);
+            float gz = (hz1 - hz0) / (2f * e);
+
+            // |gradient| == tan(theta): rise over run of the steepest local direction.
+            float tanTheta = Mathf.Sqrt(gx * gx + gz * gz);
+
+            float widen = 1f + ValleyWidenAlpha * tanTheta;
+            return Mathf.Clamp(widen, 1f, WaterCarveLayer.ValleyWidenMax);
         }
 
         // The wall stands the water's freeboard above the surface, in local channel
@@ -1736,10 +1794,10 @@ namespace UniverseCreator.TerrainSystem
             for (int i = 0; i < n; i++)
                 surf[i] = RawSurfaceAt(world[i]);
 
-            // Water cannot run uphill. Without this a course drawn across a rise
-            // produces a river that climbs it, and a channel dug to match would be a
-            // trench going up a hill with water in it.
-            EnforceDownhill(surf);
+            // Water cannot run uphill, and must not sit dead flat. Without this a course
+            // drawn across a rise produces a river that climbs it; §33 Fix B also holds a
+            // minimum downhill grade so no reach stalls into a still-water dam lip.
+            EnforceDownhill(surf, world);
 
             // A raw ground sample gives a stepped surface that reads as a staircase of
             // tiny waterfalls. A real river surface is smooth even where its bed is not.
@@ -1753,18 +1811,24 @@ namespace UniverseCreator.TerrainSystem
 
             // Again after smoothing: the average of a step can lift a point above its
             // upstream neighbour, and one uphill metre reads as water running the wrong way.
-            EnforceDownhill(surf);
+            EnforceDownhill(surf, world);
 
             // Then hold the water inside its own banks, which is the only place the
             // hanging-water fault can be fixed. See ContainToBanks.
             ContainToBanks(world, widths, depths, surf);
-            EnforceDownhill(surf);
+            EnforceDownhill(surf, world);
 
             // Last, so nothing downstream of here can pull the mouth back off the
             // level of the body it joins. A step of even a few centimetres at a
             // junction is visible as a seam between two water planes.
             BlendJunction(world, surf, depths, true);
             BlendJunction(world, surf, depths, false);
+
+            // §33 Fix C - coastal distance-field taper. Near the sea the deep narrow
+            // channel must flatten and widen into an estuary, so the river does not gouge
+            // a slot into the beach/seabed. This shapes DEPTH and WIDTH only (not surf),
+            // so it cannot fight the junction blend above.
+            ApplyCoastalTaper(world, widths, depths, surf);
 
             solvedPoints = world;
             solvedWidths = widths;
@@ -1953,20 +2017,109 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Makes the surface profile monotonically non-increasing from head to mouth.
+        /// Makes the surface profile monotonically non-increasing from head to mouth,
+        /// with a physical MINIMUM grade (§33 Fix B) so no reach is left dead flat.
         /// </summary>
         /// <remarks>
         /// One implementation, called at each of the three points in the solve where the
         /// profile can have been lifted: after the ground samples, after smoothing, and
         /// after containment. Three copies of the same two lines is how they end up
         /// disagreeing when one of them is later changed.
+        ///
+        /// §33 Fix B - Longitudinal monotonic sorting with a minimum drop per metre. The
+        /// old rule only clamped a RISE to flat (surf[i] = surf[i-1]); a flat reach reads
+        /// as still water and a dam lip. Now each downstream node is held at least
+        /// dist*MinRiverGradient BELOW its upstream neighbour, so the profile always
+        /// falls. The author's illustrative 0.01 /m (1% = 10 m/km) is a mountain-torrent
+        /// grade that would over-deepen a lowland channel and sink the mouth below sea
+        /// level; measured large-river gradients run ~1e-4..1e-3, so the floor is set to
+        /// the gentle-lowland end (1e-4 = 0.1 m/km). It is a FLOOR, not a target: a reach
+        /// already steeper than this keeps its own natural slope. This is a refinement of
+        /// the anti-climb rule, not a replacement - a rise is still clamped, now to just
+        /// below the neighbour instead of level with it.
         /// </remarks>
-        private void EnforceDownhill(float[] surf)
+        private void EnforceDownhill(float[] surf, List<Vector3> pts)
         {
             if (!enforceDownhill || surf == null) return;
 
             for (int i = 1; i < surf.Length; i++)
-                if (surf[i] > surf[i - 1]) surf[i] = surf[i - 1];
+            {
+                // Horizontal run between the two stations, so the minimum drop scales with
+                // spacing rather than being a fixed per-node step. When the point list is
+                // missing or degenerate the drop falls back to zero, i.e. the old
+                // non-increasing behaviour - never a spurious fall from bad data.
+                float run = 0f;
+                if (pts != null && i < pts.Count)
+                {
+                    float dx = pts[i].x - pts[i - 1].x;
+                    float dz = pts[i].z - pts[i - 1].z;
+                    run = Mathf.Sqrt(dx * dx + dz * dz);
+                }
+
+                float maxAllowed = surf[i - 1] - run * MinRiverGradient;
+                if (surf[i] > maxAllowed) surf[i] = maxAllowed;
+            }
+        }
+
+        // §33 Fix B: the minimum river-surface gradient (fall per metre of run). Set to
+        // the gentle-lowland end of measured large-river gradients (0.1 m/km) - enough to
+        // guarantee flow and kill flat dam-lips, small enough never to distort a real
+        // profile (5 km of river forced to fall only 0.5 m). Deliberately NOT the author's
+        // illustrative 0.01, which is a torrent grade; see EnforceDownhill remarks.
+        private const float MinRiverGradient = 1e-4f;
+
+        // §33 Fix C: how far the mouth may fan wider than its inland width, alpha in the
+        // width term. 2 => an estuary up to 3x the channel width at the shoreline, easing
+        // back to 1x inland. Bounded by construction (the exponential is <= 1).
+        private const float CoastalWidthFan = 2.0f;
+
+        /// <summary>
+        /// §33 Fix C - coastal distance-field taper. As the water surface approaches sea
+        /// level the trench depth decays to nothing and the channel fans wider, turning
+        /// the mouth into an estuary instead of a deep narrow gouge into the seabed.
+        /// </summary>
+        /// <remarks>
+        /// Sea level is <see cref="SubmergedFloorY"/> (the joined ocean/lake surface);
+        /// NegInf means this river never reaches standing water, so there is no coast to
+        /// taper to and the pass is skipped. As the distance-to-coast field we use HEAD
+        /// ABOVE SEA LEVEL, aboveSea = max(0, surf - sea): on a monotonically descending
+        /// profile it is monotone in distance along the river and needs no extra solve.
+        ///
+        ///   depth *= 1 - e^{-aboveSea/head}     (author's 1 - e^{-beta*SDF}, beta = 1/head)
+        ///   width *= 1 + alpha*e^{-aboveSea/head}
+        ///
+        /// The author's literal width term 1 + alpha/(SDF+eps) DIVERGES at the coast
+        /// (SDF->0 => an infinitely wide delta => a runaway carve). The bounded
+        /// exponential above has the same behaviour - widest at the mouth, ->1 inland -
+        /// but is finite and stable; documented deviation for a bounded estuary. head is
+        /// the mouth channel depth (a river flattens over roughly its own depth of head
+        /// near the sea), so the taper only bites within a few metres of head of the
+        /// waterline - a true coastal fringe, not the whole lower river.
+        /// </remarks>
+        private void ApplyCoastalTaper(List<Vector3> pts, List<float> widths,
+                                       List<float> depths, float[] surf)
+        {
+            if (pts == null || surf == null || widths == null || depths == null) return;
+
+            float sea = SubmergedFloorY();
+            if (float.IsNegativeInfinity(sea)) return;   // river never meets the sea
+
+            // Coastal head scale from the deepest solved node - a stable proxy for the
+            // mouth channel depth that does not depend on which end index the mouth is.
+            float mouthDepth = 0f;
+            for (int i = 0; i < depths.Count; i++)
+                if (depths[i] > mouthDepth) mouthDepth = depths[i];
+            float head = Mathf.Max(1f, mouthDepth);
+
+            int n = Mathf.Min(surf.Length, Mathf.Min(widths.Count, depths.Count));
+            for (int i = 0; i < n; i++)
+            {
+                float aboveSea = Mathf.Max(0f, surf[i] - sea);
+                float fall = Mathf.Exp(-aboveSea / head);   // 1 at the coast, ->0 inland
+
+                depths[i] *= (1f - fall);                   // ->0 depth at the waterline
+                widths[i] *= (1f + CoastalWidthFan * fall); // ->widest at the mouth
+            }
         }
 
         /// <summary>
@@ -2554,6 +2707,15 @@ namespace UniverseCreator.TerrainSystem
         /// mesh and the dig are both built from the fitted course and cannot end up
         /// describing two different rivers.
         /// </summary>
+        /// <summary>§33 Fix D: the SnapToValley slope gate as a cos(theta) threshold -
+        /// a station may seat only on ground flatter than <see cref="maxCourseSlopeDegrees"/>.
+        /// cos increases as the slope flattens, so a candidate is "flat enough" when its
+        /// N.U >= this. Clamped so a degenerate field can never disable or invert it.</summary>
+        private float CourseFlatThreshold
+        {
+            get { return Mathf.Cos(Mathf.Clamp(maxCourseSlopeDegrees, 1f, 85f) * Mathf.Deg2Rad); }
+        }
+
         public void ApplyValleyReroute()
         {
             if (course == null || course.Count < 2) return;
@@ -2567,7 +2729,7 @@ namespace UniverseCreator.TerrainSystem
             RefreshJoinCandidates();
 
             RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12,
-                                           0f, true, SubmergedFloorY());
+                                           0f, true, SubmergedFloorY(), CourseFlatThreshold);
             RiverCourseSolver.Relax(worldPoints, 2);
 
             // Both passes move points in XZ only, so each one's stored elevation now
@@ -2661,7 +2823,8 @@ namespace UniverseCreator.TerrainSystem
                 float debowReach = Mathf.Clamp(Mathf.Max(0.5f, widthMetres) * DebowWidths,
                                                 DebowMinMetres, DebowMaxMetres);
                 RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8,
-                                               DebowDeadbandMetres, true, SubmergedFloorY());
+                                               DebowDeadbandMetres, true, SubmergedFloorY(),
+                                               CourseFlatThreshold);
                 RiverCourseSolver.Relax(result, 1);
             }
 
@@ -2677,7 +2840,7 @@ namespace UniverseCreator.TerrainSystem
                     // a river under the ocean.
                     RiverCourseSolver.SnapToValley(result, ground,
                                                    valleySearchMetres, valleyPull, 12,
-                                                   0f, true, SubmergedFloorY());
+                                                   0f, true, SubmergedFloorY(), CourseFlatThreshold);
                     RiverCourseSolver.Relax(result, 2);
                 }
 
@@ -2689,7 +2852,8 @@ namespace UniverseCreator.TerrainSystem
                         result, walked, ground,
                         Mathf.Max(0.5f, pointSpacingMetres),
                         routeFanDegrees, climbToleranceMetres,
-                        autoConnectMetres > 0f ? IsAtJoinableWater : null);
+                        autoConnectMetres > 0f ? IsAtJoinableWater : null,
+                        maxCourseSlopeDegrees);
 
                     if (walked.Count >= 2)
                     {
