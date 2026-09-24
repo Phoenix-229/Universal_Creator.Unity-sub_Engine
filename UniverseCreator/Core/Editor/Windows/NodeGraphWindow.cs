@@ -128,6 +128,17 @@ namespace UniverseCreator.Editor.Windows
             statusLabel.style.marginRight = 8f;
             bar.Add(statusLabel);
 
+            // A narrow window used to crush this bar: each ToolbarButton shrank
+            // below its own label until the names collided and clipped into one
+            // another ("Add Node" reading as "dd No", overlapping "Frame All").
+            // Stop every control from shrinking below its content, and let the bar
+            // wrap onto a second row instead of overlapping when the width runs out.
+            // A wide window still lays out as one row, so its look is unchanged.
+            foreach (VisualElement child in bar.Children())
+                child.style.flexShrink = 0f;
+            bar.style.flexWrap = Wrap.Wrap;
+            bar.style.height = StyleKeyword.Auto;
+
             return bar;
         }
 

@@ -17,6 +17,7 @@ using UnityEditor.Experimental.GraphView;
 using UnityEngine.UIElements;
 using UnityEditor.UIElements;   // ColorField / CurveField / ObjectField are editor-only
 using UniverseCreator.Nodes;
+using UniverseCreator.TerrainSystem;   // ChunkManager, to adopt the generated terrain
 using GVPort = UnityEditor.Experimental.GraphView.Port;
 using UCPort = UniverseCreator.Nodes.Port;
 
@@ -272,11 +273,36 @@ namespace UniverseCreator.Editor.GraphUI
             }
             else if (typeof(UnityEngine.Object).IsAssignableFrom(t))
             {
+                // A scene Component (Terrain, and anything like it) can only ever be
+                // a scene object, never a project asset - so an assets-only picker
+                // shows an empty "Select Terrain" window. Allow scene objects for
+                // those types; keep assets-only for real asset refs (Texture2D etc.).
+                bool sceneType = typeof(Component).IsAssignableFrom(t) || t == typeof(GameObject);
+
+                UnityEngine.Object current = (UnityEngine.Object)f.GetValue(Node);
+
+                // Convenience the user asked for: a Terrain field left empty adopts
+                // the world's own generated terrain (a Terrain owned by a ChunkManager)
+                // so the field shows a real chunk instead of "None". An explicit
+                // assignment always wins, and an unrelated hand-made terrain is never
+                // adopted because it is not a ChunkManager child.
+                if (current == null && typeof(Terrain).IsAssignableFrom(t))
+                {
+                    Terrain adopted = FindGeneratedTerrain();
+                    if (adopted != null)
+                    {
+                        current = adopted;
+                        f.SetValue(Node, adopted);
+                        Node.version++;
+                        owner.MarkGraphDirty();
+                    }
+                }
+
                 ObjectField of = new ObjectField(label)
                 {
                     objectType = t,
-                    allowSceneObjects = false,
-                    value = (UnityEngine.Object)f.GetValue(Node)
+                    allowSceneObjects = sceneType,
+                    value = current
                 };
                 Commit(of, v => f.SetValue(Node, v));
                 created = of;
@@ -284,6 +310,26 @@ namespace UniverseCreator.Editor.GraphUI
 
             if (created != null && tip != null) created.tooltip = tip.tooltip;
             return created;
+        }
+
+        /// <summary>
+        /// Finds the terrain the node graph generated - a Terrain living under a
+        /// ChunkManager - so an empty Terrain field can adopt it instead of showing
+        /// "None". A hand-made terrain that is not a ChunkManager child is deliberately
+        /// ignored, which is what keeps an unrelated "Islands" terrain from being
+        /// picked up. Returns null when no generated world is in the scene.
+        /// </summary>
+        private static Terrain FindGeneratedTerrain()
+        {
+            ChunkManager[] managers =
+                UnityEngine.Object.FindObjectsByType<ChunkManager>(FindObjectsSortMode.None);
+
+            for (int i = 0; i < managers.Length; i++)
+            {
+                Terrain[] cells = managers[i].GetComponentsInChildren<Terrain>(true);
+                if (cells.Length > 0) return cells[0];
+            }
+            return null;
         }
 
         /// <summary>
