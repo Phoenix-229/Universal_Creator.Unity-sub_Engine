@@ -298,24 +298,39 @@ namespace UniverseCreator.TerrainSystem
         {
             if (data == null) return;
 
-            // A live layer is enough to leave this alone. The null check matters as much
-            // as the length check: the stand-in below is HideAndDontSave, so a domain
-            // reload destroys it and leaves a slot holding a dead reference. Treating
-            // that as "already has layers" is what would strand the surface untextured
-            // after every recompile.
             TerrainLayer[] current = data.terrainLayers;
-            if (current != null)
+
+            // No array at all: seed it with the single stand-in.
+            if (current == null || current.Length == 0)
             {
-                for (int i = 0; i < current.Length; i++)
-                    if (current[i] != null) return;
+                EnsureFallbackLayer();
+                data.terrainLayers = new TerrainLayer[] { fallbackLayer };
+                return;
             }
+
+            // Refill every dead slot. The stand-in layers are HideAndDontSave, so a
+            // domain reload or a project reopen destroys them and leaves the array at
+            // its OLD length holding dead references - which renders as Unity's
+            // untextured gray, the exact brown->gray reversion the user reported.
+            //
+            // Detecting the dead slot (the null-check below reads a destroyed
+            // UnityEngine.Object as null) is NOT enough on its own: the previous code
+            // only re-seeded a zero-length array, and a reopened world's array is never
+            // zero-length - it is full-length-all-dead (1 slot for a stand-in world, 8
+            // for a Biome-Splat world). The dead slot has to actually be refilled. A
+            // real authored layer is an asset, survives the reload, and is left as it is.
+            bool anyDead = false;
+            for (int i = 0; i < current.Length; i++)
+                if (current[i] == null) { anyDead = true; break; }
+
+            if (!anyDead) return;
 
             EnsureFallbackLayer();
+            for (int i = 0; i < current.Length; i++)
+                if (current[i] == null) current[i] = fallbackLayer;
 
-            if (data.terrainLayers == null || data.terrainLayers.Length == 0)
-            {
-                data.terrainLayers = new TerrainLayer[] { fallbackLayer };
-            }
+            // Reassign so the property setter picks up the mutated slots.
+            data.terrainLayers = current;
         }
 
         /// <summary>
