@@ -585,6 +585,12 @@ namespace UniverseCreator.TerrainSystem
             // edit reaches the terrain on the next rebuild rather than needing a
             // second action nobody would guess at. (V-31)
             ApplyLodToWorld();
+
+            // Update() no longer publishes the season shader globals every frame in the
+            // scene view (§36), so republish them once here when an inspector value moves
+            // and once in OnEnable (Season.cs) after a reload - enough to keep the
+            // edit-mode tint correct without a per-frame heartbeat.
+            if (isActiveAndEnabled && vegetationEnabled) PublishShaderGlobals();
         }
     }
 }

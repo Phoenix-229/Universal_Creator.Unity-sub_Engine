@@ -555,6 +555,18 @@ namespace UniverseCreator.TerrainSystem
             else if (terrain.materialTemplate == null)
                 terrain.materialTemplate = FallbackMaterial();
 
+            // A material draws nothing without a layer to draw into. On a domain reload
+            // the stand-in layer + texture (HideAndDontSave) are destroyed exactly like
+            // the material above, but the surviving-heights restore path re-asserted only
+            // the material - never the layer - so a reloaded stand-in world kept a valid
+            // material yet drew through a dead layer set and reverted to Unity's default
+            // gray. Reassert the layer here too: EnsureVisibleLayer is idempotent (it
+            // returns the instant a live authored layer exists) and rebuilds the neutral
+            // brown ground only when every slot is null/destroyed, so authored worlds are
+            // untouched and only the stand-in case self-heals. (§37) See [[EnsureVisibleLayer]].
+            if (terrain.terrainData != null)
+                EnsureVisibleLayer(terrain.terrainData);
+
             // Both of these default on for a fresh component, but either one off draws
             // nothing whatsoever, and they are cheap to reassert.
             terrain.drawHeightmap = true;

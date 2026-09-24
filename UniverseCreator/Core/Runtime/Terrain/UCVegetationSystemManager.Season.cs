@@ -96,9 +96,25 @@ namespace UniverseCreator.TerrainSystem
         // cost of Module 3's ecology is one add and one compare. Everything past
         // the early return happens once every ecologyTickSeconds, allocates
         // nothing, and touches no per-instance data. (V-40)
+        // One-shot publish on enable, so a domain reload (which fires OnEnable for an
+        // [ExecuteAlways] component in edit mode) restores the season shader globals
+        // without Update() having to tick them every frame in the scene view. (§36)
+        private void OnEnable()
+        {
+            if (vegetationEnabled) PublishShaderGlobals();
+        }
+
         private void Update()
         {
             if (!vegetationEnabled) return;
+
+            // Play mode only. This is [ExecuteAlways], so an ungated Update() ran on
+            // every scene-view repaint in edit mode - forbidden by the author ("in
+            // sceneview which is the edit mode never run execute always"). The season
+            // clock only advances in Play, so there is nothing to publish or tick in the
+            // scene view; OnEnable/OnValidate elsewhere restore the globals after a
+            // reload without a per-frame heartbeat. (§36)
+            if (!Application.isPlaying) return;
 
             // Before the early return, and deliberately so. The ecology maths can
             // afford to run once every ecologyTickSeconds because a forest does not

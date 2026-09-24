@@ -281,6 +281,11 @@ namespace UniverseCreator.TerrainSystem
             // here and then caches the answer. OnValidate is the only signal that
             // any of them moved, so it is where the cache is dropped.
             UCVegetationSystemManager.InvalidateForWorld(transform);
+
+            // Republish the one shader global on an inspector change. Update() no longer
+            // ticks it every frame in edit mode (§36), so OnEnable + OnValidate are what
+            // keep _UCEnvReflectionStrength correct in the scene view when the tier moves.
+            if (isActiveAndEnabled) PublishEnvReflectionStrength();
         }
 
         // =====================================================================
@@ -298,7 +303,19 @@ namespace UniverseCreator.TerrainSystem
             Shader.PropertyToID("_UCEnvReflectionStrength");
 
         private void OnEnable()  { PublishEnvReflectionStrength(); }
-        private void Update()    { PublishEnvReflectionStrength(); }
+
+        // Play mode only. This is [ExecuteAlways], so an ungated Update() ran on every
+        // scene-view repaint in edit mode - forbidden by the author ("in sceneview which
+        // is the edit mode never run execute always"). The value only changes when the
+        // tier changes, so OnEnable/OnValidate publish it once and it stays correct
+        // across a domain reload without a per-frame heartbeat keeping the editor update
+        // loop hot. (§36)
+        private void Update()
+        {
+            if (!Application.isPlaying) return;
+            PublishEnvReflectionStrength();
+        }
+
         private void OnDisable() { Shader.SetGlobalFloat(s_EnvReflectionStrengthId, 0f); }
 
         /// <summary>
