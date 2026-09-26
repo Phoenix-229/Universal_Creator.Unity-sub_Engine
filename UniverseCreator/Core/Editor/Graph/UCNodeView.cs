@@ -328,7 +328,7 @@ namespace UniverseCreator.Editor.GraphUI
         private static Terrain FindGeneratedTerrain()
         {
             ChunkManager[] managers =
-                UnityEngine.Object.FindObjectsByType<ChunkManager>(FindObjectsSortMode.None);
+                UnityEngine.Object.FindObjectsByType<ChunkManager>(FindObjectsInactive.Exclude);
 
             for (int i = 0; i < managers.Length; i++)
             {
