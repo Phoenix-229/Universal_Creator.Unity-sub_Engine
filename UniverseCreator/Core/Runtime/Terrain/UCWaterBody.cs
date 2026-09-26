@@ -214,6 +214,16 @@ namespace UniverseCreator.TerrainSystem
                  "this, so a river can widen as it goes.")]
         public float widthMetres = 12f;
 
+        [Tooltip("§38 - Read the trenches. On, the channel width AND depth at each " +
+                 "point are MEASURED from the terrain trench the river sits in (its own " +
+                 "cross-section) instead of coming from Width and Channel Depth above; " +
+                 "the water fills the procedural channel it was drawn into, up to the " +
+                 "bank so it never hangs, and NOTHING is dug - no carve, no terrain math. " +
+                 "Off (default), Width, Channel Depth and the per-node overrides set the " +
+                 "cross-section and the river cuts its own channel. Either way the course " +
+                 "stays exactly on the line you drew.")]
+        public bool readTrenchWidth = false;
+
         [Tooltip("Vertices across the channel. 4 is enough for a stream, 8 for a " +
                  "wide river whose banks need a smooth curve.")]
         [Range(2, 24)]
@@ -304,94 +314,25 @@ namespace UniverseCreator.TerrainSystem
                  "step, too long and the river loses its own shape before it arrives.")]
         public float joinBlendMetres = 25f;
 
-        [Tooltip("Deepens the mouth to match what it is joining, so a river arriving " +
-                 "at a lake does not sit in a shallow trench above a deep basin. Off " +
-                 "keeps the channel's own depth all the way to the join.")]
-        public bool joinMatchesDepth = true;
+        // §38: the "join matches depth" switch is gone. It deepened the river's mouth to
+        // a lake's own dig depth, which produced the crater the author reported at every
+        // river->lake junction (the mouth bed dropped to lakeSurface - lakeDepth). The
+        // junction now blends the water SURFACE only; the channel keeps its own depth all
+        // the way in, so the two water planes meet flush with no pit between them.
 
         // =====================================================================
-        //  ROUTING  (optional: let the ground move the drawn line sideways)
+        //  ROUTING - REMOVED (§38)
         //
-        //  BOTH OFF BY DEFAULT, AND THAT IS DELIBERATE.
-        //
-        //  These two move the course in XZ - away from where you drew it. The
-        //  elevation work is somewhere else entirely and always runs; what these
-        //  change is the PLAN of the river, not its profile.
-        //
-        //  Left on, the river you see dug is not the river you drew: you place a
-        //  node, the valley fit slides it 30 m downslope and the descent walk takes
-        //  a detour round a spur, and the trench comes out beside your line looking
-        //  like a separate object that happens to start near it. When you are
-        //  clicking nodes onto the terrain, YOUR line is the answer - the ground
-        //  does not get a vote on where it goes, only on how deep it is cut.
-        //
-        //  Turn one on when you want the opposite: a rough line sketched across a
-        //  landscape you have not studied, which you want fitted to whatever is
-        //  actually there. Then the fit happens on a copy at build time, so your
-        //  control points still stay where you put them.
+        //  Fit-to-Valley, Route-Around-High-Ground and their parameters
+        //  (valley search/pull, route fan, climb tolerance, max course slope,
+        //  sink run) are gone. They moved a hand-drawn course sideways off the
+        //  line the author placed on the terrain, which read as the dig ignoring
+        //  the spline. A hand-placed river now runs exactly where it was drawn;
+        //  the surface solve still keeps the water on the ground and stops it
+        //  climbing. The graph/procedural river (HydrologyNodes) is unaffected -
+        //  it has its own routing and was never part of this path.
         // =====================================================================
 
-        [Tooltip("Pulls each point of the course sideways onto the lowest ground near " +
-                 "it, so a line drawn across a valley settles into its floor instead " +
-                 "of lying across the slope.\n\n" +
-                 "OFF by default: it moves the river off the line you drew, and when " +
-                 "you have placed the nodes on the terrain yourself that reads as the " +
-                 "dig ignoring your spline. Turn it on for a rough sketch you want " +
-                 "snapped to the landscape.\n\n" +
-                 "On flat ground there is no lowest point to find, so nothing moves - " +
-                 "which is why a river on a plain stays exactly where you drew it and " +
-                 "one on a hillside snaps into the trench.")]
-        public bool fitToValley;
-
-        [Tooltip("How far to either side the valley seek looks, in metres. About half " +
-                 "a valley width. Too large and the river jumps into the next valley " +
-                 "over; too small and it never finds the floor of the one it is in.")]
-        public float valleySearchMetres = 2000f;
-
-        [Tooltip("How much of the way to the low point each node moves, 0..1. 1 lands " +
-                 "the course exactly on the lowest sample and follows every wobble in " +
-                 "the heightfield; around 0.85 keeps the line the designer drew " +
-                 "recognisable while still sitting in the trench.")]
-        [Range(0f, 1f)] public float valleyPull = 0.85f;
-
-        [Tooltip("Forbids the channel from ever climbing. The course is walked from " +
-                 "the head one step at a time; where the direct line would go uphill " +
-                 "the walk fans out and takes the best descending way round, so the " +
-                 "river goes around a spur into the adjacent valley rather than being " +
-                 "cut through the top of it.\n\n" +
-                 "OFF by default, because the detour it takes is a different path " +
-                 "from the one you drew and the trench ends up somewhere you did not " +
-                 "put it. With it off the river still never runs uphill - Enforce " +
-                 "Downhill above handles that by lowering the water surface along " +
-                 "your line instead of moving the line.\n\n" +
-                 "Turn it on when the line is a rough sketch and you would rather the " +
-                 "river find its own way down than be cut through a ridge.")]
-        public bool routeAroundHighGround;
-
-        [Tooltip("How far off the drawn heading the reroute may swing, in degrees. " +
-                 "Around 70 lets a river turn along the foot of a ridge; near 0 keeps " +
-                 "it on the drawn line and lets it stop instead of detouring.")]
-        [Range(0f, 170f)] public float routeFanDegrees = 70f;
-
-        [Tooltip("Rise treated as level, in metres. A heightfield is not smooth at the " +
-                 "centimetre scale, and a zero tolerance makes the walk zig-zag around " +
-                 "bumps far smaller than the channel it is cutting.")]
-        public float climbToleranceMetres = 0.05f;
-
-        [Tooltip("§33 Fix D - the steepest slope, in degrees, the course may descend or " +
-                 "cross. Real subaerial rivers follow the path of least resistance into " +
-                 "valley corridors; they do not run straight down a rock face. The valley " +
-                 "seek prefers ground flatter than this, and the downhill walk rejects a " +
-                 "step steeper than this (steering around a mountain into a gentler line), " +
-                 "which is what stops the 'water slide' of a channel draped down a cliff. " +
-                 "25 deg is the classic hydrology threshold.")]
-        [Range(5f, 60f)] public float maxCourseSlopeDegrees = 25f;
-
-        [Tooltip("Length of the fade where a river that found no way down disappears, " +
-                 "in metres. The channel narrows and shallows over this run so it " +
-                 "reads as water sinking underground rather than as a trench that " +
-                 "stops against a wall. Real rivers do this in karst and in desert.")]
-        public float sinkRunMetres = 30f;
 
         // ---- Meander -------------------------------------------------------
         //
@@ -1393,7 +1334,33 @@ namespace UniverseCreator.TerrainSystem
 
             carve.confineBanks = confineBanks && bedSource != BedSource.FlatFloor;
 
+            // §38 - THE FLOODPLAIN IS OFF for a manual river. carve.valley drives
+            // ValleySag, the wide gentle depression dropped around the channel; left on
+            // (its default) it reshaped a broad band of ground either side of every
+            // hand-placed river - the "it flattens the terrain" and the floodplain bug
+            // the author reported. A manual river now cuts its channel and nothing else;
+            // it fits the procedural trench it was drawn into rather than carving a valley
+            // around itself. (The graph/procedural river uses its own carve layer and is
+            // unaffected.)
+            carve.valley = false;
+
             if (!SolveRiverCourse()) return;
+
+            // §38 - READ-MODE NEVER TOUCHES THE TERRAIN. When the river is reading the
+            // trench, the channel it would cut is already in the ground (the node graph
+            // put it there), so this body registers NO carve at all: no dig, no valley
+            // sag, no confine wall, no bank raise, no slope dilation. The course is still
+            // solved above because the water surface mesh is built from solvedPoints /
+            // solvedSurfaceY - the water flows the existing trench, filled to the measured
+            // bank. Disabling the layer takes it out of ReapplyCarves (WaterCarveRegistry
+            // skips a layer whose enabled is false), and leaving the layer shapeless keeps
+            // the surface trim reading the real trench floor instead of a bed that was
+            // never actually cut. This is the literal "it never digs or applies any math".
+            if (readTrenchWidth)
+            {
+                carve.enabled = false;
+                return;
+            }
 
             for (int i = 0; i < solvedPoints.Count; i++)
             {
@@ -1404,63 +1371,24 @@ namespace UniverseCreator.TerrainSystem
 
                 // §14: the confining wall target, per node. NegInf means "not confined
                 // here" - the carve leaves the bank cut-only. A finite value is the
-                // elevation the low bank is raised to. ConfineTargetAt runs the two-bank
-                // test and only returns finite where a genuine gorge is called for; a
-                // hillside station returns NegInf and is handled by the course solver's
-                // valley seek, not walled in place.
+                // elevation the low bank is raised to. Only produced when the author has
+                // opted into Confine Banks (off by default), so the manual river raises
+                // no ground unless explicitly asked to.
                 carve.courseConfineY.Add(
                     carve.confineBanks ? ConfineTargetAt(i) : float.NegativeInfinity);
 
-                // §33 Fix E - slope-dependent dilated carving. The horizontal dilation
-                // factor (1 + alpha*tan(theta)) from the LOCAL terrain gradient at this
-                // node. 1 on flat ground (trench stays narrow); larger on a steep reach,
-                // where the valley band fans out to a graded V-canyon instead of a slot.
-                carve.courseValleyWiden.Add(ValleyWidenAt(i));
+                // §38 - NO SLOPE-DILATED CARVING. The §33 Fix E dilation fanned the trench
+                // wider on steep ground, grading a whole hillside into a V-canyon - more
+                // of the "flattening" the author reported. Held at 1 (channel width) so
+                // the cut stays the width of the water and the river sits in the trench
+                // instead of reshaping the slope around it.
+                carve.courseValleyWiden.Add(1f);
             }
         }
 
-        // §33 Fix E scaling factor, alpha in R_carve = W_base * (1 + alpha*tan(theta)).
-        // Physically tied to the angle of repose / structural stability of the material:
-        // it sets how far the trench must fan to grade a steep wall back to a stable
-        // slope. At the Fix-D cap slope (25 deg, tan~0.47) this widens the valley ~1.9x;
-        // at 45 deg ~3x; a near-vertical face saturates at ValleyWidenMax. Bounded, so
-        // the carve can never run away.
-        private const float ValleyWidenAlpha = 2.0f;
-
-        /// <summary>
-        /// The §33 Fix E dilation factor at solved station i: 1 + alpha*tan(theta), where
-        /// theta is the LOCAL terrain slope measured as the gradient magnitude of the
-        /// surrounding ground (the CPU equivalent of the Sobel slope map in the UE
-        /// pipeline). Read over a channel-width run so it tracks the hillside the reach
-        /// crosses, not sub-metre ruggedness. Clamped to [1, ValleyWidenMax]; returns 1
-        /// on flat ground so the shape is unchanged there.
-        /// </summary>
-        private float ValleyWidenAt(int i)
-        {
-            if (solvedPoints == null || i < 0 || i >= solvedPoints.Count)
-                return 1f;
-
-            Vector3 at = solvedPoints[i];
-            float width = (solvedWidths != null && i < solvedWidths.Count)
-                ? Mathf.Max(0.5f, solvedWidths[i]) : 1f;
-
-            // Central-difference gradient over a run scaled to the channel, so the slope
-            // read is the landform's, not the bed ruggedness'.
-            float e = Mathf.Clamp(width, 4f, 60f);
-            float hx1 = SampleGround(at.x + e, at.z);
-            float hx0 = SampleGround(at.x - e, at.z);
-            float hz1 = SampleGround(at.x, at.z + e);
-            float hz0 = SampleGround(at.x, at.z - e);
-
-            float gx = (hx1 - hx0) / (2f * e);
-            float gz = (hz1 - hz0) / (2f * e);
-
-            // |gradient| == tan(theta): rise over run of the steepest local direction.
-            float tanTheta = Mathf.Sqrt(gx * gx + gz * gz);
-
-            float widen = 1f + ValleyWidenAlpha * tanTheta;
-            return Mathf.Clamp(widen, 1f, WaterCarveLayer.ValleyWidenMax);
-        }
+        // §38: ValleyWidenAt / ValleyWidenAlpha (the §33 Fix E slope-dilation) are removed
+        // with the dilated carving that used them - the manual river holds its trench at
+        // channel width now.
 
         // The wall stands the water's freeboard above the surface, in local channel
         // depths - the same dry height the floodplain sole is held at, so a confined
@@ -1791,8 +1719,27 @@ namespace UniverseCreator.TerrainSystem
             int n = world.Count;
             float[] surf = new float[n];
 
+            // §38 read-mode: the water surface FILLS the measured trench. RawSurfaceAt
+            // would sit the plane one surfaceOffset above the bed - at the trench FLOOR,
+            // which is the pristine graph height here - and the water would read as a thin
+            // ribbon in the bottom of the ditch with a gap up to both banks. Instead lift
+            // it to the bed plus the measured depth (the lower bank crest), so the channel
+            // is full to that bank. ContainToBanks below then trims any spot where a bank
+            // actually dips lower, so it never spills - between the two the water meets the
+            // bank with no gap. Default mode keeps the original ground-referenced surface.
             for (int i = 0; i < n; i++)
-                surf[i] = RawSurfaceAt(world[i]);
+            {
+                if (readTrenchWidth)
+                {
+                    float floor = SampleGround(world[i].x, world[i].z);
+                    float d = (depths != null && i < depths.Count) ? Mathf.Max(0f, depths[i]) : 0f;
+                    surf[i] = floor + d;
+                }
+                else
+                {
+                    surf[i] = RawSurfaceAt(world[i]);
+                }
+            }
 
             // Water cannot run uphill, and must not sit dead flat. Without this a course
             // drawn across a rise produces a river that climbs it; §33 Fix B also holds a
@@ -2317,10 +2264,11 @@ namespace UniverseCreator.TerrainSystem
 
                 surf[i] = Mathf.Lerp(surf[i], targetY, w);
 
-                // Deepen only. A river meeting a lake should reach the lake's bed, but
-                // a deep river meeting a shallow shore must not be filled in.
-                if (joinMatchesDepth && targetDepth > depths[i])
-                    depths[i] = Mathf.Lerp(depths[i], targetDepth, w);
+                // §38: the mouth is NOT deepened to the target's bed any more. Matching a
+                // lake's dig depth here dropped the river bed to (lakeSurface - lakeDepth)
+                // at the join, which was the crater the author reported. The channel keeps
+                // its own depth all the way in; only the water surface is blended, so the
+                // two planes meet flush with no pit between them.
             }
         }
 
@@ -2694,64 +2642,89 @@ namespace UniverseCreator.TerrainSystem
             return inside;
         }
 
+        // §38 - "Read the trenches". Measure BOTH the width and the depth of the channel
+        // at each course point from the terrain the river sits in: sample the ground
+        // straight across the flow both ways until it climbs half a channel-depth above
+        // the bed, take that span as the trench WIDTH, and take the lower of the two bank
+        // crests above the bed as the trench DEPTH - how far the water can rise before it
+        // spills. The ground read is SampleGround, which prefers the pristine graph height,
+        // so this reads the PROCEDURAL trench the node graph cut, not whatever a previous
+        // build of this river left behind. Where no wall is found within a sane reach
+        // (open ground, no trench) the authored width and depth are kept, so a river drawn
+        // onto flat land does not collapse to nothing. This measures only; it never writes
+        // the terrain - read-mode is "the river flows the trench", no dig, no carve math.
+        private void MeasureTrenchWidths(List<Vector3> pts, List<float> widths,
+                                         List<float> depths)
+        {
+            if (pts == null || widths == null || pts.Count < 2) return;
+
+            float step = Mathf.Max(0.5f, pointSpacingMetres * 0.5f);
+            // Cap the scan so it can never sweep across the whole map looking for a wall.
+            float maxReach = Mathf.Clamp(Mathf.Max(1f, widthMetres) * 8f, 8f, 400f);
+            // A wall is ground standing half a channel-depth above the bed - deep enough
+            // to be the trench side, shallow enough to catch a modest channel.
+            float rise = Mathf.Max(0.5f, channelDepthMetres * 0.5f);
+
+            for (int i = 0; i < pts.Count && i < widths.Count; i++)
+            {
+                int a = Mathf.Max(0, i - 1);
+                int b = Mathf.Min(pts.Count - 1, i + 1);
+                Vector2 tangent = new Vector2(pts[b].x - pts[a].x, pts[b].z - pts[a].z);
+                if (tangent.sqrMagnitude < 1e-6f) continue;
+                tangent.Normalize();
+                Vector2 side = new Vector2(-tangent.y, tangent.x);
+
+                float floorY = SampleGround(pts[i].x, pts[i].z);
+                float leftPeak, rightPeak;
+                float left = ScanTrenchWall(pts[i], side, +1f, floorY, rise, step, maxReach, out leftPeak);
+                float right = ScanTrenchWall(pts[i], side, -1f, floorY, rise, step, maxReach, out rightPeak);
+
+                float measured = left + right;
+                if (measured > 0.5f)
+                    widths[i] = Mathf.Clamp(measured, 0.5f, maxReach);
+
+                // Depth = the LOWER containing bank crest above the bed. Water can rise no
+                // higher than that before it spills the shallow side, so this is what fills
+                // the trench without hanging over the low bank. Only set when both sides
+                // have a wall - a one-sided rise is a hillside, not a trench, and there the
+                // authored depth is kept and ContainToBanks lowers the surface honestly.
+                if (depths != null && i < depths.Count && left > 0.5f && right > 0.5f)
+                {
+                    float crest = Mathf.Min(leftPeak, rightPeak);
+                    if (crest > 0.25f)
+                        depths[i] = Mathf.Clamp(crest, 0.25f, 60f);
+                }
+            }
+        }
+
+        // Walk out from a course point along one side of the flow until the ground has
+        // risen `rise` above the bed; return that distance (0 if no wall is met inside
+        // `maxReach`, in which case the caller keeps the authored width). `peakRise` is the
+        // greatest height the ground reached above the bed over the whole walk - the bank
+        // crest - used as the fill depth in read-mode.
+        private float ScanTrenchWall(Vector3 centre, Vector2 side, float sign,
+                                     float floorY, float rise, float step, float maxReach,
+                                     out float peakRise)
+        {
+            peakRise = 0f;
+            float wall = 0f;
+            for (float d = step; d <= maxReach; d += step)
+            {
+                float x = centre.x + side.x * sign * d;
+                float z = centre.z + side.y * sign * d;
+                float h = SampleGround(x, z) - floorY;
+                if (h > peakRise) peakRise = h;
+                if (wall <= 0f && h >= rise) wall = d;
+            }
+            return wall;
+        }
+
         /// <summary>
         /// The course in world space, resampled to the authored spacing, carrying the
-        /// width and depth that apply at every resampled point.
-        ///
-        /// Resampled rather than used raw because the carve interpolates width, depth
-        /// and surface between consecutive points: two points a hundred metres apart
-        /// would blend across the whole span and lose every bend between them.
-        ///
-        /// This is also where the drawn line becomes a line water could follow - the
-        /// valley seek and the descent walk run here, on the resampled points, so the
-        /// mesh and the dig are both built from the fitted course and cannot end up
-        /// describing two different rivers.
+        /// width and depth that apply at every resampled point. §38: the drawn line is
+        /// used as-is - no valley seek or descent walk moves it; the surface solve that
+        /// follows keeps the water on the ground and stops it climbing.
         /// </summary>
-        /// <summary>§33 Fix D: the SnapToValley slope gate as a cos(theta) threshold -
-        /// a station may seat only on ground flatter than <see cref="maxCourseSlopeDegrees"/>.
-        /// cos increases as the slope flattens, so a candidate is "flat enough" when its
-        /// N.U >= this. Clamped so a degenerate field can never disable or invert it.</summary>
-        private float CourseFlatThreshold
-        {
-            get { return Mathf.Cos(Mathf.Clamp(maxCourseSlopeDegrees, 1f, 85f) * Mathf.Deg2Rad); }
-        }
-
-        public void ApplyValleyReroute()
-        {
-            if (course == null || course.Count < 2) return;
-
-            List<Vector3> worldPoints = ToWorld(course);
-            RiverCourseSolver.GroundSampler ground = SampleGround;
-
-            // Prime the join candidates so the submerged floor knows where the sea is:
-            // the Refit button (§8) must not pull the channel below the ocean/lake it
-            // drains to, and must not move the source or the mouth.
-            RefreshJoinCandidates();
-
-            RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12,
-                                           0f, true, SubmergedFloorY(), CourseFlatThreshold);
-            RiverCourseSolver.Relax(worldPoints, 2);
-
-            // Both passes move points in XZ only, so each one's stored elevation now
-            // belongs to ground it no longer stands on. Re-read it, and clamp to a
-            // running minimum from the head down: a water surface never climbs, and
-            // without this the reroute button could itself make a river run uphill.
-            float ceiling = ground(worldPoints[0].x, worldPoints[0].z);
-            worldPoints[0] = new Vector3(worldPoints[0].x, ceiling, worldPoints[0].z);
-
-            for (int i = 1; i < worldPoints.Count; i++)
-            {
-                Vector3 p = worldPoints[i];
-                ceiling = Mathf.Min(ceiling, ground(p.x, p.z));
-                worldPoints[i] = new Vector3(p.x, ceiling, p.z);
-            }
-
-            for (int i = 0; i < worldPoints.Count; i++)
-            {
-                course.points[i] = transform.InverseTransformPoint(worldPoints[i]);
-            }
-        }
-
         private List<Vector3> WorldCourse(out List<float> widths, out List<float> depths)
         {
             widths = null;
@@ -2807,83 +2780,32 @@ namespace UniverseCreator.TerrainSystem
             // and a scene search per step would dominate the build.
             RefreshJoinCandidates();
 
-            RiverCourseSolver.GroundSampler groundFit = SampleGround;
+            // §38 - RESTORE THE MANUAL RIVER TO ITS PRE-REGRESSION BEHAVIOUR.
+            //
+            // The whole "fit the drawn line to the ground" stage is gone: the always-on
+            // bounded de-bow, the Fit-to-Valley seek, the Route-Around-High-Ground
+            // descent walk, and the sink taper that fed off the walk's result. Every one
+            // of them MOVED THE COURSE SIDEWAYS off the line the author clicked onto the
+            // terrain, which is exactly what the author reported as the dig ignoring the
+            // spline and the trench arriving beside the drawn river like a separate
+            // object. When you place nodes on the terrain YOUR line is the course; the
+            // ground gets no vote on where it runs, only - through the surface solve
+            // below - on how the water sits and that it never climbs. This is how the
+            // manual river behaved ~30 commits before the push, and it is what we restore.
+            lastDescentEnding = RiverCourseSolver.DescentEnding.ReachedEnd;
 
-            // BOUNDED DE-BOW, always on. A course - drawn or D8-generated - is a set of
-            // sparse nodes with a Catmull-Rom curve through them, and that curve bows
-            // OUTSIDE the valley between two nodes: the river reads as running along a
-            // hillside instead of down the valley floor (the reported "flows on the
-            // inside of a hill"). A short lateral snap toward local low ground pulls the
-            // bow back onto the thalweg. The reach is only a few channel widths, so it
-            // corrects the bow but can NEVER jump the river into the next valley - which
-            // is what the 2 km fitToValley seek could do, and why the generator had to
-            // switch that off. This one is safe to leave on for every river, and gives a
-            // hand-placed river the same "never climb the bank" fit a generated one gets.
-            {
-                float debowReach = Mathf.Clamp(Mathf.Max(0.5f, widthMetres) * DebowWidths,
-                                                DebowMinMetres, DebowMaxMetres);
-                RiverCourseSolver.SnapToValley(result, groundFit, debowReach, DebowPull, 8,
-                                               DebowDeadbandMetres, true, SubmergedFloorY(),
-                                               CourseFlatThreshold);
-                RiverCourseSolver.Relax(result, 1);
-            }
-
-            if (fitToValley || routeAroundHighGround)
-            {
-                RiverCourseSolver.GroundSampler ground = groundFit;
-
-                if (fitToValley)
-                {
-                    // holdEnds + submerged floor (§8): the wide valley seek must never move
-                    // the source or the mouth, and must never pull the channel onto ground
-                    // below the sea it drains to - the two ways Fit-to-Valley used to drag
-                    // a river under the ocean.
-                    RiverCourseSolver.SnapToValley(result, ground,
-                                                   valleySearchMetres, valleyPull, 12,
-                                                   0f, true, SubmergedFloorY(), CourseFlatThreshold);
-                    RiverCourseSolver.Relax(result, 2);
-                }
-
-                if (routeAroundHighGround)
-                {
-                    List<Vector3> walked = new List<Vector3>(result.Count + 16);
-
-                    lastDescentEnding = RiverCourseSolver.WalkDownhill(
-                        result, walked, ground,
-                        Mathf.Max(0.5f, pointSpacingMetres),
-                        routeFanDegrees, climbToleranceMetres,
-                        autoConnectMetres > 0f ? IsAtJoinableWater : null,
-                        maxCourseSlopeDegrees);
-
-                    if (walked.Count >= 2)
-                    {
-                        // The walk emits its own point count - it swings wide round a
-                        // spur and it stops early where the ground closes in - so the
-                        // width and depth series are re-sampled against the walked
-                        // path rather than carried across by index.
-                        List<float> w2 = new List<float>(walked.Count);
-                        List<float> d2 = new List<float>(walked.Count);
-                        ResampleSeriesAlong(result, widths, depths, walked, w2, d2);
-
-                        result = walked;
-                        widths = w2;
-                        depths = d2;
-
-                        RiverCourseSolver.Relax(result, 1);
-                    }
-                }
-            }
-            else
-            {
-                lastDescentEnding = RiverCourseSolver.DescentEnding.ReachedEnd;
-            }
-
-            // A river that found no way down does not stop dead in a wall of ground.
-            // It thins out and sinks, the way one does when it runs into karst or into
-            // a desert - and that is the honest answer here, because the alternative
-            // is to climb, which water does not do.
-            if (lastDescentEnding == RiverCourseSolver.DescentEnding.NoWayDown)
-                RiverCourseSolver.TaperSink(result, widths, depths, sinkRunMetres);
+            // §38 - "Read the trenches" (opt-in). When on, BOTH the channel width and
+            // depth at each point are MEASURED from the procedural trench the river
+            // already sits in - the terrain's own cross-section - rather than taken from
+            // the Width and Depth fields. Off (the default), those fields and their
+            // per-node overrides are used unchanged. Neither setting moves the course;
+            // this only decides where the cross-section comes from. In read-mode the river
+            // digs NOTHING and applies no carve math (see BuildRiverDig): it reads the bank
+            // position, width and depth and lets the water flow the trench, filled up to
+            // the lower bank so it never hangs. The surface solve below turns the measured
+            // depth into that fill.
+            if (readTrenchWidth)
+                MeasureTrenchWidths(result, widths, depths);
 
             // Let the fitted line wander into natural meander loops where the ground is
             // flat enough to have a floodplain. Last, so it works on the planform the
@@ -2902,7 +2824,10 @@ namespace UniverseCreator.TerrainSystem
             // from the land drained, then trades width for depth through gorges and back
             // on plains at constant flow area. Operates on the resolved series in place;
             // the surface solve that follows re-reads depth from these.
-            if (autoHydraulicGeometry)
+            // §38: skipped when reading the trenches - the measured widths ARE the
+            // channel, and letting hydraulic geometry re-grow them would overwrite the
+            // terrain cross-section the author asked us to follow.
+            if (autoHydraulicGeometry && !readTrenchWidth)
                 ApplyHydraulicGeometry(result, widths, depths);
 
             // RE-TESSELLATE THE FITTED PLANFORM. Everything above - the valley seek, the
@@ -2920,7 +2845,10 @@ namespace UniverseCreator.TerrainSystem
             // sizing above is preserved. Skipped when nothing moved the planform off its
             // already-smooth resample (no meander, no valley fit, no walk), because a
             // second tessellation of an already-smooth line would only round its own ends.
-            bool planformWasMoved = meander || fitToValley || routeAroundHighGround;
+            // §38: only Meander now moves the planform off its smooth resample (the
+            // valley fit and descent walk are gone), so a second tessellation is needed
+            // only when the river meanders.
+            bool planformWasMoved = meander;
             if (planformWasMoved && result.Count >= 3)
             {
                 Polyline moved = new Polyline();
@@ -3042,27 +2970,7 @@ namespace UniverseCreator.TerrainSystem
             }
         }
 
-        // Bounded de-bow (R2/R10). The lateral snap that pulls a bowed spline back onto
-        // the valley floor searches this many channel widths to each side - wide enough
-        // to catch the floodplain the river belongs in, far too short to reach the next
-        // valley over, so it can correct a bow but never relocate the river. Floored and
-        // capped in metres so a metre-wide brook still gets a usable search and a 200 m
-        // trunk does not sweep half a kilometre. Pull is below 1 so the correction eases
-        // in over the profile-smoothing passes rather than snapping in one build.
-        private const float DebowWidths = 3f;
-        private const float DebowMinMetres = 12f;
-        private const float DebowMaxMetres = 120f;
-        private const float DebowPull = 0.6f;
-
-        // De-bow only fires where a point has genuinely climbed a bank: the valley floor
-        // it finds must sit at least this far below it. Below this it is treated as
-        // already on the floor and left on its planned line. Without it, de-bow chased
-        // the nearest micro-dip on every point and forced the seated course into an
-        // unnatural serrated wander (the author's "forced meanders / weird water corners"
-        // on procedural rivers). Set to a channel-depth scale so a point that is merely
-        // in the bed's own roughness is not "corrected", but one perched a channel above
-        // the floor is. Real physical threshold, not a tuning knob pulled from nowhere.
-        private const float DebowDeadbandMetres = 1.0f;
+        // §38: the bounded de-bow constants are gone with the de-bow pass that used them.
 
         // The width-to-depth ratio of an ordinary alluvial channel in an average valley.
         // Matches the generator's 18:1 so procedural and drawn rivers read the same.

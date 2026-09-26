@@ -87,7 +87,16 @@ namespace UniverseCreator.Editor.Inspectors
             if (layoutChanged && !Application.isPlaying)
             {
                 if (owner.graph != null)
+                {
+                    // A layout rebuild replaces the pool and re-runs the graph over
+                    // the live terrains, so pull any hand sculpting out first on the
+                    // exact same terms as the world's own commit path
+                    // (UniverseCreatorObject.RebuildChunks): RebuildAll does not
+                    // capture on its own, and a tool that drives it directly must, or
+                    // the sculpt is lost under the regenerated surface. C-04.
+                    if (owner.captureManualEditsOnRegenerate) manager.CaptureManualEdits();
                     manager.RebuildAll();
+                }
                 else
                     manager.RebuildLayout();
                 EditorUtility.SetDirty(manager);
@@ -512,6 +521,10 @@ namespace UniverseCreator.Editor.Inspectors
                 if (UCInspectorUI.TintedButton("Rebuild All Cells", UCInspectorUI.ButtonBlue))
                 {
                     Debug.Log("[Universe Creator] Rebuilding all cells...");
+                    // Same contract as the world's commit path: RebuildAll overwrites
+                    // the live terrains, so capture hand sculpts first when capture is
+                    // on, or they are lost under the regenerated surface. C-04.
+                    if (owner.captureManualEditsOnRegenerate) manager.CaptureManualEdits();
                     manager.RebuildAll();
                 }
 

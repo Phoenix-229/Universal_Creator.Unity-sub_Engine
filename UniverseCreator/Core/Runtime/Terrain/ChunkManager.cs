@@ -138,6 +138,19 @@ namespace UniverseCreator.TerrainSystem
             // details are not listed: the TerrainData owns those and overwriting it
             // releases them, while these are real GameObjects that leak otherwise.
             public List<GameObject> scatterObjects = new List<GameObject>();
+
+            // T-VEGLAW. The scatter-only slice of this cell's last bake, kept alive
+            // AFTER the pump nulls c.tile so an inspector vegetation-library edit can
+            // re-apply scatter over the EXISTING terrain without re-running the graph.
+            // It holds ONLY the three fields ScatterApplier.Apply reads - the placed
+            // instances (scatter), the detail density grids (detailLayers) and the
+            // ecology zone tally (zoneHistogram) - as reference copies, so the far
+            // larger heightmap / splatmap / mask arrays in the full OutputBag are still
+            // freed when c.tile is dropped. Null until a cell has baked once this
+            // session; a re-scatter with a null payload is impossible and falls back to
+            // a full build. The height a re-scatter needs is read live off the terrain
+            // (ScatterApplier samples terrain.SampleHeight), never from here.
+            public OutputBag retainedScatter;
         }
 
         // Signature of the world's Terrain Settings as last mirrored onto the cells.
@@ -243,6 +256,15 @@ namespace UniverseCreator.TerrainSystem
 
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
+
+        // T-VEGLAW. Cells queued for a read-only re-scatter - an inspector
+        // vegetation-library edit re-applying its prototypes over the EXISTING terrain
+        // with NO worker, NO graph eval and NO height/splat/hydrology change. Drained
+        // one cell per pump on the same yield clock as an apply, so a full re-scatter
+        // fills in visibly and never freezes the editor (the P-HANG invariant). A full
+        // RebuildAll clears this: a rebuild re-applies scatter itself, so a pending
+        // re-scatter behind it would be redundant work on ground about to be replaced.
+        private readonly List<Chunk> rescatterQueue = new List<Chunk>();
 
         // Cells whose stitch weld has already reported a neighbour resolution mismatch.
         // The weld re-runs on every pump, so an unguarded log would repeat the same
@@ -380,7 +402,14 @@ namespace UniverseCreator.TerrainSystem
         {
             get
             {
-                return IsGenerating;
+                // A queued re-scatter is real main-thread work even though no chunk is
+                // "generating" - the edit-mode driver gates its pump on HasWork, so
+                // without this the re-scatter queue would sit undrained until some
+                // unrelated event ticked the pump. It is deliberately NOT folded into
+                // IsGenerating: a re-scatter shows no "Generating chunks" progress item
+                // and arms no settle (it changes no heights), and IsGenerating drives
+                // both of those.
+                return IsGenerating || rescatterQueue.Count > 0;
             }
         }
 
@@ -687,6 +716,13 @@ namespace UniverseCreator.TerrainSystem
             settleStitchPending = true;
             settlePhase = 0;   // a fresh build must settle from the top, not resume a stale phase
 
+            // T-VEGLAW. A full rebuild re-applies scatter on every cell as its bake
+            // lands, so any read-only re-scatter still queued from a prior inspector
+            // edit is now redundant - and worse, it would run against ground the rebuild
+            // is about to replace. Drop it here so the rebuild is the single source of
+            // this world's scatter for the duration.
+            rescatterQueue.Clear();
+
             // A rebuild is the moment the world is allowed to change its mind about
             // ecology: a committed inspector edit, a new preset, useEcology being
             // switched on. Dropped rather than re-resolved here, so a world with no
@@ -839,8 +875,86 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Puts the world back on screen after anything that tore down the managed side
-        /// of it - opening the scene, a script recompile, leaving play mode - and
+        /// T-VEGLAW. Queues every live, already-baked cell for a read-only re-scatter -
+        /// the inspector vegetation path. Places nothing here: it only flags the work,
+        /// which PumpCompleted drains one cell per pump so the editor never freezes. Each
+        /// cell re-applies the scatter prototypes from <see cref="UniverseCreatorObject.scatterLibrary"/>
+        /// over the terrain EXACTLY as it stands - no worker, no graph re-evaluation, and
+        /// no change to heights, splatmaps or hydrology.
+        /// </summary>
+        /// <returns>
+        /// True if at least one cell could be re-scattered. False when nothing has been
+        /// baked this session yet (no retained scatter payload to re-apply): the caller
+        /// then falls back to a full build, because there is no existing terrain to read.
+        /// </returns>
+        public bool RescatterAll()
+        {
+            UniverseCreatorObject o = Owner;
+            if (o == null) return false;
+
+            // Supersede any re-scatter already mid-drain: a fresh edit's prototypes are
+            // what the world should show, and re-queuing from the current pool state
+            // cannot leave a cell half-updated between two edits.
+            rescatterQueue.Clear();
+
+            for (int i = 0; i < pool.Count; i++)
+            {
+                Chunk c = pool[i];
+
+                // Only cells that are actually on screen and have a bake to re-dress.
+                // A parked cell will re-scatter when it next streams in; a never-baked
+                // cell has no existing surface for a read-only pass to stand on.
+                if (c == null || c.go == null || !c.go.activeSelf) continue;
+                if (!c.bakedThisSession || c.retainedScatter == null) continue;
+
+                rescatterQueue.Add(c);
+            }
+
+            return rescatterQueue.Count > 0;
+        }
+
+        /// <summary>
+        /// Re-applies one cell's retained scatter over its existing terrain. The scatter
+        /// half of <see cref="ApplyChunk"/> and nothing else: release the old props,
+        /// re-run <see cref="ScatterApplier.Apply"/> from the retained payload, re-report
+        /// the timing and the live flag. Height, splat, edge weld, wind and hydrology are
+        /// all untouched - this is the read-only inspector path.
+        /// </summary>
+        private void RescatterChunk(UniverseCreatorObject o, Chunk c)
+        {
+            if (o == null || c == null || c.terrain == null || c.data == null) return;
+            if (c.retainedScatter == null) return;
+
+            // Owner id derived once, exactly as ApplyChunk does, so the release and the
+            // re-apply below name the same instancing/registry owner.
+            int scatterOwner = ScatterOwnerOf(c);
+            UCVegetationSystemManager veg = EnsureVegetationManager();
+
+            ScatterApplier.Release(c.scatterObjects, veg, scatterOwner);
+
+            Transform scatterParent = c.go != null ? c.go.transform : null;
+            if (veg != null && veg.parentUnderVegetationSystem) scatterParent = veg.transform;
+
+            double scatterT0 = Time.realtimeSinceStartupAsDouble;
+            ScatterApplier.Apply(c.terrain, c.data, c.retainedScatter, o.scatterLibrary,
+                                 scatterParent,
+                                 o.enableGPUInstancing ? Instancing() : null,
+                                 scatterOwner, veg,
+                                 c.scatterObjects);
+            if (veg != null)
+            {
+                veg.ReportBuildMilliseconds(
+                    (float)((Time.realtimeSinceStartupAsDouble - scatterT0) * 1000.0));
+                SetChunkLive(c, c.go != null && c.go.activeSelf);
+            }
+
+#if UNITY_EDITOR
+            if (c.terrain != null) UnityEditor.EditorUtility.SetDirty(c.terrain);
+            if (c.data != null) UnityEditor.EditorUtility.SetDirty(c.data);
+#endif
+        }
+
+
         /// re-bakes only the cells that genuinely have no surface. Returns how many
         /// cells it had to queue.
         /// </summary>
@@ -2208,6 +2322,34 @@ namespace UniverseCreator.TerrainSystem
             // clock that reads the same from both.
             bool yieldElapsed = Time.realtimeSinceStartup >= nextApplyTime;
 
+            // T-VEGLAW read-only re-scatter drain. Runs ONLY when the generation side is
+            // fully idle - no worker, no queue, no rebuild in flight - so it can never
+            // starve a real bake of a pump, and a rebuild that starts mid-drain has
+            // already cleared the queue (see RebuildAll). One cell per pump on the same
+            // yield clock as an apply keeps the editor responsive (P-HANG). This path
+            // touches scatter only: no SetHeights, no SetAlphamaps, no hydrology, no
+            // stitch, and it deliberately does NOT arm the settle machinery below.
+            // settlePhase == 0 is part of the idle test on purpose: a settle still moves
+            // the surface (carve fold-in, beach reconcile), and a read-only re-scatter
+            // must read the FINAL ground, so it waits for the settle to finish first.
+            if (rescatterQueue.Count > 0 && activeWorkers == 0 && pending.Count == 0
+                && !IsRebuildingAll && setupDepth == 0 && settlePhase == 0)
+            {
+                if (!yieldElapsed) return false;
+
+                Chunk rc = rescatterQueue[0];
+                rescatterQueue.RemoveAt(0);
+                if (rc != null && rc.go != null && rc.go.activeSelf && rc.retainedScatter != null)
+                {
+                    RescatterChunk(o, rc);
+                    nextApplyTime = Time.realtimeSinceStartup + o.ChunkYieldDelaySeconds;
+                    return true;   // scatter changed - repaint; nothing else this pump.
+                }
+                // A cell that went inactive or lost its payload since it was queued is
+                // just dropped; fall through so an otherwise-idle pump still returns
+                // cleanly rather than spinning on a dead entry.
+            }
+
             for (int i = 0; i < pool.Count; i++)
             {
                 Chunk c = pool[i];
@@ -2680,6 +2822,19 @@ namespace UniverseCreator.TerrainSystem
             if (veg != null)
                 veg.ReportBuildMilliseconds(
                     (float)((Time.realtimeSinceStartupAsDouble - scatterT0) * 1000.0));
+
+            // T-VEGLAW. Keep the scatter-only slice of this bake so an inspector
+            // vegetation-library edit can re-apply it over this exact terrain without a
+            // rebuild. Reference copies of the three fields ScatterApplier.Apply reads;
+            // the pump nulls c.tile on the next line, which frees the heightmap, splatmap
+            // and mask arrays but leaves these small collections reachable. Rebuilt every
+            // bake, so it always mirrors the graph as last evaluated for this cell.
+            c.retainedScatter = new OutputBag
+            {
+                scatter = c.tile.outputs.scatter,
+                detailLayers = c.tile.outputs.detailLayers,
+                zoneHistogram = c.tile.outputs.zoneHistogram
+            };
 
             // Reconcile the registry's live flag against what the cell actually is.
             // A cell can be parked by the streaming pass between the moment its heights

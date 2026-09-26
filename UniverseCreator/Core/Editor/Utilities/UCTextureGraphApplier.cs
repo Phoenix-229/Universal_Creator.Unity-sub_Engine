@@ -264,7 +264,18 @@ namespace UniverseCreator.Editor.Utilities
             }
 
             TerrainLayer[] existing = data.terrainLayers;
-            TerrainLayer[] result = new TerrainLayer[wanted];
+
+            // The texture graph owns channels 0..wanted-1 (its hard ceiling is 4).
+            // Anything the terrain already carries BEYOND that set is reserved by the
+            // height/biome splat path - BiomeSplatOutputNode keeps snow at layer 4,
+            // road at 5, grass at 6, forest floor at 7 - and is NOT ours to discard.
+            // Shrinking the array to `wanted` would strip those reserved layers and,
+            // as this file already argues above, silently wipe their painted control-
+            // map channels. So the result is at least as long as what was there: we
+            // overwrite only our own channels and carry the reserved tail through
+            // untouched. That is the snow-layer-preserve guard.
+            int total = (existing != null && existing.Length > wanted) ? existing.Length : wanted;
+            TerrainLayer[] result = new TerrainLayer[total];
 
             for (int i = 0; i < wanted; i++)
             {
@@ -291,12 +302,19 @@ namespace UniverseCreator.Editor.Utilities
                 result[i] = layer;
             }
 
+            // Reserved layers past the texture graph's set (snow at 4, road, grass, ...)
+            // are copied straight across so applying a texture graph never blows away
+            // what the biome/height path put there.
+            for (int i = wanted; i < total; i++)
+                result[i] = existing[i];
+
             data.terrainLayers = result;
 
             if (existing != null && existing.Length > wanted)
             {
-                surface.Notice("Layer count dropped from " + existing.Length + " to " + wanted +
-                               ". Painting on the removed channel(s) is no longer visible.");
+                surface.Notice("The texture graph set " + wanted + " layer(s); the " +
+                               (existing.Length - wanted) + " reserved layer(s) beyond it (e.g. the " +
+                               "snow layer the biome splat path keeps at index 4) were preserved, not dropped.");
             }
         }
 

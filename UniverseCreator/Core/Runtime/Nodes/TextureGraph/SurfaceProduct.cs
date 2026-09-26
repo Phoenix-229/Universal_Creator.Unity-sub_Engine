@@ -328,6 +328,53 @@ namespace UniverseCreator.Nodes
                  "so the water does not end in a hard line across the ground.")]
         public float edgeSoftenMetres = 0.6f;
 
+        // Shoreline / bank band.
+        //
+        // Where water meets land the ground is not the grass or rock that sits
+        // inland - it is a band of wet, water-worked material: sand on an ocean
+        // beach, gravel or mud on a lake margin, scoured sand on a river bank. The
+        // terrain's own beach band (the _UC_BEACH_ON shader feature) draws this at
+        // the GLOBAL sea level for the ocean. A lake or a river sits at its own
+        // altitude, so the band it wants is described here PER BODY and applied
+        // around that body rather than at one world height. Reading grass straight
+        // into the waterline - the "grass standing in the water" artefact - is what
+        // these fields exist to prevent.
+
+        [Tooltip("Draw a wet shoreline / bank band where this body meets the land, " +
+                 "instead of letting the inland grass or rock run into the water.")]
+        public bool shorelineEnabled;
+
+        [Tooltip("Colour of the wet shoreline band - beach sand, lake gravel or river " +
+                 "bank. Read at the waterline; it dries toward the inland surface " +
+                 "across the band width.")]
+        public Color shorelineColor = new Color(0.62f, 0.57f, 0.44f, 1f);
+
+        [Tooltip("How far the band reaches inland from the waterline, in metres. A surf " +
+                 "beach is tens of metres; a lake margin or a river bank a few.")]
+        public float shorelineWidthMetres = 4f;
+
+        [Tooltip("How much darker the band is right at the waterline, 0 to 1. Wet sand " +
+                 "is markedly darker than dry; about 0.3 is a convincing tide line.")]
+        public float shorelineWetDarkening = 0.3f;
+
+        [Tooltip("Specular smoothness of the wet band. Water-saturated sand is glossy at " +
+                 "the edge and matte where it dries, so this is the wet-end value.")]
+        public float shorelineSmoothness = 0.45f;
+
+        [Tooltip("Optional sand / gravel / bank texture for the band. Empty gives a " +
+                 "flat-coloured band.")]
+        public TextureRef shorelineTexture;
+
+        [Tooltip("River only: derive the bank from the dug trench walls rather than an " +
+                 "altitude band, so the sand follows the channel it was cut into and " +
+                 "grass never ends up standing in the water.")]
+        public bool bankReadsTrench;
+
+        [Tooltip("Slope in degrees below which the bank band is allowed. Above it the " +
+                 "wall is too steep to hold the worked material and the inland surface " +
+                 "shows through, which is what a real cut bank does.")]
+        public float bankSlopeLimitDegrees = 55f;
+
         /// <summary>
         /// Copy, for the same reason SurfaceProduct has one: the water chain is
         /// usually linear, but nothing stops a user fanning one Water Surface into

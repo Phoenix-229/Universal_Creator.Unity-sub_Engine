@@ -592,4 +592,209 @@ namespace UniverseCreator.Nodes.Texturing
             return p;
         }
     }
+
+    // -------------------------------------------------------------------------
+    //  T19 - Mask Map Packer
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Packs four separate greyscale maps into one URP terrain mask map.
+    ///
+    /// WHY THIS NODE EXISTS
+    /// --------------------
+    /// A downloaded PBR set is four separate greyscale PNGs - metallic, ambient
+    /// occlusion, height, roughness - because that is how texture sites ship them.
+    /// URP's terrain layer wants ONE RGBA mask: R metallic, G occlusion, B height,
+    /// A smoothness. Every other node in the graph already consumes that packed
+    /// form (Normal Map Layer's Mask port, the applier's maskMapTexture, the
+    /// shader's _Mask0..3), so without this node a user has to open an image
+    /// editor and hand-pack the channels before the set will drop in. This does
+    /// that pack in the graph, and does the one conversion people always forget:
+    /// smoothness = 1 - roughness.
+    ///
+    /// READING NON-READABLE SOURCES
+    /// ----------------------------
+    /// A texture downloaded and imported normally is not Read/Write enabled, so
+    /// GetPixels would throw. Each channel is instead blitted through a linear
+    /// RenderTexture and read back, which works whatever the import settings are -
+    /// compressed, sRGB, or not readable. Legal here because the texture graph
+    /// runs on the main thread; the same call in the height graph would deadlock.
+    ///
+    /// IMPORT NOTE: metallic / AO / height / roughness are DATA, not colour.
+    /// Import them with sRGB unchecked or the values are gamma-mangled before they
+    /// ever reach this node - a thing this node cannot undo, only pass through.
+    /// </summary>
+    [System.Serializable]
+    public class MaskMapPackerNode : TextureNode
+    {
+        public override string NodeName { get { return "Mask Map Packer"; } }
+        public override NodeCategory Category { get { return NodeCategory.Texture; } }
+        public override string Tooltip
+        {
+            get { return "Packs metallic + AO + height + roughness into one URP mask (A = 1 - roughness). Wire into a layer's Mask port."; }
+        }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Metallic",  PortType.Texture, PortDirection.Input),
+            new Port("Occlusion", PortType.Texture, PortDirection.Input),
+            new Port("Height",    PortType.Texture, PortDirection.Input),
+            new Port("Roughness", PortType.Texture, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return TexturePorts.TextureOut; }
+
+        [Tooltip("Metallic greyscale map. R metallic in the packed mask. Wired port wins over this slot.")]
+        public Texture2D metallicMap;
+
+        [Tooltip("Ambient Occlusion (AO) greyscale map. G occlusion in the packed mask. Bright = fully lit.")]
+        public Texture2D occlusionMap;
+
+        [Tooltip("Height / displacement greyscale map. B height, used by the height blend.")]
+        public Texture2D heightMap;
+
+        [Tooltip("Roughness greyscale map. Inverted to smoothness (A). Uncheck 'Roughness is smoothness' if the map is already smoothness.")]
+        public Texture2D roughnessMap;
+
+        [Tooltip("The map above is smoothness already, not roughness. Then A is used as-is with no invert.")]
+        public bool roughnessIsSmoothness;
+
+        [Tooltip("Value used for metallic where no map is supplied. Terrain is almost never metallic.")]
+        public float metallicDefault;
+
+        [Tooltip("Value used for occlusion where no map is supplied. 1 is fully lit.")]
+        public float occlusionDefault = 1f;
+
+        [Tooltip("Value used for height where no map is supplied. 0.5 is the neutral mid-height.")]
+        public float heightDefault = 0.5f;
+
+        [Tooltip("Value used for roughness where no map is supplied.")]
+        public float roughnessDefault = 0.5f;
+
+        [Tooltip("Output size in pixels. Rounded to a power of two. All four inputs are resampled to this.")]
+        public int resolution = 1024;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Texture mMap = ResolveMap(tile, 0, metallicMap, stop);
+            Texture oMap = ResolveMap(tile, 1, occlusionMap, stop);
+            Texture hMap = ResolveMap(tile, 2, heightMap, stop);
+            Texture rMap = ResolveMap(tile, 3, roughnessMap, stop);
+
+            // The pack is shared with Normal Map Layer's inline PBR slots so the two
+            // paths can never disagree about channel order or the
+            // smoothness = 1 - roughness conversion. One implementation, two callers.
+            return PackMask(
+                mMap, oMap, hMap, rMap,
+                metallicDefault, occlusionDefault, heightDefault, roughnessDefault,
+                roughnessIsSmoothness, resolution, stop);
+        }
+
+        /// <summary>
+        /// Packs four greyscale channels into one URP mask (R metallic, G occlusion,
+        /// B height, A smoothness = 1 - roughness). Shared by this node and Normal
+        /// Map Layer's inline PBR slots. Returns null when no channel is supplied so
+        /// a layer keeps whatever mask it already had. Main thread only - it blits
+        /// through a RenderTexture.
+        /// </summary>
+        public static TextureRef PackMask(
+            Texture metallic, Texture occlusion, Texture height, Texture roughness,
+            float metallicDefault, float occlusionDefault, float heightDefault, float roughnessDefault,
+            bool roughnessIsSmoothness, int resolution, StopToken stop)
+        {
+            if (metallic == null && occlusion == null && height == null && roughness == null)
+                return null;
+
+            int res = NextPow2(Mathf.Clamp(resolution, 32, 2048));
+
+            float[] mData = ReadChannel(metallic, res);
+            float[] oData = ReadChannel(occlusion, res);
+            float[] hData = ReadChannel(height, res);
+            float[] rData = ReadChannel(roughness, res);
+
+            if (stop != null && stop.StopRequested) return null;
+
+            Texture2D packed = new Texture2D(res, res, TextureFormat.RGBA32, true, true);
+            packed.name = "UC_MaskPacked";
+            packed.wrapMode = TextureWrapMode.Repeat;
+            packed.filterMode = FilterMode.Trilinear;
+
+            float mDef = Mathf.Clamp01(metallicDefault), oDef = Mathf.Clamp01(occlusionDefault);
+            float hDef = Mathf.Clamp01(heightDefault), rDef = Mathf.Clamp01(roughnessDefault);
+
+            Color[] pixels = new Color[res * res];
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                float mv = mData != null ? mData[i] : mDef;
+                float ov = oData != null ? oData[i] : oDef;
+                float hv = hData != null ? hData[i] : hDef;
+                float rv = rData != null ? rData[i] : rDef;
+                // URP's mask A is smoothness; downloaded sets ship roughness, its inverse.
+                pixels[i] = new Color(mv, ov, hv, roughnessIsSmoothness ? rv : 1f - rv);
+            }
+
+            packed.SetPixels(pixels);
+            packed.Apply(true, false);
+            packed.hideFlags = HideFlags.DontSave;
+
+            return new TextureRef(packed) { filter = TextureFilterKind.Trilinear, wrap = TextureWrapKind.Repeat };
+        }
+
+        /// <summary>A wired texture port wins over the inline slot, as everywhere else.</summary>
+        private Texture ResolveMap(TileData tile, int port, Texture2D inline, StopToken stop)
+        {
+            TextureRef wired = GetInputTexture(tile, port, stop);
+            if (wired != null && wired.texture != null) return wired.texture;
+            return inline;
+        }
+
+        /// <summary>
+        /// Reads one channel of a source at the output resolution, going through a
+        /// linear RenderTexture so a non-readable / compressed source still comes
+        /// back. Returns the R channel - greyscale maps carry the same value in
+        /// R, G and B, so R is the map's value.
+        /// </summary>
+        private static float[] ReadChannel(Texture src, int res)
+        {
+            if (src == null) return null;
+
+            RenderTexture rt = RenderTexture.GetTemporary(
+                res, res, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+            RenderTexture prev = RenderTexture.active;
+            Texture2D readback = null;
+
+            try
+            {
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+
+                readback = new Texture2D(res, res, TextureFormat.RGBA32, false, true);
+                readback.ReadPixels(new Rect(0, 0, res, res), 0, 0);
+                readback.Apply(false, false);
+
+                Color[] px = readback.GetPixels();
+                float[] data = new float[px.Length];
+                for (int i = 0; i < px.Length; i++) data[i] = px[i].r;
+                return data;
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+                if (readback != null)
+                {
+                    if (Application.isPlaying) Object.Destroy(readback);
+                    else Object.DestroyImmediate(readback);
+                }
+            }
+        }
+
+        private static int NextPow2(int v)
+        {
+            int p = 32;
+            while (p < v) p <<= 1;
+            return p;
+        }
+    }
 }

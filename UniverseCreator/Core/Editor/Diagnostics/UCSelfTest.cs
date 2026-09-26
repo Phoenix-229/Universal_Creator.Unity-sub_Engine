@@ -99,6 +99,7 @@ namespace UniverseCreator.Editor.Diagnostics
             TestWaterShaderPropertyRegistry();
             TestWaterAppliersAgree();
             TestShorelineConformer();
+            TestShorelineSplatMutation();
             TestHeightGuardRejectsNonFinite();
             TestHeightGuardKillsNeedlesAndKeepsCliffs();
             TestGraphReachesTheHeightmap();
@@ -131,6 +132,10 @@ namespace UniverseCreator.Editor.Diagnostics
             TestTributaryLengthFollowsHacksLaw();
 
             TestGraphHealsMissingNodeSlots();
+
+            // Chunk manager works-as-one seam, in UCSelfTest.ChunkSurface.cs.
+            TestManualSculptSurvivesRegeneration();
+            TestSculptSurvivesResolutionChange();
 
             // Module 6 path-tool seam (TerrainShapeApplier), in UCSelfTest.PathSeam.cs.
             TestPathSeamShaping();
@@ -1100,6 +1105,92 @@ namespace UniverseCreator.Editor.Diagnostics
             }
 
             Check(gridAgrees, "ConformGrid disagrees with the per-vertex shore rules");
+        }
+
+        /// <summary>
+        /// The shoreline / bank band arithmetic: the real-world cover grade
+        /// (distance from the waterline, gated by slope) and the same
+        /// sum-to-one / restore-exact guarantees SnowSplatMutation carries.
+        /// </summary>
+        private static void TestShorelineSplatMutation()
+        {
+            const float Tol = 1e-4f;
+            const float Width = 6f;
+            const float SlopeLimit = 55f;
+
+            // Cover is full at the waterline on flat ground and gone by the band width.
+            CheckWithin(ShorelineSplatMutation.BandCover(0f, Width, 0f, SlopeLimit), 1f, Tol,
+                        "Shoreline: full band at the waterline on flat ground");
+            CheckWithin(ShorelineSplatMutation.BandCover(Width, Width, 0f, SlopeLimit), 0f, Tol,
+                        "Shoreline: no band beyond the band width");
+
+            // Monotonic non-increasing with distance - sand becomes grass, never back.
+            bool grades = true;
+            float prev = ShorelineSplatMutation.BandCover(0f, Width, 0f, SlopeLimit);
+            for (int i = 1; i <= 12; i++)
+            {
+                float here = ShorelineSplatMutation.BandCover(i * (Width / 12f), Width, 0f, SlopeLimit);
+                if (here > prev + Tol) grades = false;
+                prev = here;
+            }
+            Check(grades, "Shoreline: cover falls with distance, never rises");
+
+            // A cut bank steeper than the limit shows the inland surface, not sand.
+            CheckWithin(ShorelineSplatMutation.BandCover(0f, Width, 80f, SlopeLimit), 0f, Tol,
+                        "Shoreline: a wall past the slope limit carries no band");
+            Check(ShorelineSplatMutation.BandCover(0f, Width, 10f, SlopeLimit) > 0.9f,
+                  "Shoreline: gentle ground under the limit keeps its band");
+
+            // Block write: the band layer carries its cover, the ground shares the
+            // rest, and every cell still sums to one - the SnowSplatMutation contract.
+            const int Layers = 4;
+            const int BandLayer = 1;
+            const int Size = 4;
+
+            Check(!ShorelineSplatMutation.CanWriteLayer(1, BandLayer),
+                  "Shoreline: a one-layer world cannot hold the band at layer one");
+            Check(ShorelineSplatMutation.CanWriteLayer(Layers, BandLayer),
+                  "Shoreline: a four-layer world can hold the band at layer one");
+
+            float[,,] baseAlpha = new float[Size, Size, Layers];
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                baseAlpha[y, x, 0] = 0.7f;
+                baseAlpha[y, x, 1] = 0f;
+                baseAlpha[y, x, 2] = 0.2f;
+                baseAlpha[y, x, 3] = 0.1f;
+            }
+
+            float[,,] alpha = (float[,,])baseAlpha.Clone();
+            float[,] cover = new float[Size, Size];
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+                cover[y, x] = 0.25f + 0.5f * ((x + 2 * y) % 3) / 2f;
+
+            ShorelineSplatMutation.WriteBand(alpha, baseAlpha, BandLayer, cover);
+
+            bool sumOne = true, bandIsCover = true;
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                float s = 0f;
+                for (int l = 0; l < Layers; l++) s += alpha[y, x, l];
+                if (Mathf.Abs(s - 1f) > Tol) sumOne = false;
+                if (Mathf.Abs(alpha[y, x, BandLayer] - Mathf.Clamp01(cover[y, x])) > Tol)
+                    bandIsCover = false;
+            }
+            Check(sumOne, "Shoreline: every cell's weights still sum to one after the band");
+            Check(bandIsCover, "Shoreline: the band layer carries exactly the cover fraction");
+
+            // Erase copies the cached base back bit-for-bit, not an inverse.
+            ShorelineSplatMutation.Restore(alpha, baseAlpha);
+            bool identical = true;
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            for (int l = 0; l < Layers; l++)
+                if (alpha[y, x, l] != baseAlpha[y, x, l]) identical = false;
+            Check(identical, "Shoreline: erase restores the painted map bit-for-bit");
         }
 
         // ---------------------------------------------------------------------

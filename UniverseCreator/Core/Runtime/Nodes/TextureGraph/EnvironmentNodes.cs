@@ -199,6 +199,12 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Depth of the snow normal map.")]
         public float normalStrength = 0.6f;
 
+        [Tooltip("How much of the ground's ambient occlusion the snow keeps. 0 is deep " +
+                 "fresh snow that fills every crevice and reads flat and bright; raise it " +
+                 "for thin, wind-scoured snow that still shows the rough surface beneath. " +
+                 "0 matches how snow rendered before this control existed.")]
+        public float occlusion = 0f;
+
         [Tooltip("World size of one snow tile, in metres. Snow is projected triplanar so it holds on cliffs.")]
         public float triplanarScaleMetres = 6f;
 
@@ -228,6 +234,7 @@ namespace UniverseCreator.Nodes.Texturing
             surface.SetFloat(UCShaderProps.SnowCoverage, Mathf.Clamp01(coverage));
             surface.SetFloat(UCShaderProps.SnowSmoothness, Mathf.Clamp01(smoothness));
             surface.SetFloat(UCShaderProps.SnowNormalStrength, Mathf.Clamp(normalStrength, 0f, 4f));
+            surface.SetFloat(UCShaderProps.SnowOcclusion, Mathf.Clamp01(occlusion));
             surface.SetFloat(UCShaderProps.SnowTriplanarScale, Mathf.Max(0.01f, triplanarScaleMetres));
 
             if (snowTexture == null)

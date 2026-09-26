@@ -299,6 +299,14 @@ namespace UniverseCreator.Editor.Inspectors
                     "river will pond instead of climbing.", MessageType.Warning);
 
             EditorGUILayout.PropertyField(serializedObject.FindProperty("widthMetres"));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("readTrenchWidth"));
+            if (body.readTrenchWidth)
+                EditorGUILayout.HelpBox(
+                    "The river reads the trench already in the terrain: its width AND depth " +
+                    "are measured from the channel cross-section, and the water fills that " +
+                    "channel up to the bank so it never hangs. Nothing is dug and no carve " +
+                    "math runs - the Width and Channel Depth fields above are ignored, and " +
+                    "the terrain is left exactly as the graph made it.", MessageType.None);
             EditorGUILayout.PropertyField(serializedObject.FindProperty("widthSegments"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("pointSpacingMetres"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("channelDepthMetres"));
@@ -693,44 +701,17 @@ namespace UniverseCreator.Editor.Inspectors
         {
             EditorGUI.indentLevel++;
 
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("fitToValley"));
+            // §38: Fit-to-Valley, the "Reroute to Pass Through Valley" button and
+            // Route-Around-High-Ground (and their parameters) are removed. A hand-placed
+            // river runs on the line you drew; the ground no longer moves it sideways.
 
-            using (new EditorGUI.DisabledScope(!body.fitToValley))
-            {
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("valleySearchMetres"));
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("valleyPull"));
-            }
-            
-            if (GUILayout.Button(new GUIContent("Reroute to Pass Through Valley",
-                                           "Permanently moves your spline nodes into the lowest nearby valley based on the valley settings above."),
-                                 GUILayout.Height(24)))
-            {
-                Undo.RecordObject(body, "Reroute through valley");
-                body.ApplyValleyReroute();
-                EditorUtility.SetDirty(body);
-                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-                SceneView.RepaintAll();
-            }
-
-            EditorGUILayout.Space(2);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("routeAroundHighGround"));
-
-            using (new EditorGUI.DisabledScope(!body.routeAroundHighGround))
-            {
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("routeFanDegrees"));
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("climbToleranceMetres"));
-                EditorGUILayout.PropertyField(serializedObject.FindProperty("sinkRunMetres"));
-            }
-
-            EditorGUILayout.Space(4);
             EditorGUILayout.PropertyField(serializedObject.FindProperty("confineBanks"));
             if (body.confineBanks)
                 EditorGUILayout.HelpBox(
                     "Where the river crosses a steep slope and its low bank sits below the " +
-                    "water, a confining wall is raised to hold it - a real gorge. On gentle " +
-                    "ground it does nothing (the floodplain shapes itself). If a reach is on " +
-                    "a hillside rather than a valley, no wall is built; the valley-seek moves " +
-                    "the course to the low line instead.", MessageType.None);
+                    "water, a confining wall is raised to hold it - a real gorge. Off by " +
+                    "default, so the river raises no ground unless you ask; on gentle ground " +
+                    "it does nothing.", MessageType.None);
 
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Junctions", EditorStyles.miniBoldLabel);
@@ -738,7 +719,6 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.PropertyField(serializedObject.FindProperty("joinDownstreamTo"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("joinUpstreamFrom"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("joinBlendMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinMatchesDepth"));
 
             EditorGUILayout.HelpBox(
                 "A river can join an ocean, a lake or another river - never a pool. " +
@@ -763,7 +743,6 @@ namespace UniverseCreator.Editor.Inspectors
 
             EditorGUILayout.PropertyField(serializedObject.FindProperty("autoConnectMetres"));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("joinBlendMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinMatchesDepth"));
             serializedObject.ApplyModifiedProperties();
 
             EditorGUILayout.Space(2);

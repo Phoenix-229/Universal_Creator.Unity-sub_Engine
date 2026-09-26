@@ -140,6 +140,30 @@ Shader "UniverseCreator/VegetationLit"
         // blade actually does.
         _AmbientWrap ("Ambient Wrap", Range(0.0, 1.0)) = 0.45
 
+        [Header(Leaf Detail Realism)]
+        // Beer-Lambert. The thickness map is optical path length through the blade
+        // in mean-free-paths; the fraction of backlight that survives it is
+        // e^(-path/lambda). _LeafDensity is 1/lambda, so a thin edge (path -> 0)
+        // glows near full while a thick midrib stays dark - the organic backlit
+        // falloff a flat "* thickness" multiply cannot produce. Only read when
+        // _TRANSLUCENCY_ON, so it costs nothing on bark.
+        _LeafDensity ("Leaf Optical Density (Beer-Lambert 1/lambda)", Range(0.1, 8.0)) = 2.0
+
+        // Retroreflective canopy sheen: the pale halo along a leaf edge turned to
+        // the sun and the silver flash of back-lit grass. An inverted-Fresnel rim,
+        // gated by how lit the face is so it never glows in shade. One pow, no map.
+        [Toggle(_SHEEN_ON)] _SheenEnable ("Enable Canopy Sheen", Float) = 0
+        [HDR] _SheenColor ("Sheen Color", Color) = (0.90, 0.95, 0.80, 1)
+        _SheenStrength ("Sheen Strength", Range(0.0, 2.0)) = 0.5
+        _SheenPower ("Sheen Falloff", Range(1.0, 16.0)) = 4.0
+
+        // Alpha-to-coverage. A hard per-pixel cutoff erodes a leaf card's silhouette
+        // into a boxy block on distant mips as the mask's antialiased rim drops below
+        // the threshold. Feeding MSAA a sharpened coverage instead keeps the edge
+        // sub-pixel accurate at range. Needs MSAA; inert without it. The one toggle
+        // sets both the render state and the shader branch.
+        [Toggle(_ALPHATOCOVERAGE)] _AlphaToMask ("Alpha To Coverage (needs MSAA)", Float) = 0
+
         [Header(Wind)]
         [Enum(Grass,0,Shrub,1,Tree,2)] _VegetationClass ("Vegetation Class", Float) = 2
         _WindResponse ("Wind Response", Range(0.0, 3.0)) = 1.0
@@ -199,6 +223,7 @@ Shader "UniverseCreator/VegetationLit"
             half4  _SummerColor;
             half4  _AutumnColor;
             half4  _WinterColor;
+            half4  _SheenColor;
             half   _Brightness;
             half   _Cutoff;
             half   _AlphaRemapMin;
@@ -212,6 +237,10 @@ Shader "UniverseCreator/VegetationLit"
             half   _TranslucencyPower;
             half   _TranslucencyDistortion;
             half   _AmbientWrap;
+            half   _LeafDensity;
+            half   _SheenStrength;
+            half   _SheenPower;
+            half   _AlphaToMask;
             half   _VegetationClass;
             half   _WindResponse;
             half   _BendHeight;
@@ -316,6 +345,7 @@ Shader "UniverseCreator/VegetationLit"
 
             Cull [_Cull]
             ZWrite On
+            AlphaToMask [_AlphaToMask]
 
             HLSLPROGRAM
             #pragma vertex   VegetationVert
@@ -326,6 +356,7 @@ Shader "UniverseCreator/VegetationLit"
             #pragma shader_feature_local _DOUBLESIDED_NORMALS
             #pragma shader_feature_local _SEASONTINT_ON
             #pragma shader_feature_local _OPACITYMAP
+            #pragma shader_feature_local _ALPHATOCOVERAGE
             #pragma shader_feature_local_fragment _METALLICGLOSSMAP
             #pragma shader_feature_local_fragment _SMOOTHNESS_FROM_RED
             #pragma shader_feature_local_fragment _SMOOTHNESS_FROM_ROUGHNESS
@@ -334,6 +365,7 @@ Shader "UniverseCreator/VegetationLit"
             #pragma shader_feature_local_fragment _TRANSMISSION_ON
             #pragma shader_feature_local_fragment _TRANSMISSION_COLORMAP
             #pragma shader_feature_local_fragment _TRANSLUCENCY_ON
+            #pragma shader_feature_local_fragment _SHEEN_ON
 
             // URP 17 keyword set, verified against the installed package rather
             // than remembered. _CLUSTER_LIGHT_LOOP is what Forward+ is called
@@ -361,6 +393,25 @@ Shader "UniverseCreator/VegetationLit"
             #pragma multi_compile_fog
             #pragma multi_compile_instancing
             #pragma multi_compile _ LOD_FADE_CROSSFADE
+
+            // --- variant stripping (T-OOM) -------------------------------------
+            // These families are declared above only because this pass mirrors
+            // URP's stock Lit ForwardLit keyword set. They are dead weight HERE:
+            // Universe Creator vegetation is procedurally scattered as runtime
+            // GPU instances, never marked static and never contributing to a
+            // baked lightmap, so Unity never selects a *_LIGHTMAP_* / shadowmask
+            // variant for these draws - the ON branches at lines ~423/452/565 are
+            // unreachable at runtime. Compiling all six baked-GI keywords still
+            // multiplies the ForwardLit variant matrix, which is the memory the
+            // first-placement compile ran out of (see [Step 2]: the OOM is the
+            // built-in matrix under RAM pressure, not a UC keyword). Skipping them
+            // removes only variants that could never run; the code keeps its
+            // #ifdef fallbacks (SH / no shadowmask), so nothing breaks - a skipped
+            // variant just resolves to the path instanced foliage already takes.
+            // The graded soft-shadow tiers collapse to the base _SHADOWS_SOFT
+            // (soft shadows still work, one quality tier), and DEBUG_DISPLAY is a
+            // dev-only rendering-debugger view. All reversible: delete this line.
+            #pragma skip_variants LIGHTMAP_ON DYNAMICLIGHTMAP_ON DIRLIGHTMAP_COMBINED USE_LEGACY_LIGHTMAPS LIGHTMAP_SHADOW_MIXING SHADOWS_SHADOWMASK _SHADOWS_SOFT_LOW _SHADOWS_SOFT_MEDIUM _SHADOWS_SOFT_HIGH DEBUG_DISPLAY
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/LODCrossFade.hlsl"
@@ -439,7 +490,22 @@ Shader "UniverseCreator/VegetationLit"
 #endif
 
                 half4 albedo = UCSampleBaseAndSeason(IN.uv, IN.positionWS, IN.color);
+
+                // Coverage the fragment writes as its alpha. Opaque (1) unless
+                // alpha-to-coverage is on, where it becomes the sharpened mask so
+                // MSAA can resolve the leaf edge sub-pixel instead of clipping it
+                // into a boxy block on distant mips.
+                half coverage = 1.0h;
+#ifdef _ALPHATOCOVERAGE
+                // Sharpen the antialiased rim to ~one pixel around the cutoff, then
+                // clip only what is fully outside. fwidth gives the per-pixel rate
+                // of change of the mask, so the divide widens a hard step into a
+                // one-texel ramp - exactly what a coverage mask wants.
+                coverage = saturate((albedo.a - _Cutoff) / max(fwidth(albedo.a), 1e-5h) + 0.5h);
+                clip(coverage - 0.0001h);
+#else
                 clip(albedo.a - _Cutoff);
+#endif
 
                 // --- geometry ------------------------------------------------
                 half3 normalWS = normalize(IN.normalWS);
@@ -548,8 +614,10 @@ Shader "UniverseCreator/VegetationLit"
                 // --- leaf light transport ------------------------------------
                 // Added after the BRDF because it is light that never reflected off
                 // the surface at all - it came through the blade. Both terms are
-                // shadow-attenuated: a leaf in shade is not backlit.
-#if defined(_TRANSMISSION_ON) || defined(_TRANSLUCENCY_ON)
+                // shadow-attenuated: a leaf in shade is not backlit. The canopy
+                // sheen shares the same main-light fetch rather than paying for a
+                // second one.
+#if defined(_TRANSMISSION_ON) || defined(_TRANSLUCENCY_ON) || defined(_SHEEN_ON)
                 Light mainLight = GetMainLight(inputData.shadowCoord, IN.positionWS, inputData.shadowMask);
                 half3 lightEnergy = mainLight.color * mainLight.shadowAttenuation * mainLight.distanceAttenuation;
                 half  ndotl = dot(normalWS, mainLight.direction);
@@ -576,10 +644,27 @@ Shader "UniverseCreator/VegetationLit"
                 // toward the sun through the leaf. Distorting the light vector by
                 // the normal is what softens it off a flat card.
                 half thickness = SAMPLE_TEXTURE2D(_ThicknessMap, sampler_ThicknessMap, IN.uv).r;
+                // Beer-Lambert: the map is optical path in mean-free-paths, so the
+                // surviving backlight fraction is e^(-path/lambda) = exp(-t*density).
+                // A thin edge transmits almost fully; a thick midrib goes dark. This
+                // replaces the old linear "* thickness", which lit the whole blade
+                // evenly and read as a flat card.
+                half transmit  = exp(-thickness * _LeafDensity);
                 half3 transDir = normalize(mainLight.direction + normalWS * _TranslucencyDistortion);
                 half  forward  = pow(saturate(dot(-viewDirWS, transDir)), _TranslucencyPower);
                 color.rgb += _TranslucencyColor.rgb
-                           * (lightEnergy * forward * thickness * _TranslucencyStrength);
+                           * (lightEnergy * forward * transmit * _TranslucencyStrength);
+    #endif
+
+    #ifdef _SHEEN_ON
+                // Retroreflective canopy sheen. Inverted Fresnel gives a rim that
+                // brightens as the surface turns edge-on to the eye; gating it by
+                // the lit side (saturate(ndotl)) keeps it a sunlit highlight, not a
+                // uniform glow, so it reads as waxy leaf or silvered grass rather
+                // than fog. lightEnergy already carries colour, shadow and falloff.
+                half grazing = pow(1.0h - saturate(dot(normalWS, viewDirWS)), _SheenPower);
+                color.rgb += _SheenColor.rgb
+                           * (lightEnergy * saturate(ndotl) * grazing * _SheenStrength);
     #endif
 #endif
 
@@ -592,7 +677,11 @@ Shader "UniverseCreator/VegetationLit"
                 // skip it read as pasted over the seabed rather than growing in it.
                 color.rgb = UCApplyUnderwater(color.rgb, IN.positionWS);
 
-                return half4(color.rgb, 1.0h);
+                // Coverage is 1.0 unless _ALPHATOCOVERAGE sharpened the cutout into
+                // a per-sample MSAA fraction above; returning it lets the hardware
+                // antialias the leaf silhouette so distant mips stop eroding cards
+                // into hard boxes. Opaque queue + AlphaToMask, not alpha blending.
+                return half4(color.rgb, coverage);
             }
             ENDHLSL
         }

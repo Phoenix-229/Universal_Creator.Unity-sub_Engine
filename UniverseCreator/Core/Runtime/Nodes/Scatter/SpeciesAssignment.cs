@@ -119,6 +119,23 @@ namespace UniverseCreator.Nodes.Scatter
                 Ecology.EnvironmentSample site =
                     ctx.sampler.Sample(inst.position.x, inst.position.z);
 
+                // T-PLACE. The world-level placement law, applied here once per
+                // candidate rather than folded into suitability: rock (the slope the
+                // vegetation system reads as bare stone), the altitude backstop, and
+                // the ground a road has cut all rule a site out for every species at
+                // once. Kept out of the suitability score on purpose - a highly
+                // suitable species must not be able to buy its way onto a cliff face
+                // or a carriageway - and tested before the weights are built so a
+                // rejected site never pays for the species solve.
+                if (!Ecology.PlacementClearance.TerrainAdmits(in ctx.settings, in site))
+                    continue;
+
+                if (!Ecology.PlacementClearance.CutRegionsAdmit(
+                        ctx.cutRegions, ctx.cutRegionCount,
+                        inst.position.x, inst.position.z, inst.position.y,
+                        ctx.settings.avoidCutRegions, ctx.settings.clearanceM))
+                    continue;
+
                 int admissible = Ecology.SpeciesSelector.BuildWeights(
                     table.envelopes, table.weights, table.dispersal,
                     count, in site, floor, sharpness, weights, suitabilities);
@@ -149,6 +166,18 @@ namespace UniverseCreator.Nodes.Scatter
                 }
 
                 if (chosen < 0) continue;
+
+                // T-PLACE. Now the winning species is known, the water half of the
+                // law: a land plant is kept out of standing water and off the
+                // waterline clearance band, while a species flagged marine or lake -
+                // one with a stated submerged depth range - is admitted into the depth
+                // it belongs in. This is where "no growth in a river or lake unless it
+                // is an aquatic species" is enforced, and where the global avoidWater
+                // switch can override a merely flood-tolerant species near the edge.
+                if (!Ecology.PlacementClearance.WaterAdmits(
+                        table.envelopes[chosen], in site,
+                        ctx.settings.avoidWater, ctx.settings.clearanceM))
+                    continue;
 
                 // V-13. The dart solve threw at the ceiling density, so the stand that
                 // remains here is the ceiling times how well this ground suits the

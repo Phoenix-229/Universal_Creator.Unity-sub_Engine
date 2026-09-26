@@ -1338,20 +1338,16 @@ The full wiring procedure, with the shader half as well, is
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Target River Count` | 3 | How many trunk rivers to plan |
 | `Target Lake Count` | 0 | Explicit upper bound on lakes. **0 means use the coverage percentage exactly** |
 | `Lake Chunk Percentage` | 0.24 (0..1) | Fraction of the world's chunks eligible for a lake |
 | `Lake Outlet Chunk Percentage` | 0.08 (0..1) | Fraction of chunks that get a lake drain-out river |
-| `Min Tributaries` | 3 | Merge this many small rivers to form a **Big** river |
-| `Enable Distributaries` | on | Let a big river split into a delta where it meets the ocean |
-| `Max Distributaries` | 4 | Arms in that delta |
 | `Generate Ocean` | on | Spawn one world-sized sea at the world-edge falloff level, clipped at the shore. Off leaves the world land-locked |
 
 The spawner also exposes the solve settings that keep its masks and spawned bodies aligned:
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Drainage Resolution` | 256 | Cells per side of the world drainage solve. Higher values cost more and refine routing, not the final chunk edge |
+| `Drainage Resolution` | 160 | Cells per side of the world drainage solve. Higher values cost more and refine routing, not the final chunk edge. (The stand-alone hydrology selector nodes default this to 256; the spawner's own solve is coarser at 160) |
 | `Sea Level` | 0.35 | Normalised waterline. Rivers terminate here; basins at or below it are treated as sea rather than lakes |
 | `Channel Head Area` | 250,000 | Catchment area in square metres required for a permanent river channel. Lower this on small worlds |
 | `Max Channels` | 512 | Safety cap on traced river courses; it is not the requested river-object count |
@@ -1609,6 +1605,7 @@ building scree fans.
 | `Iterations` | 8 | Relaxation passes |
 | `Talus Angle` | 35 | Angle of repose in degrees. **Physically meaningful:** dry sand is 30–35°, gravel 35–40°, packed soil around 35°. Above this angle material moves |
 | `Amount` | 0.5 | Fraction of the excess moved per pass |
+| `Relax` | 0.5 | Smoothing blended in after each pass, so the scree faces settle instead of stair-stepping |
 
 Excellent as a finishing pass after hydraulic erosion: it softens the impossibly sharp
 edges the water solver leaves and adds convincing debris slopes below cliffs.
@@ -1641,7 +1638,7 @@ where rivers carve V-profiles; this is what makes high terrain read as glaciated
 | `Iterations` | 3 | Passes |
 
 #### Coastal Erosion
-Cuts a wave-notch terrace around sea level. `Sea Level` (0.3), `Wave Height` (0.02 — the
+Cuts a wave-notch terrace around sea level. `Sea Level` (0.35), `Wave Height` (0.02 — the
 vertical band the notch occupies), `Strength` (0.5).
 
 #### Coastal Shelf Shaper
@@ -1650,7 +1647,7 @@ real profile of a coast, which is a wide shallow shelf and then an abrupt drop.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Sea Level` | 0.4 | The waterline |
+| `Sea Level` | 0.35 | The waterline |
 | `Shelf Depth` | 0.06 | How far below sea level the shelf sits |
 | `Shelf Extent` | 0.45 | How far out the shelf reaches |
 | `Slope Sharpness` | 3 | Abruptness of the shelf break |
@@ -1805,7 +1802,7 @@ waterline described three times.
 | `Squeeze Strength` | 1 | Manning's squeeze: where a **valley pinches** the channel narrower than its discharge width (both walls close in), depth rises to carry the same flow, D ∝ (W_open/W_confined)^0.67. This is confinement — the *same* river is deeper in a gorge than on a plain — so it composes with `Flow Depth Exponent` (discharge). A one-sided wall does not squeeze (the flow spreads to the open bank). Bounded so a pinch cannot run depth away. 0 turns it off |
 | `Bank Width` | 25 | Metres from channel centre to the top of the bank |
 | `Profile Power` | 1.6 | Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon |
-| `Bed Flattening` | 0.6 | How flat the channel floor is. Real rivers have flat beds |
+| `Gorge Repose Pixels/Depth` | 0 | Angle-of-repose gorge walls. Where a river cuts **through** a ridge, a fixed-width channel would leave a razor slit; instead the walls are graded back so the cut rises one channel `Depth` every this-many pixels, and a deeper cut opens a wider canyon. Min-only (it stops where the natural hillside is already gentler). 0 turns it off — the old slit. The flat channel floor itself is set by `Bed Width Fraction`, not here |
 | `Bed Width Fraction` | 0.35 | Trapezoid channel: the inner fraction of the half-width is a flat bed, the rest a `Profile Power`-shaped wall out to the bank. 0 = the old pure power curve; ~0.35 gives the real-world trapezium that the floodplain benches and the U/V valley slopes around |
 | `Levee Height` | 0 | Raised banks from deposited sediment. Off by default. When on, a levee builds **only on big rivers** (see Levee Min Width Ratio), is capped at the untouched ground so it can never dam the valley, and is broken by noise into natural crevasse-splay gaps — a low, wide ridge, not a wall |
 | `Levee Min Width Ratio` | 1.8 | A levee forms only where the local channel is at least this multiple of the nominal bank. Big rivers (Mississippi, Yellow) build them; streams and small rivers do not |
@@ -1814,6 +1811,37 @@ waterline described three times.
 | `Floodplain Depth Fraction` | 0.25 | How far the floodplain bench sits below the valley floor, as a fraction of `Depth` |
 | `Valley Seat Metres` | 40 | How far across the flow the carve looks for the lowest ground when seating the **bed elevation** — it does not move the channel (placement is the solver's job). The seek reaches the wider of this and `Bank Width` |
 | `Sea Level` | 0.35 | The waterline, normalised. The bed is never cut below it, and within one `Depth` of it the cut fades to nothing so the channel **rises to meet the sea at the shoreline** instead of arriving under the water as an open slot |
+
+#### Lake Basin
+Cuts a rugged, shelved lake basin into the terrain under a lake mask — the still-water
+counterpart to `River Carve`. Where `Lake Fill` decides *where* the lake is and how high it
+stands, `Lake Basin` shapes the *ground beneath it*: a dished floor that drops from a shallow
+wave-cut shelf at the shore to a rough deep bed, so a lake reads as a real basin instead of a
+flat disc pressed into the hillside. It only digs, never raises, so a mask edge that lands on a
+slope simply tapers its cut to nothing.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Unwired, there is nothing to shape and the node returns flat ground |
+| `Lake Mask` | in | Matrix | **yes** | The lake footprint — `Lake Fill`'s `Water Mask`, or a hand-painted `Shape`. **This is the node's only source of "where"**; unwired the mask reads zero and the terrain passes through untouched |
+| `Water Level` | in | Matrix | no | *Optional.* A per-cell water surface (from `Lake Fill`) the dish is measured down from. Unwired, the basin dishes from the local shore height |
+| `Height` | out | Matrix | — | Onward down the height chain, before the Output |
+
+**Shape the basin before `Lake Fill` reports depth, not after** — the fill measures how deep the
+water sits, so the dish has to exist first. Feed the same `Lake Mask` to both.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Max Depth` | 0.03 | Deepest the basin digs below its surface, normalised to world height |
+| `Shore Run Metres` | 120 | How far in from the shore the dish reaches full depth, in metres |
+| `Shelf Fraction` | 0.25 | How much of the shore-to-deep run is the shallow wave-cut shelf (a bench) before the floor drops away |
+| `Ruggedness` | 0.004 | Bed roughness amplitude, normalised. 0 is a smooth dish |
+| `Ruggedness Feature Metres` | 40 | Feature size of the bed roughness, in metres |
+| `Ruggedness Octaves` | 3 | Octaves of the bed roughness |
+| `Ruggedness Persistence` | 0.5 | Roughness persistence, 0–1 |
+| `Seed` | 12345 | Seed for the bed roughness, so a basin is identical on every rebuild |
 
 #### Swamp Basin
 Shapes a swamp — a low-energy, flat depression where a static water table sits at or just
@@ -2799,7 +2827,7 @@ optional; **`Biome` is the one that makes it work.**
 | `Wet Strength` | 1 | Full strength where wetness is 1 |
 | `Beach Enabled` | on | Paint a beach band around sea level |
 | `Beach Layer` | 3 | Which layer is sand |
-| `Sea Level` | 0.32 | Normalised height of the water plane |
+| `Sea Level` | 0.35 | Normalised height of the water plane |
 | `Beach Height` | 0.012 | How far above sea level the beach reaches |
 | `Beach Max Slope` | 18 | Beaches do not form on cliffs; above this the band is skipped |
 | `Snow Enabled` | on | Paint snow |
@@ -6131,7 +6159,7 @@ the water actually reaches.
 Hybrid Multifractal (Size 1500, Offset 0.7)
   → Droplet Erosion (Raindrops 60000, Lifetime 64, Inertia 0.03, Deposit 0.35)
   → River Network Trace (Channel Threshold 600)
-  → River Carve (Depth 0.015, Profile Power 1.8, Bed Flattening 0.7)
+  → River Carve (Depth 0.015, Profile Power 1.8, Bed Width Fraction 0.4)
   → Height Output
 ```
 

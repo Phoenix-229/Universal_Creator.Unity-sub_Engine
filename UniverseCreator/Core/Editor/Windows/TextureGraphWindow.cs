@@ -88,6 +88,7 @@ namespace UniverseCreator.Editor.Windows
 
             view = new UCGraphView();
             view.style.flexGrow = 1f;
+            view.HostWindow = this;   // so the add-node picker opens over this window
 
             // The one line that makes this a texture graph rather than a second
             // height graph. Everything else in this window is chrome.

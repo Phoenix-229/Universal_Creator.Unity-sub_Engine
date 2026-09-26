@@ -37,6 +37,7 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool terrainFoldout;
         private static bool layersFoldout;
         private static bool foliageFoldout;
+        private static bool vegPointerFoldout = true;
         private static bool treeLibFoldout;
         private static bool shrubLibFoldout;
         private static bool grassLibFoldout;
@@ -129,17 +130,7 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.Space(4);
             DrawLayerSettings(uc);
             EditorGUILayout.Space(4);
-            DrawFoliageSettings(uc);
-            EditorGUILayout.Space(4);
-            DrawTreeLibrary(uc);
-            EditorGUILayout.Space(4);
-            DrawShrubLibrary(uc);
-            EditorGUILayout.Space(4);
-            DrawGrassLibrary(uc);
-            EditorGUILayout.Space(4);
-            DrawObjectLibrary(uc);
-            EditorGUILayout.Space(4);
-            DrawScatterBudgets(uc);
+            DrawVegetationLibraryPointer(uc);
             EditorGUILayout.Space(4);
             DrawPerformanceSettings(uc);
             EditorGUILayout.Space(4);
@@ -677,6 +668,102 @@ namespace UniverseCreator.Editor.Inspectors
         // =====================================================================
         //  TREES, GRASS AND DETAIL
         // =====================================================================
+
+        // =====================================================================
+        //  VEGETATION LIBRARY - LIVES ON THE MANAGER, POINTED TO FROM HERE
+        //
+        //  The five vegetation sections (foliage render settings, the four
+        //  prototype lists, and the scatter budgets) used to draw inline in this
+        //  world inspector. They now live under the Vegetation manager's
+        //  inspector, which hosts THIS editor's own drawing code through
+        //  DrawHostedVegetationLibrary - so there is exactly one editor, one set
+        //  of load-bearing slider/focus-out/drag-commit helpers, and no second
+        //  copy to drift out of sync. The world inspector shows only a pointer.
+        // =====================================================================
+
+        /// <summary>
+        /// Replaces the inline vegetation sections on the world inspector with a
+        /// one-click jump to the manager that now hosts them.
+        /// </summary>
+        private void DrawVegetationLibraryPointer(UniverseCreatorObject uc)
+        {
+            vegPointerFoldout = Section(vegPointerFoldout, "Vegetation & Scatter", "View_LOD_High",
+                                        UCInspectorUI.HeaderAmber);
+            if (!vegPointerFoldout) return;
+
+            EditorGUI.indentLevel++;
+
+            UCVegetationSystemManager veg = UCVegetationSystemManager.ForWorld(uc.transform);
+
+            if (veg != null)
+            {
+                EditorGUILayout.HelpBox(
+                    "Trees, shrubs, grass, rocks and objects, their scatter budgets and the " +
+                    "foliage render settings are edited on the Vegetation manager for this world.",
+                    MessageType.Info);
+
+                if (GUILayout.Button("Edit on Vegetation Manager"))
+                {
+                    Selection.activeGameObject = veg.gameObject;
+                    EditorGUIUtility.PingObject(veg.gameObject);
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "No Vegetation manager under this world, so there is nowhere to edit the " +
+                    "scatter library. Add a Vegetation system to this world to author trees, " +
+                    "shrubs, grass and objects.",
+                    MessageType.Warning);
+            }
+
+            EditorGUI.indentLevel--;
+        }
+
+        /// <summary>
+        /// Draws the whole vegetation-authoring surface - foliage render settings,
+        /// the four prototype lists, and the scatter budgets - and commits any edit
+        /// exactly as the inline OnInspectorGUI path did. Called by the Vegetation
+        /// manager's inspector, which hosts this editor so the sections render there
+        /// while their code, and the fragile slider/focus-out helpers behind it,
+        /// stay owned in one place.
+        /// </summary>
+        public void DrawHostedVegetationLibrary(UniverseCreatorObject uc)
+        {
+            if (uc == null) return;
+
+            // This editor is a cached second instance owned by the manager; its
+            // transient authoring state (focused field, live slider, drag latch)
+            // is its own. Seed the per-pass state exactly as OnInspectorGUI does.
+            ucTarget = uc;
+            valueChanged = false;
+
+            DrawFoliageSettings(uc);
+            EditorGUILayout.Space(4);
+            DrawTreeLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawShrubLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawGrassLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawObjectLibrary(uc);
+            EditorGUILayout.Space(4);
+            DrawScatterBudgets(uc);
+
+            // Same commit contract as the inline path: validate, dirty, and only
+            // regenerate when the world opts into auto-regeneration. But this is the
+            // VEGETATION library, so it takes the read-only re-scatter path (T-VEGLAW):
+            // it re-dresses the existing terrain with the new prototypes instead of
+            // rebuilding heights, textures and hydrology. Contrast the inline field path
+            // (OnInspectorGUI), which may have changed a height/graph setting and so must
+            // still take the full Regenerate.
+            if (valueChanged)
+            {
+                uc.ValidateSettings();
+                EditorUtility.SetDirty(uc);
+                if (uc.autoRegenerate) Rescatter(uc, "Vegetation changed - re-scattering");
+            }
+        }
 
         private void DrawFoliageSettings(UniverseCreatorObject uc)
         {
@@ -1363,9 +1450,21 @@ namespace UniverseCreator.Editor.Inspectors
                 AsyncProgressUI.Track(uc, uc.CurrentTask, label);
         }
 
-        // =====================================================================
-        //  CONTROLS
-        // =====================================================================
+        // The vegetation path (T-VEGLAW). A library edit re-dresses the terrain that
+        // already exists instead of regenerating it: RescatterVegetation runs a
+        // read-only scatter pass over the live surface and only falls back to a full
+        // build when nothing has been baked yet. Same progress contract as Regenerate -
+        // the chunked re-scatter reports through the pump, so CurrentTask is null and
+        // there is nothing to hand the bar; the single-tile fallback still sets it.
+        private void Rescatter(UniverseCreatorObject uc, string label)
+        {
+            Debug.Log("[Universe Creator] " + label);
+            if (!uc.RescatterVegetation()) return;
+
+            if (uc.CurrentTask != null)
+                AsyncProgressUI.Track(uc, uc.CurrentTask, label);
+        }
+
 
         // Foldout header with an icon beside the arrow. A plain Foldout inside a box
         // rather than BeginFoldoutHeaderGroup, which has no room for the icon.

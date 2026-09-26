@@ -118,6 +118,21 @@ CBUFFER_START(UCTerrain)
     half4  _SlopeColor;
     float  _SlopeTriplanarScale;
 
+    // -- altitude-aware cliff rock (modulates the slope/cliff mask) -------
+    float  _CliffRockAltitude;
+    float  _CliffRockAltitudeRange;
+    half   _CliffLowAltGrass;
+
+    // -- beach / shoreline (keyword _UC_BEACH_ON) ------------------------
+    half   _EnableBeach;
+    half4  _BeachColor;
+    float  _SeaLevel;
+    float  _BeachHeight;
+    float  _BeachFalloff;
+    half   _BeachSlopeLimit;
+    half   _BeachSmoothness;
+    float  _BeachScale;
+
     // -- snow (keyword _UC_SNOW_ON) --------------------------------------
     half   _EnableSnow;
     half4  _SnowColor;
@@ -128,6 +143,7 @@ CBUFFER_START(UCTerrain)
     half   _SnowCoverage;
     half   _SnowSmoothness;
     half   _SnowNormalStrength;
+    half   _SnowOcclusion;
     float  _SnowTriplanarScale;
 
     // -- wetness ---------------------------------------------------------
@@ -185,6 +201,11 @@ CBUFFER_START(UCTerrain)
     half   _EnableDistanceFade;
     float  _DistanceFadeStart;
     float  _DistanceFadeEnd;
+    half   _DistanceRoughen;
+    half   _EnableTileBreakup;
+    float  _TileBreakupScale;
+    half   _TileBreakupStrength;
+    float  _TileBreakupDistance;
 
     // -- colour grade ----------------------------------------------------
     half   _Saturation;
@@ -231,6 +252,7 @@ TEXTURE2D(_SlopeNormal);
 TEXTURE2D(_SnowTex);
 TEXTURE2D(_SnowNormal);
 TEXTURE2D(_MudTex);
+TEXTURE2D(_BeachTex);
 TEXTURE2D(_DetailTex);
 TEXTURE2D(_GradientTex);
 TEXTURE2D(_AOMap);

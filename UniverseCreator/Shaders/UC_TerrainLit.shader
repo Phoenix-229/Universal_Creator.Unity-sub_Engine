@@ -115,6 +115,20 @@ Shader "UniverseCreator/TerrainLit"
         _SlopeMetallic      ("Slope Metallic", Range(0.0, 1.0)) = 0.0
         _SlopeNormalStrength("Slope Normal Strength", Range(0.0, 4.0)) = 1.0
         _SlopeTriplanarScale("Slope Triplanar Scale (m)", Float) = 6.0
+        _CliffRockAltitude     ("Cliff Rock Altitude (m)", Float) = 60.0
+        _CliffRockAltitudeRange("Cliff Rock Altitude Range (m)", Float) = 80.0
+        _CliffLowAltGrass      ("Cliff Low-Alt Grass Fraction", Range(0.0, 1.0)) = 0.4
+
+        [Header(Beach and Shoreline)]
+        [ToggleUI] _EnableBeach ("Beach Band", Float) = 0.0
+        _BeachTex ("Beach Sand Albedo", 2D) = "white" {}
+        _BeachColor ("Beach Tint", Color) = (1,1,1,1)
+        _SeaLevel ("Sea Level (m)", Float) = 0.0
+        _BeachHeight ("Beach Berm Height (m)", Float) = 4.0
+        _BeachFalloff ("Beach Top Falloff (m)", Float) = 2.0
+        _BeachSlopeLimit ("Beach Slope Limit (deg)", Range(0.0, 90.0)) = 20.0
+        _BeachSmoothness ("Beach Smoothness", Range(0.0, 1.0)) = 0.4
+        _BeachScale ("Beach Scale (m)", Float) = 4.0
 
         [Header(Snow)]
         [ToggleUI] _EnableSnow ("Snow Cover", Float) = 0.0
@@ -128,6 +142,7 @@ Shader "UniverseCreator/TerrainLit"
         _SnowCoverage       ("Snow Coverage", Range(0.0, 1.0)) = 1.0
         _SnowSmoothness     ("Snow Smoothness", Range(0.0, 1.0)) = 0.55
         _SnowNormalStrength ("Snow Normal Strength", Range(0.0, 4.0)) = 0.6
+        _SnowOcclusion      ("Snow Keeps Ground AO", Range(0.0, 1.0)) = 0.0
         _SnowTriplanarScale ("Snow Triplanar Scale (m)", Float) = 8.0
 
         [Header(Wetness)]
@@ -185,6 +200,13 @@ Shader "UniverseCreator/TerrainLit"
         [ToggleUI] _EnableDistanceFade ("Distance Fade", Float) = 0.0
         _DistanceFadeStart  ("Fade Start (m)", Float) = 180.0
         _DistanceFadeEnd    ("Fade End (m)", Float) = 900.0
+        _DistanceRoughen    ("Distance Roughening", Range(0.0, 1.0)) = 0.0
+
+        [Header(Tiling Breakup)]
+        [ToggleUI] _EnableTileBreakup ("Tiling Breakup", Float) = 0.0
+        _TileBreakupScale    ("Breakup Wavelength (m)", Float) = 35.0
+        _TileBreakupStrength ("Breakup Strength", Range(0.0, 1.0)) = 0.35
+        _TileBreakupDistance ("Breakup Start (m)", Float) = 25.0
 
         [Header(Colour Grade)]
         _Saturation         ("Saturation", Range(0.0, 2.0)) = 1.0
@@ -311,6 +333,7 @@ Shader "UniverseCreator/TerrainLit"
             #pragma shader_feature_local_fragment __ _UC_GRADIENT_ON
             #pragma shader_feature_local_fragment __ _UC_MUD_ON
             #pragma shader_feature_local_fragment __ _UC_DETAIL_ON
+            #pragma shader_feature_local_fragment __ _UC_BEACH_ON
             #pragma shader_feature_local_fragment __ _UC_AOMAP_ON
             #pragma shader_feature_local_fragment __ _UC_EMISSION_ON
 

@@ -22,7 +22,26 @@ namespace UniverseCreator.Nodes.Utilities
         /// <summary>Channel name. A PortalIn with the same channel receives this output.</summary>
         public string channel = "default";
 
-        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
+        /// <summary>
+        /// The kind of data this portal carries. Set it to the SAME type as the
+        /// PortalIn on the matching channel; the socket is coloured by it. Defaults
+        /// to Matrix so portals saved before this field existed stay height portals.
+        /// </summary>
+        public PortType portType = PortType.Matrix;
+
+        [System.NonSerialized] private PortType builtType = (PortType)(-1);
+        [System.NonSerialized] private Port[] cachedIn;
+
+        public override Port[] GetInputs()
+        {
+            if (cachedIn == null || builtType != portType)
+            {
+                builtType = portType;
+                cachedIn = PortalRouting.BuildPortArray(portType, PortDirection.Input);
+            }
+            return cachedIn;
+        }
+
         public override Port[] GetOutputs() { return SharedPorts.None; }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)

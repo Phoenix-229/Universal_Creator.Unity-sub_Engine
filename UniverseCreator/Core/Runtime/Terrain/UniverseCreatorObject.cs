@@ -367,7 +367,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         [Tooltip("Capture hand-sculpted height changes before regenerating, so they " +
                  "survive the graph re-run. Off means the graph output replaces them.")]
-        public bool captureManualEditsOnRegenerate = false;
+        public bool captureManualEditsOnRegenerate = true;
 
         // =====================================================================
         //  GENERATION STATE
@@ -429,6 +429,24 @@ namespace UniverseCreator.TerrainSystem
                 if (cm == null) return false;
 
                 cm.Initialize(this);
+
+                // GAP-1. The graphless path is a regeneration path too, so it has to
+                // lift a hand sculpt out before RebuildLayout can discard it - otherwise
+                // the C-04 promise below ("the one place... every regeneration path
+                // funnels through here") was quietly false for a graphless world. This
+                // MUST run before RebuildLayout: a committed resolution or preview-quality
+                // change makes EnsureFlatDataAsync drop the mismatched heightfield and
+                // re-seed flat, nulling appliedHeights - and CaptureManualEdits skips any
+                // cell whose live resolution no longer matches its baseline, so a capture
+                // afterwards would find nothing to lift. Taken here, the delta lands in
+                // the override layer at the old sample scale and is rescaled back on the
+                // next apply, so a graphless resolution change preserves the sculpt rather
+                // than erasing it. Same single flag as the graphed path below, so the
+                // capture policy stays one policy. Preservation, not on-screen restore:
+                // a still-graphless surface stays flat until the next bake re-applies the
+                // layer - exactly the C-04 contract ("survives connecting a graph").
+                if (captureManualEditsOnRegenerate) cm.CaptureManualEdits();
+
                 cm.RebuildLayout();
                 return false;
             }
@@ -624,6 +642,38 @@ namespace UniverseCreator.TerrainSystem
         {
             ChunkManager cm = Chunks;
             return cm != null && cm.PumpCompleted();
+        }
+
+        /// <summary>
+        /// The inspector vegetation path (T-VEGLAW). A vegetation-library edit must NOT
+        /// regenerate the terrain: no height, texture or hydrology rebuild of any chunk.
+        /// It re-applies the scatter prototypes over the EXISTING surface, reading that
+        /// surface rather than rewriting it - "inspector alone does not cause the terrain
+        /// chunk regeneration, it just reads it." Only the procedural graph path is
+        /// allowed to regenerate terrain products.
+        /// </summary>
+        /// <remarks>
+        /// Falls back to a full <see cref="RebuildChunks"/> in exactly one case: nothing
+        /// has been baked yet, so there is no existing terrain for a read-only re-scatter
+        /// to stand on. That first bake is the procedural path doing its one legitimate
+        /// regen; every edit after it re-scatters in place.
+        /// </remarks>
+        /// <returns>True if a re-scatter (or the first-build fallback) was started.</returns>
+        public bool RescatterVegetation()
+        {
+            ChunkManager cm = Chunks;
+
+            // No chunk system in the hierarchy: the single-tile fallback is the only
+            // surface there is, and it has no read-only scatter path, so a bare root
+            // still previews through the full regenerate.
+            if (cm == null) return RegenerateAsync();
+
+            cm.Initialize(this);
+
+            // The read-only pass over the terrain that already exists. Only when there is
+            // nothing baked to re-dress does this hand off to a full build.
+            if (cm.RescatterAll()) return true;
+            return RebuildChunks();
         }
 
         // =====================================================================

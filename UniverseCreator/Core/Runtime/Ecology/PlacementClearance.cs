@@ -138,6 +138,39 @@ namespace UniverseCreator.Ecology
         }
 
         /// <summary>
+        /// T-PLACE. The species-independent half of the placement law: ground too
+        /// steep reads as rock and carries no plant of any kind, and the world's
+        /// altitude band rules out anything below <c>minAltitudeM</c> or above the
+        /// <c>maxAltitudeM</c> backstop. Tested once per candidate BEFORE a species is
+        /// chosen, because the answer does not depend on which species would have won -
+        /// a maple is no more able to stand on a cliff face than a pine, so asking per
+        /// species would be the same rejection computed N times.
+        ///
+        /// Slope is the shipped meaning of "rock" for vegetation placement
+        /// (UCVegetationSystemManager.maxSlopeDegrees: "past this the slope reads as
+        /// rock"), which is why this is a slope test and not a control-map read: the
+        /// placement pass runs on a worker holding the height field, not the painted
+        /// splat. A non-positive cap is read as "no limit" rather than "reject all", so
+        /// a settings block that leaves a gate at zero does not empty the world.
+        /// </summary>
+        public static bool TerrainAdmits(in EcoSampleSettings settings,
+                                          in EnvironmentSample site)
+        {
+            if (settings.maxSlopeDeg > 0f && site.slopeDeg > settings.maxSlopeDeg)
+                return false;
+
+            // minAltitudeM defaults to sea level and is a real floor - nothing grows
+            // below it, which is also where standing water begins. maxAltitudeM is a
+            // backstop above the temperature treeline, so zero means "no ceiling"
+            // rather than "nothing grows anywhere".
+            if (site.altitudeM < settings.minAltitudeM) return false;
+            if (settings.maxAltitudeM > 0f && site.altitudeM > settings.maxAltitudeM)
+                return false;
+
+            return true;
+        }
+
+        /// <summary>
         /// Both gates in the order that rejects fastest. Cut regions are tested first
         /// because the test is a handful of compares against a short list, where the
         /// water test reads several sample fields.

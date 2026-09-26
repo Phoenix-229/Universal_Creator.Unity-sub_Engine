@@ -493,6 +493,26 @@ namespace UniverseCreator.Editor.Inspectors
                 "debugDrawSuitability", "debugSpeciesIndex", "debugShowLimitingFactor")
         };
 
+        // A cached editor over the world object. The "Prototype library" panel
+        // below hosts the world inspector's own vegetation sections through it
+        // rather than drawing a second copy - so trees, shrubs, grass, objects,
+        // their budgets and the foliage settings are authored here while their
+        // code, and the load-bearing slider/focus-out/drag-commit helpers behind
+        // it, stay owned in one place. Rebuilt when the world under us changes,
+        // and destroyed in OnDisable so it never outlives this inspector.
+        private UnityEditor.Editor hostedWorldEditor;
+        private UniverseCreatorObject hostedWorld;
+
+        private void OnDisable()
+        {
+            if (hostedWorldEditor != null)
+            {
+                Object.DestroyImmediate(hostedWorldEditor);
+                hostedWorldEditor = null;
+                hostedWorld = null;
+            }
+        }
+
         public override void OnInspectorGUI()
         {
             UCGroupedInspector.Draw(
@@ -518,11 +538,12 @@ namespace UniverseCreator.Editor.Inspectors
             // diagnostic and not the whole inspector; see UCGroupedInspector.Panel.
             UCGroupedInspector.Panel("Resolved", () => DrawResolvedReadout(veg));
 
-            // Where prototypes are authored (V-53). This inspector deliberately draws
-            // no prototype list: the four lists live on the world object and are edited
-            // there once, so this is a link to that one place rather than a second
-            // editor that would drift from it.
-            UCGroupedInspector.Panel("Prototype library", () => DrawLibraryLink(veg));
+            // Where prototypes are authored (V-53). The four prototype lists, their
+            // scatter budgets and the foliage render settings now draw HERE, hosted
+            // from the world inspector's own editor so there is still exactly one copy
+            // of that code and its slider/focus-out helpers - this panel renders it,
+            // the world object stores it.
+            UCGroupedInspector.Panel("Prototype library", () => DrawHostedLibrary(veg));
 
             // Pre-build validation (V-51). Drawn after the resolved readout, because
             // a warning reads better once the author has seen what their dials
@@ -625,6 +646,59 @@ namespace UniverseCreator.Editor.Inspectors
                     "Creator world.",
                     MessageType.Info);
             }
+        }
+
+        /// <summary>
+        /// Hosts the world inspector's own vegetation sections inside this panel
+        /// (V-53 revised). The world object still STORES the four prototype lists,
+        /// budgets and foliage settings; this draws the world editor's authoring
+        /// surface for them so an author edits vegetation on the Vegetation manager
+        /// while the code and its load-bearing helpers stay in one editor. When
+        /// there is no world above the manager it falls back to the link panel,
+        /// which explains where the library should live.
+        /// </summary>
+        private void DrawHostedLibrary(UCVegetationSystemManager v)
+        {
+            UniverseCreatorObject world = v.World;
+
+            if (world == null)
+            {
+                DrawLibraryLink(v);
+                return;
+            }
+
+            // Lazily build, or rebuild if the world under us changed, the cached
+            // editor. CreateEditor over a UniverseCreatorObject resolves to its
+            // UniverseCreatorInspector, which owns DrawHostedVegetationLibrary.
+            if (hostedWorldEditor == null || hostedWorld != world)
+            {
+                if (hostedWorldEditor != null) Object.DestroyImmediate(hostedWorldEditor);
+                hostedWorldEditor = UnityEditor.Editor.CreateEditor(world);
+                hostedWorld = world;
+            }
+
+            UniverseCreatorInspector host = hostedWorldEditor as UniverseCreatorInspector;
+            if (host == null)
+            {
+                // CustomEditor resolution failed; show the link rather than nothing.
+                DrawLibraryLink(v);
+                return;
+            }
+
+            EditorGUILayout.Space(2);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField(
+                    "Authored here; stored on the world object.", EditorStyles.miniLabel);
+
+                if (GUILayout.Button("Select World", GUILayout.Width(96)))
+                {
+                    Selection.activeGameObject = world.gameObject;
+                    EditorGUIUtility.PingObject(world.gameObject);
+                }
+            }
+
+            host.DrawHostedVegetationLibrary(world);
         }
 
         /// <summary>

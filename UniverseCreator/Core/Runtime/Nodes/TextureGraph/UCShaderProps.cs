@@ -81,6 +81,7 @@ namespace UniverseCreator.Nodes
         public const string SnowCoverage = "_SnowCoverage";
         public const string SnowSmoothness = "_SnowSmoothness";
         public const string SnowNormalStrength = "_SnowNormalStrength";
+        public const string SnowOcclusion = "_SnowOcclusion";
         public const string SnowTriplanarScale = "_SnowTriplanarScale";
 
         // -- wetness ---------------------------------------------------------

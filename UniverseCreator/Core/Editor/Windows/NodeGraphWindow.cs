@@ -59,6 +59,7 @@ namespace UniverseCreator.Editor.Windows
 
             view = new UCGraphView();
             view.style.flexGrow = 1f;
+            view.HostWindow = this;   // so the add-node picker opens over this window
             view.StructureChanged += RefreshChrome;
             rootVisualElement.Add(view);
 

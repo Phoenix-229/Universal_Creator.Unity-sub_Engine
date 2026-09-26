@@ -23,14 +23,37 @@ namespace UniverseCreator.Nodes.Utilities
         /// <summary>Channel name. A PortalOut with the same channel feeds this input.</summary>
         public string channel = "default";
 
+        /// <summary>
+        /// The kind of data this portal carries. The portal is a pure pass-through,
+        /// so it can route any currency the graph uses - not height alone. Both ends
+        /// of a channel should be set to the same type; the socket is coloured and
+        /// named by it. Defaults to Matrix, so every portal saved before this field
+        /// existed stays a height portal on load.
+        /// </summary>
+        public PortType portType = PortType.Matrix;
+
+        // Cached so GetOutputs does not allocate on every editor repaint; rebuilt
+        // only when the chosen type actually changes.
+        [System.NonSerialized] private PortType builtType = (PortType)(-1);
+        [System.NonSerialized] private Port[] cachedOut;
+
         public override Port[] GetInputs() { return SharedPorts.None; }
-        public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
+
+        public override Port[] GetOutputs()
+        {
+            if (cachedOut == null || builtType != portType)
+            {
+                builtType = portType;
+                cachedOut = PortalRouting.BuildPortArray(portType, PortDirection.Output);
+            }
+            return cachedOut;
+        }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             if (string.IsNullOrEmpty(channel))
             {
-                return tile.CreateMatrix();
+                return PortalRouting.BlankProduct(portType, tile);
             }
 
             // Find the PortalOut with matching channel. ReferenceEquals rather than
@@ -38,7 +61,7 @@ namespace UniverseCreator.Nodes.Utilities
             // whose == operator marshals into native code.
             if (object.ReferenceEquals(tile.Graph, null))
             {
-                return tile.CreateMatrix();
+                return PortalRouting.BlankProduct(portType, tile);
             }
 
             PortalOutNode partner = null;
@@ -54,19 +77,20 @@ namespace UniverseCreator.Nodes.Utilities
 
             if (partner == null)
             {
-                // No partner found: return blank rather than throwing, so a
+                // No partner found: return a typed blank rather than throwing, so a
                 // disconnected portal does not collapse the entire evaluation.
-                return tile.CreateMatrix();
+                return PortalRouting.BlankProduct(portType, tile);
             }
 
-            // Pull whatever feeds the partner's input port. Routing through
-            // tile.PullInput keeps the evaluator's cache and its re-entry guard in
-            // play, so a portal wired back into its own chain degrades to a blank
-            // field rather than recursing.
-            Matrix result = tile.PullInput(partner, 0, stop) as Matrix;
-            if (result == null) return tile.CreateMatrix();
+            // Pull whatever feeds the partner's input port and forward it AS-IS,
+            // deep-copied. Routing through tile.PullInput keeps the evaluator's cache
+            // and its re-entry guard in play, so a portal wired back into its own
+            // chain degrades to a blank field rather than recursing. No forced cast:
+            // the portal carries whatever type the user wired, not height alone.
+            object pulled = tile.PullInput(partner, 0, stop);
+            if (pulled == null) return PortalRouting.BlankProduct(portType, tile);
 
-            return new Matrix(result);
+            return PortalRouting.CopyProduct(pulled);
         }
     }
 }

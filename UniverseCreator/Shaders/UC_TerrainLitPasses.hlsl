@@ -237,6 +237,33 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     float2 uvControl = input.uvControlAndLM.xy;
     half4 splatControl = SAMPLE_TEXTURE2D(_Control, sampler_Control, uvControl);
 
+    // ---- 1b. tiling break-up: noise-perturbed UV domain warp ----
+    // A repeating albedo/normal tile reads as a visible grid once the camera is
+    // far enough that one tile spans only a few pixels and many repeats sit side
+    // by side. The film/landscape fix is not a costlier sampler but to WANDER the
+    // sample coordinate with a low-frequency noise field, so the seams drift apart
+    // instead of lining up. Two value-noise taps, applied once to the shared UV so
+    // all twelve layer samples (albedo/mask/normal x4) stay mutually registered.
+    // Gated to fade IN with distance: near ground keeps crisp detail (the detail
+    // overlay, item 8, already breaks up close-range tiling), the macro warp only
+    // grows where the repeat is actually visible.
+    if (_EnableTileBreakup > 0.5h)
+    {
+        float  bkDist  = length(GetCameraPositionWS() - input.positionWS);
+        float2 warpUV  = input.positionWS.xz / max(_TileBreakupScale, 0.001);
+        // Centre both noise channels on 0 so the warp pushes both ways, not just +.
+        float2 warp    = float2(UCValueNoise(warpUV), UCValueNoise(warpUV + 31.7)) - 0.5;
+        // 0 up to the start distance, ramping to full over the same distance again,
+        // so one property sets both onset and how quickly it reaches strength.
+        float  bkFade  = saturate((bkDist - _TileBreakupDistance)
+                                 / max(_TileBreakupDistance, 1.0));
+        float2 bkOff   = warp * _TileBreakupStrength * bkFade;
+        input.uvSplat01.xy += bkOff;
+        input.uvSplat01.zw += bkOff;
+        input.uvSplat23.xy += bkOff;
+        input.uvSplat23.zw += bkOff;
+    }
+
     // ---- layer albedo + smoothness ----
     half4 albedo0 = SAMPLE_TEXTURE2D(_Splat0, sampler_Splat0, input.uvSplat01.xy);
     half4 albedo1 = SAMPLE_TEXTURE2D(_Splat1, sampler_Splat1, input.uvSplat01.zw);
@@ -367,6 +394,32 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
     }
 #endif
 
+    // ---- 4b. beach / shoreline sand ----
+    // A real shoreline is a berm: a wedge of sand that starts at the waterline
+    // and thins out over a berm height, laid only where the ground is gentle
+    // enough for waves to have graded it. Steep rock meeting the sea stays rock.
+    // Sand below the swash line is wet - darker and markedly more specular - so
+    // its smoothness lifts toward the water, which is what reads as a wet beach.
+#ifdef _UC_BEACH_ON
+    if (_EnableBeach > 0.5h)
+    {
+        float beachTop   = _SeaLevel + max(_BeachHeight, 0.0001);
+        half  beachAlt   = (half)saturate((beachTop - worldY) / max(_BeachFalloff, 0.0001));
+        half  beachFlat  = 1.0h - saturate(slopeDeg / max(_BeachSlopeLimit, 0.001h));
+        half  aboveWater = worldY >= _SeaLevel ? 1.0h : 0.0h;
+        half  beachMask  = saturate(beachAlt * beachFlat * aboveWater);
+
+        half3 beachTex = SAMPLE_TEXTURE2D(_BeachTex, sampler_linear_repeat,
+                                          input.positionWS.xz / max(_BeachScale, 0.001)).rgb;
+        half  wet = 1.0h - (half)saturate((worldY - _SeaLevel) / max(_BeachHeight, 0.0001));
+
+        albedo     = lerp(albedo, beachTex * _BeachColor.rgb, beachMask);
+        albedo     = lerp(albedo, albedo * 0.72h, beachMask * wet);   // wet sand darkens
+        smoothness = lerp(smoothness, _BeachSmoothness * (0.5h + 0.5h * wet), beachMask);
+        metallic   = lerp(metallic, 0.0h, beachMask);
+    }
+#endif
+
     // ---- 5. mud ----
     // Mud is ground behaviour: it needs somewhere flat enough to stay put and a
     // recess for water to have carried it into. Both conditions, then a plain
@@ -397,6 +450,21 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
         half slopeEnd   = max(_SlopeAngleStart, _SlopeAngleEnd);
         half slopeMask  = saturate((slopeDeg - slopeStart) / max(slopeEnd - slopeStart, 0.001h));
         slopeMask = smoothstep(0.0h, 1.0h, slopeMask);
+
+        // Altitude-aware rock (real-world): a steep slope LOW on a hill keeps
+        // soil and clinging vegetation - it is not bare rock just because it is
+        // steep. Bare rock/scree belongs to the cold, high, near-nival zone just
+        // below the snow line. altBoost ramps 0->1 from _CliffRockAltitude over
+        // _CliffRockAltitudeRange (defaulted to meet the snow line), so exposed
+        // rock climbs toward the ice. Low down, _CliffLowAltGrass of the cliff is
+        // held back as grass, broken into patches by the macro noise so it reads
+        // as vegetation clinging to rock rather than a uniform half-transparent
+        // wash; up high the grass fraction vanishes and the cliff goes all rock.
+        float cliffRange = max(_CliffRockAltitudeRange, 0.0001);
+        half  altBoost   = (half)saturate((worldY - _CliffRockAltitude) / cliffRange);
+        half  rockNoise  = (half)UCMacroNoise(input.positionWS.xz * 0.08);
+        half  grassKeep  = _CliffLowAltGrass * (1.0h - altBoost) * rockNoise;
+        slopeMask = saturate(slopeMask - grassKeep);
 
         half3 triW = UCTriplanarWeights(geoNormalWS);
 
@@ -449,9 +517,14 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
         normalWS   = normalize(lerp(normalWS, snowNormalWS, snowMask));
         smoothness = lerp(smoothness, _SnowSmoothness, snowMask);
         metallic   = lerp(metallic, 0.0h, snowMask);
-        // Snow fills crevices. Leaving the underlying AO in place is what makes
-        // rendered snow read as a white sticker over rock instead of as depth.
-        occlusion  = lerp(occlusion, 1.0h, snowMask);
+        // Snow fills crevices, so by default it lifts the ground's ambient occlusion
+        // away (occlusion -> 1) - that is what makes deep snow read as filled-in depth
+        // instead of a white sticker over rock. _SnowOcclusion (0..1) dials how much of
+        // that underlying AO the snow keeps instead: 0 = deep fresh snow, filled and
+        // bright (the old fixed behaviour); 1 = thin, wind-scoured snow that still reads
+        // the rough surface beneath it.
+        half snowOcc = lerp(1.0h, occlusion, _SnowOcclusion);
+        occlusion  = lerp(occlusion, snowOcc, snowMask);
     }
 #endif
 
@@ -555,6 +628,16 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
                                      / max(_RoughnessVariationScale, 0.001)) - 0.5h;
         smoothness = saturate(smoothness + rv * 2.0h * _RoughnessVariationAmount);
     }
+
+    // Distance roughening: far ground trends rougher so sub-pixel specular stops
+    // sparkling once a surface is smaller than a pixel's footprint (the standard
+    // specular-aliasing suppression, done per-pixel). Reuses the SAME distanceFade
+    // the detail normal already fades by, so near ground is untouched and the
+    // onset lines up exactly with the normal fade - it is a no-op unless Distance
+    // Fade is enabled AND this amount is raised.
+    if (_DistanceRoughen > 0.001h)
+        smoothness = lerp(smoothness, smoothness * (1.0h - _DistanceRoughen), distanceFade);
+
     metallic = saturate(metallic * _MetallicScale);
 
     // ---- 13. emission ----

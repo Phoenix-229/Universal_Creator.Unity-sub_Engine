@@ -122,8 +122,9 @@ namespace UniverseCreator
         /// must not touch the Unity API.
         /// </param>
         /// <param name="isCancelled">
-        /// Optional cancellation probe, checked once per grid row. Returning true
-        /// stops the solve and returns whatever was accepted so far.
+        /// Optional cancellation probe, checked once per grid row and again every
+        /// 4096 cells within a row. Returning true stops the solve and returns
+        /// whatever was accepted so far.
         /// </param>
         public static List<ScatterCandidate> Solve(
             PoissonSettings settings,
@@ -146,6 +147,31 @@ namespace UniverseCreator
             // from its side neighbour, so rejection still has to run - but the
             // count of tests per candidate stays at a handful.
             float cellSize = spacing;
+
+            // Runaway guard (P-HANG root cause). The grid iterates one cell at a
+            // time and each cell can contribute at most one accepted point, while
+            // the whole solve accepts at most maxPoints. So a grid finer than what
+            // maxPoints points could ever fill is pure wasted iteration: at the
+            // 0.01 m spacing floor a 256 m tile is ~6.5e8 cells, and when the
+            // accept predicate rejects nearly all of them - a species pinned to a
+            // narrow height or slope band - the loop scans every one of those cells
+            // to accept a handful, which is the "stuck on chunk 1 at 0 %" hang.
+            //
+            // Bound the cell to the finest USEFUL size, sqrt(tileArea / maxPoints),
+            // so the grid never holds materially more than maxPoints cells. This is
+            // a no-op at every realistic density (spacing is already coarser than
+            // this floor until roughly 1.8 M instances per km^2), so normal scatter
+            // results are byte-identical. It bites only in the pathological regime
+            // that used to hang, and even there the total is still capped at
+            // maxPoints, unchanged - only the wasted empty-cell scan is removed.
+            //
+            // tileArea and maxPoints are identical for every chunk of a species, so
+            // cellSize is identical across a seam and the absolute-world cell grid
+            // (Floor(worldMinX / cellSize)) stays aligned. Spacing rejection below
+            // keeps using the true `spacing`, so the requested minimum distance is
+            // never loosened by this clamp.
+            float usefulCell = Mathf.Sqrt((worldWidth * worldDepth) / maxPoints);
+            if (usefulCell > cellSize) cellSize = usefulCell;
 
             // Integer cell coordinates in ABSOLUTE world space. Deriving them
             // from the world origin rather than the tile origin is what makes a
@@ -178,6 +204,14 @@ namespace UniverseCreator
             float worldMaxX = worldMinX + worldWidth;
             float worldMaxZ = worldMinZ + worldDepth;
 
+            // Scanned-cell counter drives an in-row cancellation probe. The
+            // per-row check below is already responsive once the runaway guard
+            // has bounded a row to ~sqrt(maxPoints) cells, but a very large
+            // maxPoints can still make a single row long, so also probe every
+            // 4096 cells. The mask is cheap and the probe itself is only called
+            // when a delegate was supplied.
+            long cellsScanned = 0;
+
             for (int cz = cellMinZ; cz <= cellMaxZ; cz++)
             {
                 if (isCancelled != null && isCancelled()) return results;
@@ -186,6 +220,8 @@ namespace UniverseCreator
                 for (int cx = cellMinX; cx <= cellMaxX; cx++)
                 {
                     if (results.Count >= maxPoints) break;
+                    if ((++cellsScanned & 4095L) == 0L &&
+                        isCancelled != null && isCancelled()) return results;
 
                     for (int a = 0; a < attempts; a++)
                     {

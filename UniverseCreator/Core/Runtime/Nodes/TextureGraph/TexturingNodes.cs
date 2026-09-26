@@ -56,7 +56,7 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Name shown on the generated TerrainLayer asset.")]
         public string layerName = "Layer";
 
-        [Tooltip("Base colour texture. Leave empty for a flat tinted layer.")]
+        [Tooltip("Albedo / Base Color texture. Leave empty for a flat tinted layer.")]
         public Texture2D albedoTexture;
 
         [Tooltip("Multiplied over the albedo. White leaves the texture untouched.")]
@@ -74,7 +74,7 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("0 for everything except bare metal ore. Terrain is almost never metallic.")]
         public float metallic;
 
-        [Tooltip("0 is chalk, 1 is glass. Dry soil sits near 0.2, wet rock near 0.6.")]
+        [Tooltip("Smoothness (A) = 1 - roughness. 0 is chalk, 1 is glass. Dry soil sits near 0.2, wet rock near 0.6.")]
         public float smoothness = 0.35f;
 
         [Tooltip("Raises this layer in the height blend so it reads through its neighbours.")]
@@ -153,8 +153,32 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Depth of the normal map. 1 is as authored.")]
         public float strength = 1f;
 
-        [Tooltip("Mask map: R metallic, G occlusion, B height, A smoothness. Optional.")]
+        [Tooltip("Pre-packed mask map (R metallic, G occlusion, B height, A smoothness). " +
+                 "Optional - if you have the four channels as separate maps, leave this empty and " +
+                 "drop them into the Metallic / AO / Height / Roughness slots below instead.")]
         public Texture2D maskTexture;
+
+        // Individual PBR channel slots. A downloaded set ships these as four separate
+        // greyscale PNGs; wiring them here packs them into the mask URP wants, using
+        // the SAME packer as the Mask Map Packer node. Named with their channel and
+        // abbreviation so there is no guessing what each slot is for.
+        [Tooltip("Metallic map -> packed into mask R. Terrain is almost never metallic; leave empty for ground.")]
+        public Texture2D metallicMap;
+
+        [Tooltip("Ambient Occlusion (AO) map -> packed into mask G. Bright = fully lit, dark = shadowed crevices.")]
+        public Texture2D ambientOcclusionMap;
+
+        [Tooltip("Height / Displacement map -> packed into mask B. Drives Height Blend so tall detail punches through.")]
+        public Texture2D heightDisplacementMap;
+
+        [Tooltip("Roughness map -> inverted into mask A as smoothness (smoothness = 1 - roughness).")]
+        public Texture2D roughnessMap;
+
+        [Tooltip("Tick if the map in the Roughness slot is ALREADY smoothness, not roughness. Then A is used as-is.")]
+        public bool roughnessIsSmoothness;
+
+        [Tooltip("Packed mask resolution in pixels, rounded to a power of two. Used only when packing the slots above.")]
+        public int maskResolution = 1024;
 
         [Tooltip("Override the layer tiling. Leave at zero to inherit the layer's own.")]
         public Vector2 tileSizeMetresOverride = Vector2.zero;
@@ -173,8 +197,27 @@ namespace UniverseCreator.Nodes.Texturing
             else if (normalTexture != null) layer.normal = new TextureRef(normalTexture);
 
             TextureRef wiredMask = GetInputTexture(tile, 2, stop);
-            if (wiredMask != null && wiredMask.texture != null) layer.mask = wiredMask;
-            else if (maskTexture != null) layer.mask = new TextureRef(maskTexture);
+            if (wiredMask != null && wiredMask.texture != null)
+            {
+                layer.mask = wiredMask;
+            }
+            else if (maskTexture != null)
+            {
+                layer.mask = new TextureRef(maskTexture);
+            }
+            else
+            {
+                // No pre-packed mask wired or dropped in: pack whatever individual
+                // PBR channels the user supplied, through the SAME packer the Mask
+                // Map Packer node uses, so channel order and the 1 - roughness
+                // conversion can never diverge between the two paths. Returns null
+                // when no channel is set, leaving the layer's own mask untouched.
+                TextureRef packed = MaskMapPackerNode.PackMask(
+                    metallicMap, ambientOcclusionMap, heightDisplacementMap, roughnessMap,
+                    0f, 1f, 0.5f, 0.5f,
+                    roughnessIsSmoothness, maskResolution, stop);
+                if (packed != null) layer.mask = packed;
+            }
 
             layer.normalStrength = Mathf.Clamp(strength, 0f, 4f);
 

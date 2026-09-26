@@ -57,6 +57,15 @@ namespace UniverseCreator.Editor.GraphUI
         /// </remarks>
         public System.Func<NodeCategory, bool> CategoryFilter;
 
+        /// <summary>
+        /// The EditorWindow hosting this view, set by the window right after it is
+        /// constructed. Used only to turn a panel-space point into a screen point so
+        /// the add-node SearchWindow opens ON this window instead of drifting off to
+        /// the side: the search window wants OS-screen coordinates, and the window's
+        /// own <c>position</c> is the only reliable screen origin a GraphView can get.
+        /// </summary>
+        public EditorWindow HostWindow;
+
         private readonly Dictionary<string, UCNodeView> views =
             new Dictionary<string, UCNodeView>();
 
@@ -417,6 +426,112 @@ namespace UniverseCreator.Editor.GraphUI
             if (pin != null) pin.channel = candidate; else pout.channel = candidate;
         }
 
+        // ------------------------------------------------------------------
+        //  Portal pair - one menu click drops a matched In + Out
+        // ------------------------------------------------------------------
+
+        /// <summary>
+        /// Drops a Portal Out and a Portal In already paired on one fresh channel, so
+        /// the tedious "add In, then add Out, then match their channels by hand" is a
+        /// single action. <paramref name="texture"/> picks the texture-graph pair
+        /// (Layer default) over the height-graph pair (Matrix default). The pair is
+        /// unwired on arrival, so - like any node drop - it does NOT regenerate the
+        /// world: a portal only carries data once BOTH ends are wired, and an unwired
+        /// or half-wired portal evaluates to a typed blank without running any node
+        /// math (see PortalRouting). Channel is the lowest "Channel N" no existing
+        /// portal uses, so a second pair can never cross-talk with the first.
+        /// </summary>
+        public void AddPortalPair(bool texture, Vector2 contentPos)
+        {
+            if (Graph == null) return;
+
+            Generator outNode = texture
+                ? (Generator)new UniverseCreator.Nodes.Texturing.TexturePortalOutNode()
+                : new PortalOutNode();
+            Generator inNode = texture
+                ? (Generator)new UniverseCreator.Nodes.Texturing.TexturePortalInNode()
+                : new PortalInNode();
+
+            string channel = NextFreePairChannel();
+            SetPortalChannel(outNode, channel);
+            SetPortalChannel(inNode, channel);
+
+            // Out on the left feeding In on the right, matching the read direction so
+            // the pair reads the way data flows even before a wire is drawn.
+            outNode.editorPosition = contentPos;
+            inNode.editorPosition = contentPos + new Vector2(300f, 0f);
+
+            Graph.AddNode(outNode);
+            Graph.AddNode(inNode);
+
+            UCNodeView outView = new UCNodeView(outNode, this);
+            views[outNode.id] = outView;
+            AddElement(outView);
+
+            UCNodeView inView = new UCNodeView(inNode, this);
+            views[inNode.id] = inView;
+            AddElement(inView);
+
+            ClearSelection();
+            AddToSelection(outView);
+            AddToSelection(inView);
+
+            MarkGraphDirty();
+            OnStructureChanged();
+            // Deliberately no QueueRegenerate: creating the pair changes nothing the
+            // world can see until the user wires both ends.
+        }
+
+        // The channel a portal (any of the four kinds) carries, or null if the node
+        // is not a portal. Read/write pair kept together so a new portal kind only
+        // has to be added in one place.
+        private static string GetPortalChannel(Generator node)
+        {
+            PortalInNode pin = node as PortalInNode;
+            if (pin != null) return pin.channel;
+            PortalOutNode pout = node as PortalOutNode;
+            if (pout != null) return pout.channel;
+            UniverseCreator.Nodes.Texturing.TexturePortalInNode tin =
+                node as UniverseCreator.Nodes.Texturing.TexturePortalInNode;
+            if (tin != null) return tin.channel;
+            UniverseCreator.Nodes.Texturing.TexturePortalOutNode tout =
+                node as UniverseCreator.Nodes.Texturing.TexturePortalOutNode;
+            if (tout != null) return tout.channel;
+            return null;
+        }
+
+        private static void SetPortalChannel(Generator node, string channel)
+        {
+            PortalInNode pin = node as PortalInNode;
+            if (pin != null) { pin.channel = channel; return; }
+            PortalOutNode pout = node as PortalOutNode;
+            if (pout != null) { pout.channel = channel; return; }
+            UniverseCreator.Nodes.Texturing.TexturePortalInNode tin =
+                node as UniverseCreator.Nodes.Texturing.TexturePortalInNode;
+            if (tin != null) { tin.channel = channel; return; }
+            UniverseCreator.Nodes.Texturing.TexturePortalOutNode tout =
+                node as UniverseCreator.Nodes.Texturing.TexturePortalOutNode;
+            if (tout != null) { tout.channel = channel; return; }
+        }
+
+        // Lowest "Channel N" no existing portal of ANY kind or direction uses: a pair
+        // shares one channel, so the whole number must be free for the pair to be its
+        // own private link and never pull another pair's feed.
+        private string NextFreePairChannel()
+        {
+            HashSet<string> used = new HashSet<string>();
+            foreach (Generator g in Graph.nodes)
+            {
+                string ch = GetPortalChannel(g);
+                if (!string.IsNullOrEmpty(ch)) used.Add(ch);
+            }
+
+            int n = 1;
+            string candidate = "Channel 1";
+            while (used.Contains(candidate)) { n++; candidate = "Channel " + n; }
+            return candidate;
+        }
+
         // A comment frame is added at the back of the content container so every
         // node draws over it. Added on top it would swallow the clicks meant for the
         // nodes it groups, which is the whole reason a backdrop is not just a node.
@@ -623,7 +738,7 @@ namespace UniverseCreator.Editor.GraphUI
             pendingAddPosition = contentViewContainer.WorldToLocal(viewPoint);
             RememberPointer(viewPoint);
 
-            Vector2 screenPoint = worldBound.position + viewPoint;
+            Vector2 screenPoint = PanelToScreen(viewPoint);
             evt.menu.AppendAction("Add Node", (a) => OpenSearchWindow(screenPoint));
             evt.menu.AppendSeparator();
 
@@ -744,13 +859,30 @@ namespace UniverseCreator.Editor.GraphUI
                 pasted[i].editorPosition += shift;
         }
 
-        /// <summary>Toolbar path: opens the search window centred on the view.</summary>
+        /// <summary>Toolbar path: opens the search window over the top of the view.</summary>
         public void ShowAddNodeMenu()
         {
-            Vector2 centre = new Vector2(layout.width * 0.5f, layout.height * 0.5f);
-            if (centre.x < 1f) centre = worldBound.size * 0.5f;
-            pendingAddPosition = contentViewContainer.WorldToLocal(centre);
-            OpenSearchWindow(worldBound.position + centre);
+            // A node dropped from the toolbar lands in the middle of what the user is
+            // looking at.
+            Vector2 panelCentre = worldBound.center;
+            pendingAddPosition = contentViewContainer.WorldToLocal(panelCentre);
+
+            // The picker itself opens just under the top edge of THIS window, centred
+            // horizontally - the "drops down from the toolbar" placement the user asked
+            // for - instead of the old worldBound-as-screen-point maths that flung it
+            // off to the side of the display. Screen coords come from the host window.
+            Vector2 panelTop = new Vector2(panelCentre.x, worldBound.yMin + 24f);
+            OpenSearchWindow(PanelToScreen(panelTop));
+        }
+
+        // Turn a panel-space (window-local) point into the OS-screen point the
+        // SearchWindow expects. The host window's own screen rect is the dependable
+        // origin; GUIUtility.GUIToScreenPoint needs a live IMGUI context that a UI
+        // Toolkit callback does not always have, so it is only the fallback.
+        private Vector2 PanelToScreen(Vector2 panelPoint)
+        {
+            if (HostWindow != null) return HostWindow.position.position + panelPoint;
+            return GUIUtility.GUIToScreenPoint(panelPoint);
         }
 
         private void OpenSearchWindow(Vector2 screenPos)
@@ -765,6 +897,19 @@ namespace UniverseCreator.Editor.GraphUI
         public void MarkGraphDirty()
         {
             GraphAssetUtility.MarkDirty(Graph);
+        }
+
+        /// <summary>
+        /// Rebuild every node view and its edges from the current graph model. Used
+        /// when a node changes something structural about its own ports - a portal
+        /// switching the type its socket carries - so the port colour, capacity and
+        /// any now-stale edges are re-evaluated against the new type. Edges reconnect
+        /// by stored port index, so a same-index type change keeps its wiring.
+        /// Cheap enough for an occasional structural change; never called per keystroke.
+        /// </summary>
+        public void ReloadView()
+        {
+            if (Graph != null) Populate(Graph);
         }
 
         public void QueueRegenerate(Generator node)
