@@ -92,6 +92,12 @@ namespace UniverseCreator.Editor.GraphUI
 
         private void BuildPorts()
         {
+            // A portal's socket type is DERIVED, never authored: resolve it off the
+            // live graph before reading the ports so the socket colours itself by the
+            // data actually crossing the channel. No-op for every non-portal node.
+            if (Node is IPortalTyped portal && owner != null && owner.Graph != null)
+                portal.ResolveType(owner.Graph);
+
             UCPort[] inputs = Node.GetInputs();
             for (int i = 0; i < inputs.Length; i++)
             {
@@ -249,12 +255,6 @@ namespace UniverseCreator.Editor.GraphUI
             {
                 EnumField ef = new EnumField(label, (Enum)f.GetValue(Node));
                 Commit(ef, v => f.SetValue(Node, v));
-                // A portal's type field restructures its own socket. Rebuild the view
-                // (deferred, so this field is not torn down mid-callback) so the port
-                // colour, capacity and any now-stale edges re-evaluate against the
-                // newly chosen type. Scheduled on the owner, which survives the rebuild.
-                if (f.Name == "portType")
-                    ef.RegisterValueChangedCallback(_ => owner.schedule.Execute(() => owner.ReloadView()));
                 created = ef;
             }
             else if (t == typeof(Vector2))

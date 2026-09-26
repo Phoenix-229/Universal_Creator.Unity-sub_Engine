@@ -611,6 +611,13 @@ namespace UniverseCreator.Editor.GraphUI
                 MarkGraphDirty();
                 QueueRegenerate(tgt.Node);
                 OnStructureChanged();
+
+                // Wiring into (or through) a portal changes the type that portal - and
+                // every Portal In sharing its channel - now carries. Reload so those
+                // derived sockets recolour off the live wiring. Deferred so the edge
+                // being created is not torn down mid-callback.
+                if (src.Node is IPortalTyped || tgt.Node is IPortalTyped)
+                    schedule.Execute(() => ReloadView());
             }
             else
             {
@@ -633,6 +640,11 @@ namespace UniverseCreator.Editor.GraphUI
             MarkGraphDirty();
             QueueRegenerate(tgt.Node);
             OnStructureChanged();
+
+            // Unwiring a portal drops the type it carried back to the fallback; the
+            // Portal In on its channel must recolour to match. Deferred reload, as above.
+            if (src.Node is IPortalTyped || tgt.Node is IPortalTyped)
+                schedule.Execute(() => ReloadView());
         }
 
         /// <summary>

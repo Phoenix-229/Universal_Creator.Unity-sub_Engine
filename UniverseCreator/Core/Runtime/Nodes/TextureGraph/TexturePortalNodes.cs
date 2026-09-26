@@ -33,7 +33,7 @@ namespace UniverseCreator.Nodes.Texturing
     /// portal-in when THAT node is evaluated, exactly like the height PortalOut.
     /// </summary>
     [System.Serializable]
-    public class TexturePortalOutNode : Generator
+    public class TexturePortalOutNode : Generator, IPortalOut
     {
         public override string NodeName { get { return "Texture Portal Out"; } }
         public override NodeCategory Category { get { return NodeCategory.Texture; } }
@@ -45,23 +45,33 @@ namespace UniverseCreator.Nodes.Texturing
         /// <summary>Channel name. A Texture Portal In with the same channel receives this layer.</summary>
         public string channel = "default";
 
-        /// <summary>
-        /// The kind of data this texture portal carries. Set it to the SAME type as
-        /// the Texture Portal In on the matching channel. Defaults to Layer - the
-        /// backbone product of the layer nodes - so texture portals saved before
-        /// this field existed keep carrying a Layer on load.
-        /// </summary>
-        public PortType portType = PortType.Layer;
+        /// <summary>The channel this sender broadcasts on (for the shared resolver).</summary>
+        public string PortalChannel { get { return channel; } }
+
+        // The input socket colours itself to match whatever is wired in - no Port Type
+        // field. Layer (the layer-node backbone currency) is the fallback until
+        // something is wired. Non-serialized: recomputed from the graph, so an old
+        // graph's stored portType is harmlessly ignored on load.
+        [System.NonSerialized] private PortType resolvedType = PortType.Layer;
 
         [System.NonSerialized] private PortType builtType = (PortType)(-1);
         [System.NonSerialized] private Port[] cachedIn;
 
+        /// <summary>
+        /// Recompute the input socket type from whatever is wired into this sender.
+        /// Called by the editor when the graph is built or rewired.
+        /// </summary>
+        public void ResolveType(Graph graph)
+        {
+            resolvedType = PortalRouting.ResolveSourceType(graph, this, 0, PortType.Layer);
+        }
+
         public override Port[] GetInputs()
         {
-            if (cachedIn == null || builtType != portType)
+            if (cachedIn == null || builtType != resolvedType)
             {
-                builtType = portType;
-                cachedIn = PortalRouting.BuildPortArray(portType, PortDirection.Input);
+                builtType = resolvedType;
+                cachedIn = PortalRouting.BuildPortArray(resolvedType, PortDirection.Input);
             }
             return cachedIn;
         }
@@ -85,7 +95,7 @@ namespace UniverseCreator.Nodes.Texturing
     /// than throwing, so a half-wired portal never collapses the evaluation.
     /// </summary>
     [System.Serializable]
-    public class TexturePortalInNode : Generator
+    public class TexturePortalInNode : Generator, IPortalTyped
     {
         public override string NodeName { get { return "Texture Portal In"; } }
         public override NodeCategory Category { get { return NodeCategory.Texture; } }
@@ -97,35 +107,48 @@ namespace UniverseCreator.Nodes.Texturing
         /// <summary>Channel name. A Texture Portal Out with the same channel feeds this.</summary>
         public string channel = "default";
 
-        /// <summary>
-        /// The kind of data this texture portal emits. Set it to the SAME type as
-        /// the Texture Portal Out on the matching channel. Defaults to Layer.
-        /// </summary>
-        public PortType portType = PortType.Layer;
+        // Socket type DERIVED from the sender on this channel, never authored; Layer
+        // is the fallback until a sender is wired. Non-serialized: recomputed from the
+        // graph, so an old graph's stored portType is harmlessly ignored on load.
+        [System.NonSerialized] private PortType resolvedType = PortType.Layer;
 
         [System.NonSerialized] private PortType builtType = (PortType)(-1);
         [System.NonSerialized] private Port[] cachedOut;
+
+        /// <summary>
+        /// Recompute the socket type from the Texture Portal Out on this channel.
+        /// Called by the editor when the graph is built or rewired, and once per
+        /// evaluation off the live graph.
+        /// </summary>
+        public void ResolveType(Graph graph)
+        {
+            resolvedType = PortalRouting.ResolveChannelType<TexturePortalOutNode>(graph, channel, PortType.Layer);
+        }
 
         public override Port[] GetInputs() { return SharedPorts.None; }
 
         public override Port[] GetOutputs()
         {
-            if (cachedOut == null || builtType != portType)
+            if (cachedOut == null || builtType != resolvedType)
             {
-                builtType = portType;
-                cachedOut = PortalRouting.BuildPortArray(portType, PortDirection.Output);
+                builtType = resolvedType;
+                cachedOut = PortalRouting.BuildPortArray(resolvedType, PortDirection.Output);
             }
             return cachedOut;
         }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
-            if (string.IsNullOrEmpty(channel)) return PortalRouting.BlankProduct(portType, tile);
+            if (string.IsNullOrEmpty(channel)) return PortalRouting.BlankProduct(resolvedType, tile);
 
             // ReferenceEquals rather than ==: the == operator on a UnityEngine.Object
             // marshals into native code, and Generate can run off the main thread in
             // the general node path. Same guard the height PortalIn uses.
-            if (object.ReferenceEquals(tile.Graph, null)) return PortalRouting.BlankProduct(portType, tile);
+            if (object.ReferenceEquals(tile.Graph, null)) return PortalRouting.BlankProduct(resolvedType, tile);
+
+            // Refresh the carried type from the live sender before falling back or
+            // forwarding, so socket colour and blank shape match the current wiring.
+            ResolveType(tile.Graph);
 
             TexturePortalOutNode partner = null;
             foreach (Generator node in tile.Graph.nodes)
@@ -140,7 +163,7 @@ namespace UniverseCreator.Nodes.Texturing
 
             // No partner: a typed blank, not null. A node that vanishes when
             // half-wired is indistinguishable from a node that is broken.
-            if (partner == null) return PortalRouting.BlankProduct(portType, tile);
+            if (partner == null) return PortalRouting.BlankProduct(resolvedType, tile);
 
             // Pull whatever feeds the partner's input and forward it AS-IS, deep-copied.
             // No forced `as LayerProduct` cast: the portal carries whatever type the
@@ -150,7 +173,7 @@ namespace UniverseCreator.Nodes.Texturing
             // a portal wired back into its own chain degrades to a blank rather than
             // recursing.
             object pulled = tile.PullInput(partner, 0, stop);
-            if (pulled == null) return PortalRouting.BlankProduct(portType, tile);
+            if (pulled == null) return PortalRouting.BlankProduct(resolvedType, tile);
 
             return PortalRouting.CopyProduct(pulled);
         }

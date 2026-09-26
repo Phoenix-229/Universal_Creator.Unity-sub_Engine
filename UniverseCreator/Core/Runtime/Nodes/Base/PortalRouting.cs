@@ -31,6 +31,28 @@ using UnityEngine;
 
 namespace UniverseCreator.Nodes
 {
+    /// <summary>
+    /// A portal whose socket type is DERIVED, not authored. The editor calls
+    /// ResolveType when the graph is built or rewired, so the socket colours itself
+    /// by the data actually crossing the channel - there is no Port Type field for a
+    /// user to set or keep in sync. The channel name alone identifies a pair.
+    /// </summary>
+    public interface IPortalTyped
+    {
+        void ResolveType(Graph graph);
+    }
+
+    /// <summary>
+    /// The sending half of a portal pair. Exposes its channel so the shared resolver
+    /// can find it without knowing whether it is a height or a texture portal. The
+    /// receiving half still matches only its OWN sender kind, so a height channel and
+    /// a texture channel that happen to share a name never cross wires.
+    /// </summary>
+    public interface IPortalOut : IPortalTyped
+    {
+        string PortalChannel { get; }
+    }
+
     public static class PortalRouting
     {
         /// <summary>
@@ -104,6 +126,55 @@ namespace UniverseCreator.Nodes
         public static Port[] BuildPortArray(PortType type, PortDirection direction)
         {
             return new[] { new Port("Port", type, direction, direction == PortDirection.Output) };
+        }
+
+        /// <summary>
+        /// The type actually flowing into a node's input port, read from the output
+        /// port of whatever is wired to it. This is how a portal colours itself by the
+        /// data it carries instead of by a type the user has to pick: the source's own
+        /// declared output type IS the truth. Returns <paramref name="fallback"/> when
+        /// the input is unwired or the source cannot be resolved, so an empty portal
+        /// still has a definite shape rather than a null. ReferenceEquals guards the
+        /// Graph (a UnityEngine.Object) because this can run off the main thread; the
+        /// Generators it walks are plain managed objects, safe to compare with ==.
+        /// </summary>
+        public static PortType ResolveSourceType(Graph graph, Generator consumer, int inputIndex, PortType fallback)
+        {
+            if (object.ReferenceEquals(graph, null) || consumer == null) return fallback;
+
+            Connection c = graph.GetInputConnection(consumer.id, inputIndex);
+            if (string.IsNullOrEmpty(c.sourceNodeId)) return fallback;
+
+            Generator source = graph.GetNodeById(c.sourceNodeId);
+            if (source == null) return fallback;
+
+            Port[] outs = source.GetOutputs();
+            if (outs == null || c.sourcePortIndex < 0 || c.sourcePortIndex >= outs.Length) return fallback;
+
+            return outs[c.sourcePortIndex].type;
+        }
+
+        /// <summary>
+        /// The type a portal-in should carry on <paramref name="channel"/>: found by
+        /// locating the matching, enabled sender of type <typeparamref name="TOut"/>
+        /// and reading what feeds ITS input. No sender, or a sender whose own input is
+        /// unwired, yields <paramref name="fallback"/>. Restricting the sender to TOut
+        /// is what keeps a height channel and a texture channel of the same name from
+        /// pairing. The source's output type is a static declaration, so reading it
+        /// here never recurses into another portal's live resolve.
+        /// </summary>
+        public static PortType ResolveChannelType<TOut>(Graph graph, string channel, PortType fallback)
+            where TOut : Generator, IPortalOut
+        {
+            if (object.ReferenceEquals(graph, null) || string.IsNullOrEmpty(channel)) return fallback;
+
+            foreach (Generator node in graph.nodes)
+            {
+                TOut sender = node as TOut;
+                if (sender != null && !sender.disabled && sender.PortalChannel == channel)
+                    return ResolveSourceType(graph, sender, 0, fallback);
+            }
+            return fallback;
         }
     }
 }
