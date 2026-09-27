@@ -109,7 +109,17 @@ namespace UniverseCreator.Editor.Utilities
         }
 
         /// <summary>
-        /// Four Albedo Layers -> Texture Splat -> Terrain Blend Final -> Shader Output.
+        /// Four terrain layers, each an Albedo Layer -> Normal Map Layer -> Texture
+        /// Splat -> Terrain Blend Final -> Shader Output.
+        ///
+        /// The Normal Map Layer sits in the chain on purpose, with its slots EMPTY:
+        /// it is where the user drops a normal map (and AO / height / roughness, which
+        /// it packs into the mask URP wants) to turn a flat-lit layer into one with
+        /// real relief under the physical sun/sky. No texture is referenced from code
+        /// - the tool ships no assumption that any particular texture file exists, so
+        /// a graph opens the same whether the sample content is present or stripped.
+        /// Until a texture is dropped in, each layer paints as its flat tint (the
+        /// applier's stand-in guarantees a colour, never Unity's checkerboard).
         ///
         /// The layer names and tiling are the defaults a temperate world wants, and
         /// they are in the order the control map indexes: R is what shows where the
@@ -125,33 +135,27 @@ namespace UniverseCreator.Editor.Utilities
             Graph graph = ScriptableObject.CreateInstance<Graph>();
             graph.name = "Basic Surface";
 
-            AlbedoLayerNode grass = MakeLayer("Grass", new Color(0.32f, 0.44f, 0.20f), 8f, 0.30f, 40f);
-            AlbedoLayerNode dirt  = MakeLayer("Dirt",  new Color(0.42f, 0.33f, 0.24f), 6f, 0.22f, 170f);
-            AlbedoLayerNode rock  = MakeLayer("Rock",  new Color(0.46f, 0.45f, 0.43f), 4f, 0.38f, 300f);
-            AlbedoLayerNode sand  = MakeLayer("Sand",  new Color(0.72f, 0.65f, 0.48f), 12f, 0.26f, 430f);
-
             TextureSplatNode splat = new TextureSplatNode();
-            splat.editorPosition = new Vector2(320f, 200f);
+            splat.editorPosition = new Vector2(560f, 200f);
 
             TerrainBlendFinalNode blend = new TerrainBlendFinalNode();
-            blend.editorPosition = new Vector2(560f, 200f);
+            blend.editorPosition = new Vector2(800f, 200f);
 
             ShaderOutputNode output = new ShaderOutputNode();
-            output.editorPosition = new Vector2(800f, 200f);
+            output.editorPosition = new Vector2(1040f, 200f);
 
-            graph.nodes.Add(grass);
-            graph.nodes.Add(dirt);
-            graph.nodes.Add(rock);
-            graph.nodes.Add(sand);
             graph.nodes.Add(splat);
             graph.nodes.Add(blend);
             graph.nodes.Add(output);
 
-            // Layer -> control map channel. Port index IS the channel index.
-            graph.AddConnection(new Connection(grass.id, 0, splat.id, 0));
-            graph.AddConnection(new Connection(dirt.id,  0, splat.id, 1));
-            graph.AddConnection(new Connection(rock.id,  0, splat.id, 2));
-            graph.AddConnection(new Connection(sand.id,  0, splat.id, 3));
+            // channel = control-map index. Grass on R (default ground), then dirt,
+            // rock, sand. Each call adds an Albedo + (empty) Normal Map Layer pair and
+            // wires it into its splat channel. Tints are the flat colour each layer
+            // reads as before the user assigns a texture.
+            AddLayer(graph, splat, 0, "Grass", new Color(0.32f, 0.44f, 0.20f), 8f,  0.30f, 40f);
+            AddLayer(graph, splat, 1, "Dirt",  new Color(0.42f, 0.33f, 0.24f), 6f,  0.22f, 170f);
+            AddLayer(graph, splat, 2, "Rock",  new Color(0.46f, 0.45f, 0.43f), 4f,  0.38f, 300f);
+            AddLayer(graph, splat, 3, "Sand",  new Color(0.72f, 0.65f, 0.48f), 12f, 0.26f, 430f);
 
             // Splat feeds Terrain Blend Final's port 1; port 0 is the Surface chain,
             // which Basic Surface leaves empty on purpose - the layers alone are a
@@ -234,16 +238,30 @@ namespace UniverseCreator.Editor.Utilities
         //  HELPERS
         // =====================================================================
 
-        private static AlbedoLayerNode MakeLayer(string name, Color tint, float tileMetres,
-                                                 float smoothness, float y)
+        // One terrain layer: an Albedo Layer feeding a Normal Map Layer, wired into
+        // the given splat channel. Both texture slots are left EMPTY - the template
+        // references no asset, so it never assumes a texture file ships with the tool.
+        // The Normal Map Layer is present in the chain so the user has an obvious place
+        // to drop a normal map (and AO / height / roughness, which it packs into the
+        // mask) to add relief; until then the layer paints as its flat tint.
+        private static void AddLayer(
+            Graph graph, TextureSplatNode splat, int channel,
+            string name, Color tint, float tileMetres, float smoothness, float y)
         {
-            AlbedoLayerNode layer = new AlbedoLayerNode();
-            layer.layerName = name;
-            layer.tint = tint;
-            layer.tileSizeMetres = new Vector2(tileMetres, tileMetres);
-            layer.smoothness = smoothness;
-            layer.editorPosition = new Vector2(80f, y);
-            return layer;
+            AlbedoLayerNode albedo = new AlbedoLayerNode();
+            albedo.layerName = name;
+            albedo.tint = tint;
+            albedo.tileSizeMetres = new Vector2(tileMetres, tileMetres);
+            albedo.smoothness = smoothness;
+            albedo.editorPosition = new Vector2(80f, y);
+
+            NormalMapLayerNode nrm = new NormalMapLayerNode();
+            nrm.editorPosition = new Vector2(320f, y);
+
+            graph.nodes.Add(albedo);
+            graph.nodes.Add(nrm);
+            graph.AddConnection(new Connection(albedo.id, 0, nrm.id, 0)); // Albedo -> Normal layer
+            graph.AddConnection(new Connection(nrm.id, 0, splat.id, channel));
         }
 
         private static T FindFirst<T>(Graph graph) where T : Generator

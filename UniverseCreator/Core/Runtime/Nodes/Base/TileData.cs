@@ -228,6 +228,52 @@ namespace UniverseCreator.Nodes
     }
 
     /// <summary>
+    /// Textures for ONE splat channel that an output node reserves but the world has
+    /// not authored a TerrainLayer for (biome-splat snow / road / grass / forest, …).
+    /// The channel is addressed by INDEX, never by a layer name, so renaming a layer
+    /// can never break which texture lands where. Every field is empty/neutral by
+    /// default: the tool ships no assumption that any texture file exists, and any
+    /// texture FORMAT Unity can import is accepted (Texture2D is format-agnostic).
+    /// An empty albedo paints a flat <see cref="tint"/> stand-in, never a checkerboard.
+    /// </summary>
+    [Serializable]
+    public struct SplatLayerTexture
+    {
+        /// <summary>Splat channel (terrain layer index) these textures dress.</summary>
+        public int layer;
+
+        /// <summary>Base colour map, or null for a flat <see cref="tint"/> layer.</summary>
+        public Texture2D albedo;
+
+        /// <summary>Tangent-space normal map, or null for a flat-lit layer.</summary>
+        public Texture2D normal;
+
+        /// <summary>Ambient-occlusion map, packed into the mask's occlusion channel when present.</summary>
+        public Texture2D ao;
+
+        /// <summary>Flat colour shown until an albedo is assigned, and the diffuse tint after.</summary>
+        public Color tint;
+
+        /// <summary>Metres per texture repeat. Zero falls back to a sane default.</summary>
+        public Vector2 tileSizeMetres;
+
+        /// <summary>Surface smoothness used when no packed mask is supplied, 0..1.</summary>
+        public float smoothness;
+
+        /// <summary>Normal map strength. Zero falls back to 1.</summary>
+        public float normalScale;
+
+        public bool HasContent
+        {
+            get
+            {
+                return albedo != null || normal != null || ao != null ||
+                       tint.r > 0f || tint.g > 0f || tint.b > 0f;
+            }
+        }
+    }
+
+    /// <summary>
     /// Accumulator for main-thread writes. Each Output node records its data here,
     /// and the chunking system applies them all in one batch after the background
     /// eval completes.
@@ -239,6 +285,15 @@ namespace UniverseCreator.Nodes
 
         /// <summary>Splatmap layers to write via TerrainData.SetAlphamaps, or null.</summary>
         public float[,,] splatmap;
+
+        /// <summary>
+        /// Textures for splat channels an output node reserves but the world has not
+        /// authored a TerrainLayer for (e.g. biome-splat snow at index 4). Read by
+        /// TerrainBuilder.ReconcileSplatLayers, which mints a real layer per entry
+        /// instead of the neutral stand-in. Null on any graph that reserves no such
+        /// channel, so it changes nothing for those graphs.
+        /// </summary>
+        public List<SplatLayerTexture> splatLayerTextures;
 
         /// <summary>Hole map to write via TerrainData.SetHoles, or null.</summary>
         public bool[,] holes;

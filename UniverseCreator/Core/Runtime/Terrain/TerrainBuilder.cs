@@ -188,7 +188,8 @@ namespace UniverseCreator.TerrainSystem
                 // the paint. A splatmap whose depth and resolution already match (worlds
                 // where those line up) passes through untouched.
                 float[,,] splat = ReconcileSplatResolution(data, outputs.splatmap);
-                splat = ReconcileSplatLayers(data, splat, ChunkLabel(chunkWorldBounds));
+                splat = ReconcileSplatLayers(data, splat, ChunkLabel(chunkWorldBounds),
+                                             outputs.splatLayerTextures);
                 data.SetAlphamaps(0, 0, splat);
             }
             else if (data.terrainLayers != null && data.terrainLayers.Length > 0 && data.alphamapResolution > 0)
@@ -412,6 +413,203 @@ namespace UniverseCreator.TerrainSystem
             return autofillLayers[index];
         }
 
+        // Real layers minted from an output node's per-channel SplatLayerTexture,
+        // cached by channel with a cheap signature so a 25-chunk grid reuses them and
+        // they rebuild when the user changes a texture. HideAndDontSave, so they die on
+        // a domain reload and the null check below rebuilds them.
+        private struct DescribedLayerCache { public SplatLayerTexture desc; public TerrainLayer layer; }
+        private static readonly Dictionary<int, DescribedLayerCache> describedLayers =
+            new Dictionary<int, DescribedLayerCache>();
+
+        // Flat single-colour textures keyed by quantised colour, so a snow-white stand-in
+        // is built once and shared by every channel and chunk that needs that colour.
+        private static readonly Dictionary<int, Texture2D> flatTintTextures =
+            new Dictionary<int, Texture2D>();
+
+        /// <summary>
+        /// The layer for channel <paramref name="index"/> when the world has not authored
+        /// one: dressed from a matching descriptor when the node supplied textures/tint,
+        /// otherwise the neutral damp-earth autofill.
+        /// </summary>
+        private static TerrainLayer DescribedOrAutofillLayer(int index, IList<SplatLayerTexture> described)
+        {
+            if (described != null)
+            {
+                for (int i = 0; i < described.Count; i++)
+                    if (described[i].layer == index && described[i].HasContent)
+                        return DescribedLayer(index, described[i]);
+            }
+            return AutofillLayer(index);
+        }
+
+        private static void SafeDestroy(Object o)
+        {
+            if (o == null) return;
+            if (Application.isPlaying) Object.Destroy(o);
+            else Object.DestroyImmediate(o);
+        }
+
+        /// <summary>
+        /// Builds (or reuses) the TerrainLayer for one described channel. An empty albedo
+        /// paints a flat texture of the descriptor's tint - snow-white for snow - so the
+        /// channel never shows Unity's grey checker or the brown neutral stand-in. The
+        /// user's own textures are referenced directly (no CPU read, so import settings
+        /// never matter for the visible fix); AO is packed into a mask and is the only
+        /// part that can degrade, and it degrades to albedo+normal, never to a break.
+        /// </summary>
+        private static TerrainLayer DescribedLayer(int index, SplatLayerTexture d)
+        {
+            DescribedLayerCache cached;
+            if (describedLayers.TryGetValue(index, out cached) &&
+                cached.layer != null && SameDescriptor(cached.desc, d))
+                return cached.layer;
+
+            TerrainLayer layer = new TerrainLayer();
+            layer.name = "UC_Described_Layer_" + index;
+            layer.hideFlags = HideFlags.HideAndDontSave;
+
+            layer.diffuseTexture = d.albedo != null ? d.albedo : FlatTintTexture(d.tint);
+
+            if (d.normal != null)
+            {
+                layer.normalMapTexture = d.normal;
+                layer.normalScale = d.normalScale > 0f ? d.normalScale : 1f;
+            }
+
+            Texture2D mask = d.ao != null ? TryPackMask(d.ao, d.smoothness) : null;
+            if (mask != null)
+            {
+                layer.maskMapTexture = mask;
+            }
+            else
+            {
+                layer.smoothness = Mathf.Clamp01(d.smoothness);
+                layer.metallic = 0f;
+            }
+
+            float tileX = d.tileSizeMetres.x > 0.01f ? d.tileSizeMetres.x : 8f;
+            float tileZ = d.tileSizeMetres.y > 0.01f ? d.tileSizeMetres.y : tileX;
+            layer.tileSize = new Vector2(tileX, tileZ);
+
+            describedLayers[index] = new DescribedLayerCache { desc = d, layer = layer };
+            return layer;
+        }
+
+        private static Texture2D FlatTintTexture(Color tint)
+        {
+            // A black/undefined tint would read as "no colour"; give it a mid grey so the
+            // layer is still visibly flat rather than invisible.
+            if (tint.r <= 0f && tint.g <= 0f && tint.b <= 0f) tint = new Color(0.5f, 0.5f, 0.5f, 1f);
+            tint.a = 1f;
+
+            int key = QuantiseColour(tint);
+            Texture2D tex;
+            if (flatTintTextures.TryGetValue(key, out tex) && tex != null) return tex;
+
+            const int size = 8;
+            tex = new Texture2D(size, size, TextureFormat.RGBA32, true, false);
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.wrapMode = TextureWrapMode.Repeat;
+            Color[] px = new Color[size * size];
+            for (int i = 0; i < px.Length; i++) px[i] = tint;
+            tex.SetPixels(px);
+            tex.Apply();
+
+            flatTintTextures[key] = tex;
+            return tex;
+        }
+
+        private static int QuantiseColour(Color c)
+        {
+            int r = Mathf.Clamp(Mathf.RoundToInt(c.r * 255f), 0, 255);
+            int g = Mathf.Clamp(Mathf.RoundToInt(c.g * 255f), 0, 255);
+            int b = Mathf.Clamp(Mathf.RoundToInt(c.b * 255f), 0, 255);
+            return (r << 16) | (g << 8) | b;
+        }
+
+        // Cache validity by reference-equal textures + approx scalars. Deliberately not
+        // GetInstanceID (deprecated in Unity 6) nor a hash - a direct compare cannot
+        // collide two different descriptors onto one stale stand-in.
+        private static bool SameDescriptor(SplatLayerTexture a, SplatLayerTexture b)
+        {
+            return a.albedo == b.albedo &&
+                   a.normal == b.normal &&
+                   a.ao == b.ao &&
+                   ApproxColour(a.tint, b.tint) &&
+                   Mathf.Approximately(a.tileSizeMetres.x, b.tileSizeMetres.x) &&
+                   Mathf.Approximately(a.tileSizeMetres.y, b.tileSizeMetres.y) &&
+                   Mathf.Approximately(a.smoothness, b.smoothness) &&
+                   Mathf.Approximately(a.normalScale, b.normalScale);
+        }
+
+        private static bool ApproxColour(Color a, Color b)
+        {
+            return Mathf.Approximately(a.r, b.r) && Mathf.Approximately(a.g, b.g) &&
+                   Mathf.Approximately(a.b, b.b) && Mathf.Approximately(a.a, b.a);
+        }
+
+        // Packs an AO map into a URP terrain mask: R metallic 0, G occlusion = AO
+        // luminance, B height 0, A smoothness. Wrapped whole - if the AO texture cannot
+        // be read on this platform the mask is skipped and the caller keeps albedo+normal.
+        private static Texture2D TryPackMask(Texture2D ao, float smoothness)
+        {
+            try
+            {
+                Texture2D readable = MakeReadable(ao);
+                if (readable == null) return null;
+
+                int w = readable.width, h = readable.height;
+                Color[] src = readable.GetPixels();
+                Color[] dst = new Color[src.Length];
+                float sm = Mathf.Clamp01(smoothness);
+                for (int i = 0; i < src.Length; i++)
+                {
+                    float occ = src[i].r * 0.2126f + src[i].g * 0.7152f + src[i].b * 0.0722f;
+                    dst[i] = new Color(0f, occ, 0f, sm);
+                }
+
+                Texture2D mask = new Texture2D(w, h, TextureFormat.RGBA32, true, true);
+                mask.hideFlags = HideFlags.HideAndDontSave;
+                mask.wrapMode = TextureWrapMode.Repeat;
+                mask.SetPixels(dst);
+                mask.Apply();
+
+                if (readable != ao) SafeDestroy(readable);
+                return mask;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // A CPU-readable copy of a texture without needing Read/Write enabled in its
+        // import settings: blit through a temporary RenderTexture and read it back.
+        // Returns the source unchanged when it is already readable.
+        private static Texture2D MakeReadable(Texture2D src)
+        {
+            if (src == null) return null;
+            if (src.isReadable) return src;
+
+            RenderTexture rt = RenderTexture.GetTemporary(
+                src.width, src.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+            RenderTexture prev = RenderTexture.active;
+            try
+            {
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+                Texture2D copy = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false, true);
+                copy.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0);
+                copy.Apply();
+                return copy;
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+            }
+        }
+
         // Highest channel deficit already reported this session, so the autofill
         // notice is logged once rather than once per chunk (25+ times a generation).
         private static int loggedAutofillDepth = -1;
@@ -431,6 +629,19 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public static float[,,] ReconcileSplatLayers(TerrainData data, float[,,] splat, string chunkLabel)
         {
+            return ReconcileSplatLayers(data, splat, chunkLabel, null);
+        }
+
+        /// <summary>
+        /// As above, but a channel the world has not authored is dressed from a matching
+        /// <see cref="SplatLayerTexture"/> descriptor when one is supplied (biome-splat
+        /// snow / road / grass / forest), so that channel shows the user's texture (or a
+        /// flat tint when the slot is empty) instead of the neutral grey stand-in. A
+        /// channel with no descriptor still falls back to the neutral autofill.
+        /// </summary>
+        public static float[,,] ReconcileSplatLayers(TerrainData data, float[,,] splat,
+                                                      string chunkLabel, IList<SplatLayerTexture> described)
+        {
             if (data == null || splat == null) return splat;
 
             int want = splat.GetLength(2);
@@ -440,14 +651,18 @@ namespace UniverseCreator.TerrainSystem
             if (have < want)
             {
                 // Grow the layer set. Keep every real layer the world already has and
-                // fill the remainder with stand-ins, so channel L still maps to layer L.
+                // fill the remainder with the described texture where one exists, else
+                // a neutral stand-in, so channel L still maps to layer L.
                 TerrainLayer[] grown = new TerrainLayer[want];
                 TerrainLayer[] current = data.terrainLayers;
                 for (int i = 0; i < want; i++)
                 {
-                    grown[i] = current != null && i < current.Length && current[i] != null
-                             ? current[i]
-                             : AutofillLayer(i);
+                    if (current != null && i < current.Length && current[i] != null)
+                    {
+                        grown[i] = current[i];
+                        continue;
+                    }
+                    grown[i] = DescribedOrAutofillLayer(i, described);
                 }
                 data.terrainLayers = grown;
 

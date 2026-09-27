@@ -339,6 +339,44 @@ namespace UniverseCreator.Editor.Utilities
             return layer;
         }
 
+        // A neutral stand-in albedo for a layer whose graph produced no texture.
+        // Without it, assigning layer.diffuseTexture = null makes Unity draw its grey
+        // "no texture assigned" CHECKERBOARD - the exact "box on the snow" reported -
+        // because the author's colour rides on diffuseRemapMax, which multiplies a
+        // diffuse that is not there. This is the WriteLayer twin of
+        // TerrainBuilder.EnsureFallbackLayer: a tiny bilinear/Repeat texture kept
+        // NEUTRAL (~0.9 grey) so the layer's own tint remap colours it exactly once -
+        // snow reads white, grass green - with a coprime value walk so it never
+        // resolves as a grid. Cached: one texture shared by every healed layer, minted
+        // lazily because a HideAndDontSave asset dies on a domain reload.
+        [System.NonSerialized] private static Texture2D s_flatStandIn;
+
+        private static Texture2D FlatStandInAlbedo()
+        {
+            if (s_flatStandIn != null) return s_flatStandIn;
+
+            const int size = 4;
+            Texture2D tex = new Texture2D(size, size); // default: sRGB, RGBA32, mip chain
+            tex.name = "UC_FlatLayerStandIn";
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Repeat;
+
+            Color[] px = new Color[size * size];
+            for (int i = 0; i < px.Length; i++)
+            {
+                // Two coprime strides over the 16 cells so value never lines up into a
+                // row or a checker; centred near white so diffuseRemapMax lands the tint.
+                float v = 0.90f + 0.03f * (i % 3) + 0.02f * (i % 5);
+                px[i] = new Color(v, v, v, 1f);
+            }
+            tex.SetPixels(px);
+            tex.Apply();
+
+            s_flatStandIn = tex;
+            return s_flatStandIn;
+        }
+
         /// <summary>
         /// Copies one LayerProduct onto a TerrainLayer.
         ///
@@ -354,13 +392,20 @@ namespace UniverseCreator.Editor.Utilities
             if (!string.IsNullOrEmpty(src.name) && layer.name != src.name) layer.name = src.name;
 
             Texture2D albedo = src.albedo != null ? src.albedo.texture : null;
+            if (albedo == null)
+            {
+                // A null diffuse would draw Unity's grey checkerboard, not the flat
+                // colour this notice promises; a neutral stand-in that the tint remap
+                // colours makes the promise true and kills the "box on the snow" for
+                // any layer whose graph produced no albedo texture.
+                albedo = FlatStandInAlbedo();
+                surface.Notice("Layer '" + src.name + "' has no albedo texture; painting as flat colour.");
+            }
             if (layer.diffuseTexture != albedo)
             {
                 layer.diffuseTexture = albedo;
                 if (src.albedo != null) src.albedo.Apply();
             }
-            if (albedo == null)
-                surface.Notice("Layer '" + src.name + "' has no albedo texture; it will paint as flat colour.");
 
             Texture2D normal = src.normal != null ? src.normal.texture : null;
             if (layer.normalMapTexture != normal)

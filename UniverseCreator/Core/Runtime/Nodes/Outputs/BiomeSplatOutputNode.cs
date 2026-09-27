@@ -164,10 +164,42 @@ namespace UniverseCreator.Nodes.Outputs
         [Tooltip("Softness of that slide-off, in degrees.")]
         public float snowSlopeBlend = 9f;
 
+        // Snow paints a WEIGHT into snowLayer; these give that layer its LOOK. All
+        // empty by default - the tool ships no texture, and any format Unity imports
+        // works. Leave them empty and snow paints as a flat tinted layer (never the
+        // grey native stand-in the user reported); drop in a snow albedo/normal/AO
+        // and the snow channel textures itself. No path is ever hardcoded.
+        [Tooltip("Snow base colour map. Empty = a flat layer tinted by Snow Tint.")]
+        public Texture2D snowAlbedo;
+
+        [Tooltip("Snow normal map. Empty = flat-lit snow.")]
+        public Texture2D snowNormal;
+
+        [Tooltip("Snow ambient-occlusion map. Empty = none.")]
+        public Texture2D snowAO;
+
+        [Tooltip("Flat colour of the snow layer until a Snow Albedo is assigned, and " +
+                 "the tint applied over it after. Defaults to a cold off-white.")]
+        public Color snowTint = new Color(0.92f, 0.94f, 0.97f, 1f);
+
+        [Tooltip("Metres per snow-texture repeat.")]
+        public Vector2 snowTileSize = new Vector2(10f, 10f);
+
+        [Tooltip("Snow surface smoothness (used when no packed mask is supplied), 0..1.")]
+        [Range(0f, 1f)] public float snowSmoothness = 0.1f;
+
         [Header("Override input")]
         [Tooltip("Layer the Override mask paints. Wired for hand-painted regions and " +
                  "for road and path masks, which have to beat every procedural rule.")]
         public int overrideLayer = 5;
+
+        [Header("Layer textures (optional)")]
+        [Tooltip("Textures for any splat channel this node reserves but the world has " +
+                 "not authored a layer for - road, grass, forest floor, or a re-textured " +
+                 "ground. Snow has its own fields above. Each entry dresses one layer " +
+                 "INDEX; nothing keys off a name, so retargeting a rule can never break " +
+                 "which texture lands where. Empty entries paint a flat tinted layer.")]
+        public List<SplatLayerTexture> layerTextures = new List<SplatLayerTexture>();
 
         // Baked once per Generate so the inner loop does a lookup instead of a
         // linear scan over the rule list per pixel.
@@ -371,6 +403,52 @@ namespace UniverseCreator.Nodes.Outputs
             }
 
             tile.outputs.splatmap = splat;
+            EmitLayerTextures(tile);
+        }
+
+        /// <summary>
+        /// Hands the applier the textures for any channel this node reserves but the
+        /// world has not authored, so TerrainBuilder mints a real layer instead of the
+        /// neutral grey stand-in. Snow's own fields win over any hand-added entry that
+        /// also targets the snow layer. Emits null when nothing carries content, so a
+        /// graph that assigns no textures behaves exactly as before.
+        /// </summary>
+        private void EmitLayerTextures(TileData tile)
+        {
+            List<SplatLayerTexture> emit = null;
+
+            if (layerTextures != null)
+            {
+                for (int i = 0; i < layerTextures.Count; i++)
+                {
+                    SplatLayerTexture e = layerTextures[i];
+                    // Skip a hand-added snow-layer entry; the Snow fields below own it.
+                    if (snowEnabled && e.layer == snowLayer) continue;
+                    if (!e.HasContent) continue;
+                    (emit ?? (emit = new List<SplatLayerTexture>())).Add(e);
+                }
+            }
+
+            if (snowEnabled)
+            {
+                SplatLayerTexture snow = new SplatLayerTexture
+                {
+                    layer = snowLayer,
+                    albedo = snowAlbedo,
+                    normal = snowNormal,
+                    ao = snowAO,
+                    tint = snowTint,
+                    tileSizeMetres = snowTileSize,
+                    smoothness = snowSmoothness,
+                    normalScale = 1f
+                };
+                // Always emit the snow layer while snow is on: even with no albedo the
+                // flat snow-white tint must replace the brown/grey native stand-in the
+                // user reported. HasContent is true because snowTint is non-black.
+                (emit ?? (emit = new List<SplatLayerTexture>())).Add(snow);
+            }
+
+            tile.outputs.splatLayerTextures = emit;
         }
 
         private void ApplyRule(float[] acc, int layers, int biomeIndex,

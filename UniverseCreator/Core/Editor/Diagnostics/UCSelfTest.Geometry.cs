@@ -2207,6 +2207,49 @@ namespace UniverseCreator.Editor.Diagnostics
                 {
                     Object.DestroyImmediate(e2e);
                 }
+
+                // Described channel: the biome-splat snow fix. A splat addresses a
+                // channel the world has not authored, and the output node supplies a
+                // SplatLayerTexture for it (snow-white tint, no albedo asset). The grown
+                // layer at that index must be a REAL described layer with a non-null
+                // diffuse (the flat tint), not the neutral grey/brown autofill - that is
+                // the difference between snow showing a texture and showing native
+                // terrain. A channel with no descriptor must still fall back to autofill.
+                var descData = new TerrainData();
+                try
+                {
+                    var authored = new TerrainLayer { name = "UC_SelfTest_Authored0", hideFlags = HideFlags.HideAndDontSave };
+                    descData.terrainLayers = new[] { authored };
+                    float[,,] map = new float[2, 2, 6];
+                    map[0, 0, 4] = 1f;                       // snow weight on channel 4
+                    var described = new List<UniverseCreator.Nodes.SplatLayerTexture>
+                    {
+                        new UniverseCreator.Nodes.SplatLayerTexture
+                        {
+                            layer = 4,
+                            tint = new Color(0.92f, 0.94f, 0.97f, 1f),
+                            tileSizeMetres = new Vector2(10f, 10f),
+                            smoothness = 0.1f
+                        }
+                    };
+                    TerrainBuilder.ReconcileSplatLayers(descData, map, "selftest desc", described);
+
+                    Check(ReferenceEquals(descData.terrainLayers[0], authored),
+                        "The authored layer 0 must survive the described grow untouched.");
+                    Check(descData.terrainLayers[4] != null &&
+                          descData.terrainLayers[4].diffuseTexture != null,
+                        "A described channel (snow) must get a real layer with a non-null diffuse (flat tint), never a null/checker texture.");
+                    Check(descData.terrainLayers[4].name != null &&
+                          descData.terrainLayers[4].name.StartsWith("UC_Described_Layer_"),
+                        "The snow channel's layer must be the described stand-in, not the neutral autofill - that is why it shows the snow texture instead of native terrain.");
+                    Check(descData.terrainLayers[5] != null &&
+                          descData.terrainLayers[5].name.StartsWith("UC_Autofill_Layer_"),
+                        "A channel with no descriptor must still fall back to the neutral autofill.");
+                }
+                finally
+                {
+                    Object.DestroyImmediate(descData);
+                }
             }
             finally
             {
