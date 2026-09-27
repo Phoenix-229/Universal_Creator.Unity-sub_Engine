@@ -36,6 +36,7 @@ using UniverseCreator.Ecology;
 using UniverseCreator.Optimization;
 using UniverseCreator.TerrainSystem;
 using UniverseCreator.TerrainSystem.Lighting;
+using UniverseCreator.Editor.Utilities;   // AsyncProgressUI (Generate Vegetation button)
 
 namespace UniverseCreator.Editor.Inspectors
 {
@@ -551,6 +552,17 @@ namespace UniverseCreator.Editor.Inspectors
             // the silent-empty-world defects before the build, not after it.
             UCGroupedInspector.Panel("Validation", () => UCVegetationValidation.Draw(veg));
 
+            // The trigger (Step 31). Vegetation authoring moved onto this manager, but
+            // the only way to run a scatter was to commit a library field with
+            // autoRegenerate on - so a bare Regenerate on the world above, or an author
+            // who simply wanted to re-place with the current settings, spawned nothing
+            // and looked broken. This button is the second, explicit trigger of the one
+            // scatter engine: it re-dresses the live terrain through the SAME
+            // RescatterVegetation path a field edit uses (read-only over the baked
+            // surface, full build only when nothing is baked yet), so what it places is
+            // exactly what a rebuild would place - not a preview and not a stub.
+            UCGroupedInspector.Panel("Generate", () => DrawGenerateVegetation(veg));
+
             // Post-build census (V-52). Last, because it is the after picture: what
             // the build the two panels above shaped actually placed, and where the
             // ecology model planted it.
@@ -699,6 +711,60 @@ namespace UniverseCreator.Editor.Inspectors
             }
 
             host.DrawHostedVegetationLibrary(world);
+        }
+
+        /// <summary>
+        /// The explicit "Generate Vegetation" trigger (Step 31). Runs the same
+        /// RescatterVegetation path a committed library field uses, so a press places
+        /// exactly what a full rebuild would - it is a second trigger of one engine,
+        /// not a second engine. Disabled with a stated reason when there is nothing to
+        /// scatter onto or nothing to scatter, so the button is never a no-op that
+        /// looks like a break.
+        /// </summary>
+        private static void DrawGenerateVegetation(UCVegetationSystemManager v)
+        {
+            UniverseCreatorObject world = v.World;
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Generate Vegetation", EditorStyles.boldLabel);
+
+            // Every reason the press would do nothing, named before it is pressed.
+            string blocked = null;
+            if (world == null)
+                blocked = "No world object above this manager to scatter onto. Place " +
+                          "this manager under a Universe Creator world.";
+            else if (!v.vegetationEnabled)
+                blocked = "Vegetation is disabled on this manager. Enable it above, then " +
+                          "generate.";
+            else if (world.IsGenerating)
+                blocked = "A generation is already running. The bar at the bottom of the " +
+                          "editor tracks it; this button re-enables when it finishes.";
+
+            EditorGUILayout.LabelField(
+                "Re-places trees, shrubs, grass and objects over the terrain that " +
+                "already exists, using the current library and densities. Falls back " +
+                "to a full rebuild only when nothing has been baked yet.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            if (blocked != null)
+                EditorGUILayout.HelpBox(blocked, MessageType.Info);
+
+            using (new EditorGUI.DisabledScope(blocked != null))
+            {
+                if (GUILayout.Button("Generate Vegetation", GUILayout.Height(26)))
+                {
+                    // The disabled scope stops the press today, but the null test is
+                    // repeated here rather than trusted to it: a future refactor that
+                    // enables the button must still not dereference a null world.
+                    if (world != null && v.vegetationEnabled && !world.IsGenerating)
+                    {
+                        Debug.Log("[Universe Creator] Generate Vegetation - re-scattering.");
+                        if (world.RescatterVegetation() && world.CurrentTask != null)
+                            AsyncProgressUI.Track(world, world.CurrentTask,
+                                                  "Generate Vegetation");
+                    }
+                }
+            }
         }
 
         /// <summary>

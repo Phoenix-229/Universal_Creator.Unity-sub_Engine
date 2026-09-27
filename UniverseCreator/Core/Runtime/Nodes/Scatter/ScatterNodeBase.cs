@@ -40,9 +40,11 @@ namespace UniverseCreator.Nodes.Scatter
         public abstract string Channel { get; }
 
         /// <summary>
-        /// Instances per square kilometre before mask weighting. The no-manager
-        /// figure: once a UCVegetationSystemManager is present, tree and grass
-        /// density come from its shipped per-hectare fields instead (V-13).
+        /// Instances per square kilometre before mask weighting. The fallback figure
+        /// that places when the ecology pass is off: with Use Ecology enabled on a
+        /// vegetation manager, tree and grass density come from its shipped
+        /// per-hectare fields instead (V-13); with ecology off (the shipped default)
+        /// this node value is what actually places. See <see cref="CeilingDensityPerSqKm"/>.
         /// </summary>
         public float density = 100f;
 
@@ -263,10 +265,12 @@ namespace UniverseCreator.Nodes.Scatter
         }
 
         /// <summary>
-        /// Instances per square kilometre the densest site may carry (V-13). With a
-        /// vegetation manager present this is the manager's figure, converted from
-        /// the per-square-metre ceiling it resolves; without one it is this node's
-        /// own density field, unchanged from Modules 1 and 2.
+        /// Instances per square kilometre the densest site may carry (V-13). When the
+        /// ecology pass is active for this tile - a vegetation manager present AND its
+        /// Use Ecology switch on, which is what makes <see cref="TileData.ecology"/>
+        /// non-null - this is the manager's figure, converted from the per-square-metre
+        /// ceiling it resolves. With ecology OFF (the shipped default) or no manager,
+        /// it is this node's own density field, unchanged from Modules 1 and 2.
         /// </summary>
         /// <remarks>
         /// This is a CEILING. The solve throws darts at the spacing it implies and
@@ -275,11 +279,15 @@ namespace UniverseCreator.Nodes.Scatter
         /// density instead would need a second, finer solve on good ground, and two
         /// solves do not agree about the same position.
         ///
-        /// Why the manager wins for trees: treesPerHectare and globalDensityScale
-        /// are shipped inspector fields that until now nothing read (B-1). A world
-        /// whose tree count is set on one component and overridden per node is a
-        /// world an author cannot reason about, so the component is authoritative
-        /// and the node's density is the no-manager fallback.
+        /// Why the manager wins for trees WHEN ECOLOGY IS ON: treesPerHectare and
+        /// globalDensityScale are shipped inspector fields that until V-13 nothing
+        /// read (B-1). A world whose tree count is set on one component and overridden
+        /// per node is a world an author cannot reason about, so the component is
+        /// authoritative and the node's density is the fallback. NOTE the honest
+        /// limit: this hand-off happens only through the ecology context, so with Use
+        /// Ecology off the node density below is what actually places, not the
+        /// per-hectare dial. (Step 31 audit corrected this comment from claiming
+        /// manager PRESENCE alone was enough.)
         /// </remarks>
         protected float CeilingDensityPerSqKm(TileData tile)
         {

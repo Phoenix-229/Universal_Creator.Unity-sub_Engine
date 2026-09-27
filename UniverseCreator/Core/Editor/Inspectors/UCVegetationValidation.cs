@@ -34,6 +34,8 @@ using UnityEngine;
 using UnityEditor;
 using UniverseCreator.Ecology;
 using UniverseCreator.TerrainSystem;
+using UniverseCreator.Nodes;          // Graph, Generator (scatter-node presence check)
+using UniverseCreator.Nodes.Scatter;  // ScatterNodeBase (Step 31)
 
 namespace UniverseCreator.Editor.Inspectors
 {
@@ -142,6 +144,15 @@ namespace UniverseCreator.Editor.Inspectors
                 CheckGraphOutputs(v, defects);
                 return defects;
             }
+
+            // The two loudest silences, checked before anything about individual
+            // species (Step 31). These are the exact reasons a Regenerate or a
+            // Generate Vegetation press "does nothing": there is no scatter node in
+            // the graph to emit instances, or the library it would resolve is empty.
+            // Both are content, not a broken pipeline - so they are named here rather
+            // than left to a build that places nothing and logs nothing.
+            CheckScatterNodePresent(world, defects);
+            CheckLibraryNotEmpty(lib, defects);
 
             float worldHeightM = Mathf.Max(0f, world.maxHeightMeters);
 
@@ -386,6 +397,58 @@ namespace UniverseCreator.Editor.Inspectors
                     : "No usable resolution fits: reduce the detail species count or the " +
                       "world size."),
                 Severity.Warning));
+        }
+
+        /// <summary>
+        /// No scatter node in the graph means the bake emits no instances at all, so
+        /// nothing scatters regardless of how full the library is. This is the first
+        /// thing to check when a world "spawns nothing" (Step 31).
+        /// </summary>
+        private static void CheckScatterNodePresent(UniverseCreatorObject world, List<Defect> defects)
+        {
+            Graph g = world.graph;
+            if (g == null || g.nodes == null || g.nodes.Count == 0)
+            {
+                defects.Add(new Defect(
+                    "This world has no graph, so nothing - terrain or vegetation - is " +
+                    "generated. Assign a graph on the Universe Creator object.",
+                    Severity.Error));
+                return;
+            }
+
+            bool hasScatter = false;
+            for (int i = 0; i < g.nodes.Count; i++)
+            {
+                if (g.nodes[i] is ScatterNodeBase) { hasScatter = true; break; }
+            }
+
+            if (!hasScatter)
+                defects.Add(new Defect(
+                    "The graph has no scatter node (Tree, Shrub, Grass, Rock or Object " +
+                    "Scatter), so the bake produces no vegetation instances no matter " +
+                    "what the library holds. Add a scatter node fed by the height output, " +
+                    "then generate.",
+                    Severity.Error));
+        }
+
+        /// <summary>
+        /// A library with no prototypes in any of the four lists scatters nothing even
+        /// with a scatter node present - the per-type appliers just skip. The other
+        /// half of the "spawns nothing" answer (Step 31).
+        /// </summary>
+        private static void CheckLibraryNotEmpty(ScatterPrototypeLibrary lib, List<Defect> defects)
+        {
+            int trees = lib.trees != null ? lib.trees.Count : 0;
+            int shrubs = lib.shrubs != null ? lib.shrubs.Count : 0;
+            int details = lib.details != null ? lib.details.Count : 0;
+            int objects = lib.objects != null ? lib.objects.Count : 0;
+
+            if (trees + shrubs + details + objects == 0)
+                defects.Add(new Defect(
+                    "The scatter library is empty: no trees, shrubs, grass or objects are " +
+                    "authored, so a build places nothing. Add at least one prototype in " +
+                    "the Prototype library panel above.",
+                    Severity.Error));
         }
 
         private static void CheckGraphOutputs(UCVegetationSystemManager v, List<Defect> defects)

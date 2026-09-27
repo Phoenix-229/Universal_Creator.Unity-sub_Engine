@@ -38,6 +38,9 @@
 //  is worse than no preview, because it is believed.
 // -----------------------------------------------------------------------------
 
+using System.Collections.Generic;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEditor;
 using UniverseCreator.Ecology;
@@ -51,7 +54,9 @@ namespace UniverseCreator.Editor.Inspectors
     /// </summary>
     public static class UCSuitabilityPreview
     {
-        /// <summary>Samples across a curve. Enough to show a shoulder, cheap enough to draw every repaint.</summary>
+        /// <summary>Samples across a curve. Enough to show a shoulder; the two loops
+        /// of this many climate evaluations are memoized per envelope (see Draw), so
+        /// the cost is paid on a content change, not on every repaint.</summary>
         private const int Samples = 72;
 
         /// <summary>Height of one curve box, in points.</summary>
@@ -102,48 +107,162 @@ namespace UniverseCreator.Editor.Inspectors
 
             float span = Mathf.Max(1f, topAltitudeM);
 
+            // The 144+ climate evaluations behind the two curves are the whole cost of
+            // this preview, and this panel is now hosted inside the Vegetation manager
+            // inspector where a repaint fires on hover and on every open species foldout
+            // at once (V-53). So the sample loops are MEMOIZED per envelope: recomputed
+            // only when a cheap content signature (the envelope's own fields, the resolved
+            // settings, and the span) changes, and reused as-is on every other repaint.
+            // The picture is never stale - editing this species changes the signature and
+            // forces the recompute - but hovering, or editing a DIFFERENT species, no
+            // longer re-runs this species' climate model. (Step 31)
+            CurveCache curves = ResolveCurves(eco, in settings, span);
+
+            DrawCurve("Altitude  0 - " + curves.span.ToString("0") + " m",
+                      curves.byAltitude, curves.bestAltitude);
+            DrawCurve("Soil moisture  0 - 1", curves.byMoisture, curves.bestMoisture);
+
+            DrawVerdict(eco, in settings, curves.span,
+                        curves.bestAltitude, curves.bestAltitudeIndex, curves.bestMoisture);
+        }
+
+        // ---------------------------------------------------------------------
+        //  Memoized curve computation (Step 31)
+        // ---------------------------------------------------------------------
+
+        /// <summary>The computed curves for one envelope, kept between repaints.</summary>
+        private sealed class CurveCache
+        {
+            public long signature;
+            public float span;
+            public float[] byAltitude;
+            public float[] byMoisture;
+            public float bestAltitude;
+            public int bestAltitudeIndex;
+            public float bestMoisture;
+        }
+
+        // Keyed by envelope identity so an entry dies with its envelope - no manual
+        // eviction, no leak when a library shrinks or a scene closes.
+        private static readonly ConditionalWeakTable<EcoEnvelope, CurveCache> Cache =
+            new ConditionalWeakTable<EcoEnvelope, CurveCache>();
+
+        // Public instance fields per type, resolved once. The reflection is only for
+        // building the change signature, never for the drawing itself.
+        private static readonly Dictionary<System.Type, FieldInfo[]> FieldCache =
+            new Dictionary<System.Type, FieldInfo[]>();
+
+        /// <summary>
+        /// Returns the cached curves for this envelope, recomputing the sample loops
+        /// only when the content signature has moved since the last draw.
+        /// </summary>
+        private static CurveCache ResolveCurves(EcoEnvelope eco, in EcoSampleSettings settings,
+                                                float span)
+        {
+            long sig = Signature(eco, in settings, span);
+
+            CurveCache c;
+            if (Cache.TryGetValue(eco, out c) && c.signature == sig)
+                return c;   // unchanged - skip the climate evaluations entirely.
+
+            if (c == null)
+            {
+                c = new CurveCache
+                {
+                    byAltitude = new float[Samples],
+                    byMoisture = new float[Samples]
+                };
+                Cache.Add(eco, c);
+            }
+
+            Compute(eco, in settings, span, c);
+            c.signature = sig;
+            return c;
+        }
+
+        /// <summary>
+        /// The two sample loops that were the body of Draw. Writes straight into the
+        /// cache entry so the arrays are reused rather than reallocated each recompute.
+        /// </summary>
+        private static void Compute(EcoEnvelope eco, in EcoSampleSettings settings,
+                                    float span, CurveCache c)
+        {
+            c.span = span;
+
             // Altitude axis: climate is derived from the altitude being sampled.
-            float[] byAltitude = new float[Samples];
             float bestAltitude = 0f;
             int bestAltitudeIndex = -1;
-
             for (int i = 0; i < Samples; i++)
             {
                 float alt = span * i / (Samples - 1);
-
-                EnvironmentSample site = BuildSite(
-                    eco, in settings, alt, eco.moistureOptimum);
-
-                byAltitude[i] = SpeciesSuitability.Evaluate(eco, in site);
-
-                if (byAltitude[i] > bestAltitude)
-                {
-                    bestAltitude = byAltitude[i];
-                    bestAltitudeIndex = i;
-                }
+                EnvironmentSample site = BuildSite(eco, in settings, alt, eco.moistureOptimum);
+                float v = SpeciesSuitability.Evaluate(eco, in site);
+                c.byAltitude[i] = v;
+                if (v > bestAltitude) { bestAltitude = v; bestAltitudeIndex = i; }
             }
+            c.bestAltitude = bestAltitude;
+            c.bestAltitudeIndex = bestAltitudeIndex;
 
-            // Moisture axis: altitude held at the middle of the world's relief, so
-            // the temperature behind the curve is this world's mid-slope climate.
-            float[] byMoisture = new float[Samples];
+            // Moisture axis: altitude held at the middle of the world's relief, so the
+            // temperature behind the curve is this world's mid-slope climate.
             float bestMoisture = 0f;
-
             for (int i = 0; i < Samples; i++)
             {
                 float wet = (float)i / (Samples - 1);
+                EnvironmentSample site = BuildSite(eco, in settings, span * 0.5f, wet);
+                float v = SpeciesSuitability.Evaluate(eco, in site);
+                c.byMoisture[i] = v;
+                if (v > bestMoisture) bestMoisture = v;
+            }
+            c.bestMoisture = bestMoisture;
+        }
 
-                EnvironmentSample site = BuildSite(
-                    eco, in settings, span * 0.5f, wet);
+        /// <summary>
+        /// A 64-bit content signature over everything the curves depend on: the
+        /// envelope's own fields, the resolved climate settings, and the altitude span.
+        /// Reflection over the public fields rather than a hand-listed set, so a field
+        /// added to the envelope or the settings later cannot silently freeze a stale
+        /// preview. Cheap next to one climate Evaluate, let alone 144 of them.
+        /// </summary>
+        private static long Signature(EcoEnvelope eco, in EcoSampleSettings settings, float span)
+        {
+            long h = 1469598103934665603L;           // FNV-1a 64-bit offset basis
+            h = Mix(h, HashFields(eco));
+            EcoSampleSettings s = settings;           // local copy to box once for reflection
+            h = Mix(h, HashFields(s));
+            h = Mix(h, span.GetHashCode());
+            return h;
+        }
 
-                byMoisture[i] = SpeciesSuitability.Evaluate(eco, in site);
-                if (byMoisture[i] > bestMoisture) bestMoisture = byMoisture[i];
+        private static long Mix(long h, int value)
+        {
+            return (h ^ (uint)value) * 1099511628211L; // FNV-1a 64-bit prime
+        }
+
+        /// <summary>
+        /// Combines the hash codes of an object's public instance fields. The envelope
+        /// and settings hold only value-type fields (floats, bools, enums, Vector2),
+        /// whose GetHashCode is content-based, so equal content hashes equal.
+        /// </summary>
+        private static int HashFields(object obj)
+        {
+            if (obj == null) return 0;
+
+            System.Type t = obj.GetType();
+            FieldInfo[] fields;
+            if (!FieldCache.TryGetValue(t, out fields))
+            {
+                fields = t.GetFields(BindingFlags.Public | BindingFlags.Instance);
+                FieldCache[t] = fields;
             }
 
-            DrawCurve("Altitude  0 - " + span.ToString("0") + " m", byAltitude, bestAltitude);
-            DrawCurve("Soil moisture  0 - 1", byMoisture, bestMoisture);
-
-            DrawVerdict(eco, in settings, span,
-                        bestAltitude, bestAltitudeIndex, bestMoisture);
+            int h = 17;
+            for (int i = 0; i < fields.Length; i++)
+            {
+                object v = fields[i].GetValue(obj);
+                h = h * 31 + (v == null ? 0 : v.GetHashCode());
+            }
+            return h;
         }
 
         /// <summary>
