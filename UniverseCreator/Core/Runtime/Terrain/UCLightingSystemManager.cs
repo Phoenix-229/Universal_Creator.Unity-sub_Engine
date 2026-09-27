@@ -55,7 +55,7 @@ namespace UniverseCreator.TerrainSystem
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Lighting System Manager")]
     [DisallowMultipleComponent]
-    public class UCLightingSystemManager : MonoBehaviour
+    public partial class UCLightingSystemManager : MonoBehaviour
     {
         // =====================================================================
         //  TIME OF DAY  -  RESOLVED, NOT AUTHORED  (W-04)
@@ -285,7 +285,15 @@ namespace UniverseCreator.TerrainSystem
             // Republish the one shader global on an inspector change. Update() no longer
             // ticks it every frame in edit mode (§36), so OnEnable + OnValidate are what
             // keep _UCEnvReflectionStrength correct in the scene view when the tier moves.
-            if (isActiveAndEnabled) PublishEnvReflectionStrength();
+            if (isActiveAndEnabled)
+            {
+                PublishEnvReflectionStrength();
+                // Re-light on an inspector change so the scene view updates at once. Never
+                // create objects here - Unity forbids creating a GameObject during
+                // OnValidate - so the moon is ensured only from OnEnable; existing lights
+                // are re-aimed and re-coloured. (§33)
+                ApplyLighting(allowCreate: false, animate: false);
+            }
         }
 
         // =====================================================================
@@ -302,7 +310,14 @@ namespace UniverseCreator.TerrainSystem
         private static readonly int s_EnvReflectionStrengthId =
             Shader.PropertyToID("_UCEnvReflectionStrength");
 
-        private void OnEnable()  { PublishEnvReflectionStrength(); }
+        private void OnEnable()
+        {
+            PublishEnvReflectionStrength();
+            // Event-driven: light the world ONCE so the scene view shows it without a
+            // per-frame edit-mode loop. This path may create the moon light; OnValidate
+            // must not, so object creation lives here. (§33)
+            ApplyLighting(allowCreate: true, animate: false);
+        }
 
         // Play mode only. This is [ExecuteAlways], so an ungated Update() ran on every
         // scene-view repaint in edit mode - forbidden by the author ("in sceneview which
@@ -314,9 +329,19 @@ namespace UniverseCreator.TerrainSystem
         {
             if (!Application.isPlaying) return;
             PublishEnvReflectionStrength();
+            // Play mode only: per-frame so the day cycle animates and eye adaptation is live. (§33)
+            ApplyLighting(allowCreate: true, animate: true);
         }
 
-        private void OnDisable() { Shader.SetGlobalFloat(s_EnvReflectionStrengthId, 0f); }
+        private void OnDisable()
+        {
+            Shader.SetGlobalFloat(s_EnvReflectionStrengthId, 0f);
+            // Match UC_Sky.hlsl / UC_Lighting.hlsl's "no controller" contract: exposure 0
+            // reads the sky table as black and zero extinction leaves the air lossless, so a
+            // torn-down world never leaves a stale sky or a coloured sun lit on the next scene. (§33)
+            Shader.SetGlobalFloat(s_SkyExposureId, 0f);
+            Shader.SetGlobalVector(s_BeamExtinctionId, Vector4.zero);
+        }
 
         /// <summary>
         /// Push the resolved tier's reflection strength to the shader global, or 0 when the

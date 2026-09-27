@@ -68,7 +68,7 @@ namespace UniverseCreator.TerrainSystem
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Weather System Manager")]
     [DisallowMultipleComponent]
-    public class UCWeatherSystemManager : MonoBehaviour
+    public partial class UCWeatherSystemManager : MonoBehaviour
     {
         // =====================================================================
         //  WIND  -  IMPLEMENTED
