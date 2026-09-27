@@ -110,6 +110,84 @@ namespace UniverseCreator
         }
 
         /// <summary>
+        /// Resamples with a spacing that TIGHTENS on bends and RELAXES on straights, so a
+        /// meander keeps the points it needs to read as a smooth curve while a straight
+        /// reach stays cheap. Walk the (already-smooth) source and keep a point whenever
+        /// EITHER <paramref name="maxSpacing"/> of arc length OR <paramref name="maxTurnRadians"/>
+        /// of accumulated heading change has built up since the last kept point, floored so
+        /// no two kept points are closer than <paramref name="minSpacing"/>.
+        /// </summary>
+        /// <remarks>
+        /// The uniform <see cref="Resample"/> decimates a smooth Catmull-Rom curve back to
+        /// evenly spaced chords, which re-corners every tight bend - a river ribbon built on
+        /// that reads as "snapped/cut" at the meander. This keeps the curve smooth THROUGH
+        /// the bend without paying for points on the straights. Feed it the dense curve from
+        /// <see cref="TessellateCatmullRom"/>, not the raw nodes, so the kept points lie on
+        /// the true curve rather than on the control polygon.
+        /// </remarks>
+        public static Polyline ResampleAdaptive(Polyline src, float maxSpacing,
+                                                float minSpacing, float maxTurnRadians)
+        {
+            if (src == null || !src.IsValid) return new Polyline(src);
+            if (src.Count < 3 || maxSpacing <= 1e-4f) return Resample(src, maxSpacing, true);
+
+            minSpacing = Mathf.Clamp(minSpacing, 0.05f, maxSpacing);
+            maxTurnRadians = Mathf.Max(1e-3f, maxTurnRadians);
+
+            bool carryWeights = src.HasWeights;
+            Polyline dst = new Polyline(src.Count);
+            dst.closed = src.closed;
+
+            dst.points.Add(src.PointAt(0));
+            if (carryWeights) dst.weights.Add(src.WeightAt(0));
+
+            float accDist = 0f;   // arc length since the last kept point
+            float accTurn = 0f;   // total heading change since the last kept point
+
+            int last = src.closed ? src.Count : src.Count - 1;
+            for (int i = 1; i < last; i++)
+            {
+                Vector3 a = src.PointAt(i - 1);
+                Vector3 b = src.PointAt(i);
+                accDist += Vector3.Distance(a, b);
+
+                // Heading change AT this point: the angle between the segment arriving and
+                // the one leaving. Summed, it is how far the course has turned since the
+                // last kept point - the quantity a facet budget should be measured in.
+                Vector3 into = b - a; into.y = 0f;
+                Vector3 outOf = src.PointAt(i + 1) - b; outOf.y = 0f;
+                if (into.sqrMagnitude > 1e-8f && outOf.sqrMagnitude > 1e-8f)
+                    accTurn += Mathf.Acos(Mathf.Clamp(
+                        Vector3.Dot(into.normalized, outOf.normalized), -1f, 1f));
+
+                bool spacingHit = accDist >= maxSpacing;
+                bool turnHit = accTurn >= maxTurnRadians && accDist >= minSpacing;
+                if (spacingHit || turnHit)
+                {
+                    dst.points.Add(b);
+                    if (carryWeights) dst.weights.Add(src.WeightAt(i));
+                    accDist = 0f;
+                    accTurn = 0f;
+                }
+            }
+
+            // The mouth must land exactly where it was drawn, not one spacing short of it.
+            if (!src.closed)
+            {
+                Vector3 end = src.PointAt(src.Count - 1);
+                if (Vector3.Distance(dst.points[dst.Count - 1], end) > 1e-4f)
+                {
+                    dst.points.Add(end);
+                    if (carryWeights) dst.weights.Add(src.WeightAt(src.Count - 1));
+                }
+            }
+
+            if (dst.Count < 2) return Resample(src, maxSpacing, true);
+            if (!carryWeights) dst.DiscardWeights();
+            return dst;
+        }
+
+        /// <summary>
         /// Resamples to a fixed point count rather than a fixed spacing. Used
         /// where two lines must correspond point-for-point, such as the two banks
         /// of one river.

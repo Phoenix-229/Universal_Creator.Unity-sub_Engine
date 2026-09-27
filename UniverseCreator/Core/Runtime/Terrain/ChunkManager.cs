@@ -355,6 +355,20 @@ namespace UniverseCreator.TerrainSystem
         private Ecology.EcoScatterContext bakeEcology;
         private bool bakeEcologyResolved;
 
+        // Per-bake whole-world drainage memo (Step 42): the sea-level floor and every
+        // hydrology node re-solve the SAME chunk-independent whole-world drainage on
+        // every chunk. A fresh cache per bake lets the first chunk's solve serve the
+        // rest byte-for-byte. Same lifecycle as bakeEcology - dropped when the world is
+        // rebuilt or rebound (a graph edit funnels through RebuildAll), never mid-bake.
+        private WorldDrainageCache bakeDrainage = new WorldDrainageCache();
+
+        // Per-bake node priming (Step 42): PrepareMainThread copies each node's authored
+        // data (curve samples, imported texture pixels) to plain arrays for the worker,
+        // which is CONSTANT across a bake. Primed once per bake instead of once per
+        // dispatch, so a 900-chunk world does not GetPixels() a texture 900 times on the
+        // main thread. Reset beside bakeEcologyResolved.
+        private bool bakeNodesPrimed;
+
         public bool IsGenerating
         { 
             get 
@@ -575,6 +589,12 @@ namespace UniverseCreator.TerrainSystem
             bakeEcology = null;
             bakeEcologyResolved = false;
 
+            // Same lifecycle for the drainage memo and node-priming flag (Step 42): a
+            // rebind is a new world/graph, so last world's solves and primed arrays must
+            // not carry over.
+            bakeDrainage = new WorldDrainageCache();
+            bakeNodesPrimed = false;
+
             // Same for the shaping inbox: a rebind means a different world, whose inbox
             // is a different component (or none). Re-found lazily on the next access.
             shapeInbox = null;
@@ -736,6 +756,12 @@ namespace UniverseCreator.TerrainSystem
             // decides whether one happens at all.
             bakeEcology = null;
             bakeEcologyResolved = false;
+
+            // Drainage memo + node priming reset for the new bake (Step 42). A rebuild is
+            // exactly when the graph may have changed, so both are dropped here and only
+            // here, in step with the ecology snapshot above.
+            bakeDrainage = new WorldDrainageCache();
+            bakeNodesPrimed = false;
 
             // The vegetation registry goes with it (V-58). Every cell that survives this
             // rebuild re-registers as its scatter lands, so emptying the registry here
@@ -2224,13 +2250,21 @@ namespace UniverseCreator.TerrainSystem
             c.resolution = resolution;
 
             // Prime nodes on the main thread (textures/curves copied to plain arrays).
-            if (o.graph.nodes != null)
+            // Once per bake, not once per dispatch (Step 42): the primed arrays are a pure
+            // function of each node's authored data, constant for the whole bake, so a
+            // 900-chunk world does not repeat a GetPixels() 900 times on the main thread.
+            // Reset in RebuildAll/Initialize, exactly where the ecology snapshot is.
+            if (!bakeNodesPrimed)
             {
-                for (int i = 0; i < o.graph.nodes.Count; i++)
+                if (o.graph.nodes != null)
                 {
-                    Generator node = o.graph.nodes[i];
-                    if (node != null) node.PrepareMainThread();
+                    for (int i = 0; i < o.graph.nodes.Count; i++)
+                    {
+                        Generator node = o.graph.nodes[i];
+                        if (node != null) node.PrepareMainThread();
+                    }
                 }
+                bakeNodesPrimed = true;
             }
 
             float cellSize = o.GetChunkSize();
@@ -2244,6 +2278,10 @@ namespace UniverseCreator.TerrainSystem
             c.stop = stop;
             c.workerDone = false;
             c.applied = false;
+
+            // Captured into a local like g/stop above so the worker reads a stable
+            // reference, not the field a later RebuildAll may swap (Step 42).
+            WorldDrainageCache drainageCache = bakeDrainage;
 
             CoordRect rect = new CoordRect(new Coord(0, 0), new Coord(resolution, resolution));
             Coord cell = c.cell;
@@ -2281,6 +2319,11 @@ namespace UniverseCreator.TerrainSystem
                     TileData tile = new TileData(cell, rect, cellPos, cellSize3, o.maxHeightMeters);
                     tile.SetFullWorld(worldMin, fullWorldSize);
                     tile.ecology = ecology;
+
+                    // Share this bake's whole-world drainage memo (Step 42) so the sea-
+                    // level floor and any hydrology node solve the chunk-independent
+                    // whole-world drainage once for the bake, not once per chunk.
+                    tile.drainageCache = drainageCache;
 
                     GraphEvaluator evaluator = new GraphEvaluator(g);
                     evaluator.Evaluate(tile, stop);

@@ -113,8 +113,9 @@ namespace UniverseCreator.Editor.Diagnostics
             TestRiverPlannerJunctionsAreOrdered();
             TestRiverValleyCorridorCaps();
             TestRiverValleySagsTheFloodplain();
-            TestRiverFloodplainSoleIsFlat();
+            TestRiverFloodplainIsGradedValley();
             TestMeanderIsSmoothNotFaceted();
+            TestResampleAdaptiveKeepsBendsAndEndpoints();
             TestValleyCorridorAccessor();
             TestVolumeReachesTheRealBed();
             TestNodeReadoutsMatchTheCourse();
@@ -1831,46 +1832,85 @@ namespace UniverseCreator.Editor.Diagnostics
         }
 
         /// <summary>
-        /// The floodplain is a FLAT sole then a wall, not a curved scoop.
+        /// REFINEMENT #5 C5: the floodplain is a GRADED NATURAL VALLEY, not a flat plane.
         /// </summary>
         /// <remarks>
-        /// The sag digging deepest at the channel and fading out with distance made a bowl:
-        /// a river reads as sitting in the bottom of a dish, and the "floodplain" tilts the
-        /// whole way to the hillside. A real river builds a broad near-level floor by
-        /// migrating across it, and the ground only climbs again at the valley wall. Two
-        /// probes inside the sole must land at the SAME elevation (flat), and a probe out
-        /// in the wall band must stand distinctly higher (the ground rising to meet the
-        /// untouched hillside). Both sole probes sit past 18 m out, where the corridor
-        /// CEILING no longer reaches, so the flatness is the sag's own doing and not the
-        /// cap holding two points to the same line.
+        /// The user reversed the old "flat sole" rule (images #23/#24): a checked floodplain
+        /// must "create a NATURAL valley along the river... NOT flatten terrain to be
+        /// equal/level (a natural valley, not a flat plane)". ValleySag is now a single smooth
+        /// lobe (sin over bevel..band) instead of the held-flat sole the retired test enforced.
+        ///
+        /// The valley the buyer sees is that sag ACTING TOGETHER with the pre-existing corridor
+        /// cap: the cap ramps the ground up from the waterline near the channel, the sag scoops
+        /// the mid-band down toward the floodplain floor, and both fade out to the untouched
+        /// hillside. So the cross-section rises smoothly from the water's edge (~surfaceY) through
+        /// a floodplain shelf (~floor) up to the hillside - a real graded valley, deepest by the
+        /// river, never a level table. This test pins THAT, and isolates the sag's own
+        /// contribution with an off/on pair so "the valley never touches the bank" is measured on
+        /// the sag alone (the cap is present in both layers and is not what C5 changed).
+        ///
+        /// Verified geometry of MakeValleyLayer(surfaceY 100, corridor 90, width 40, depth 4):
+        /// bevel 6, sag band = 6 + min(90,40) = 46, sag floor = 100 + 4*0.5 = 102, hillside 106,
+        /// corridor cap = 100 + 48*smoothstep(signed/96). Bank edge is 20 m off the centreline, so
+        /// a signed distance d probes at z = 420 + d. Values below are the run-1 measured numbers.
         /// </remarks>
-        private static void TestRiverFloodplainSoleIsFlat()
+        private static void TestRiverFloodplainIsGradedValley()
         {
             const float surfaceY = 100f;
-            const float gentleY = surfaceY + 6f;
+            const float gentleY = surfaceY + 6f;   // untouched hillside, 6 m above the water
 
-            WaterCarveLayer on = MakeValleyLayer(surfaceY, 90f, 40f, 4f, true);
+            WaterCarveLayer on  = MakeValleyLayer(surfaceY, 90f, 40f, 4f, true);
+            WaterCarveLayer off = MakeValleyLayer(surfaceY, 90f, 40f, 4f, false);
 
-            float half = 20f;   // half of the 40 m width
-            float soleNear = on.HeightAt(400f, 400f + half + 20f, gentleY);
-            float soleFar  = on.HeightAt(400f, 400f + half + 28f, gentleY);
-            float wall     = on.HeightAt(400f, 400f + half + 40f, gentleY);
+            const float bank = 400f + 20f;         // bank edge, signed distance 0 from here out
 
-            Check(Mathf.Abs(soleNear - soleFar) < 0.25f,
-                  "the floodplain sole is not flat: ground 20 m out sits at " + soleNear
-                  + " m and 28 m out at " + soleFar + " m. A river builds a level floor by "
-                  + "migrating across it; a sole that tilts is the old bowl-shaped scoop");
+            float onBank  = on.HeightAt(400f,  bank + 7f,  gentleY);   // just past the bevel
+            float offBank = off.HeightAt(400f, bank + 7f,  gentleY);   // same spot, sag off
+            float nearCh  = on.HeightAt(400f,  bank + 10f, gentleY);   // near-channel floodplain
+            float mid     = on.HeightAt(400f,  bank + 26f, gentleY);   // floodplain shelf (~floor)
+            float offMid  = off.HeightAt(400f, bank + 26f, gentleY);   // same spot, sag off
+            float wall    = on.HeightAt(400f,  bank + 42f, gentleY);   // rising back to hillside
 
-            Check(wall > soleFar + 0.5f,
-                  "the valley wall does not rise: ground 40 m out sits at " + wall + " m, "
-                  + "no higher than the sole at " + soleFar + " m. Beyond the floodplain the "
-                  + "ground must climb to meet the untouched hillside, or there is no wall "
-                  + "and the flat floor runs to the horizon");
+            // C5 "must NOT touch the river bank": the SAG adds essentially nothing right at the
+            // bank (on == off there). Whatever shaping exists that close to the water is the
+            // corridor cap, which is in both layers and is not what the floodplain changed.
+            Check(Mathf.Abs(onBank - offBank) < 0.5f,
+                  "the floodplain touched the bank: with the sag on the ground just past the "
+                  + "bevel sits at " + onBank + " m, with it off at " + offBank + " m. C5 requires "
+                  + "the valley fade to NOTHING at the bank, so these must match");
 
-            Check(wall < gentleY + 1e-3f,
-                  "the wall overshot the hillside: ground 40 m out sits at " + wall + " m, "
-                  + "above the untouched " + gentleY + " m. The sag lowers only - it may "
-                  + "rise back TO the hillside but never above it");
+            // The sag digs a REAL floodplain valley through the mid-band - well below both the
+            // hillside and the same spot with the valley off (so it is the sag's own doing).
+            Check(mid < gentleY - 2f && mid < offMid - 1f,
+                  "the floodplain did not dig a valley: the mid-band sits at " + mid + " m against "
+                  + "an untouched hillside at " + gentleY + " m and the sag-off ground at " + offMid
+                  + " m. A checked floodplain must scoop a natural valley beside the channel");
+
+            // GRADED, not a flat plane (the C5 reversal): the near-channel floodplain sits
+            // distinctly LOWER than the rising valley wall - the cross-section climbs, it is not
+            // the level table the retired flat-sole test required.
+            Check(wall - nearCh > 1f,
+                  "the floodplain floor is a flat table: near the channel it sits at " + nearCh
+                  + " m and out at the wall at " + wall + " m, level within a metre. C5 wants a "
+                  + "GRADED natural valley that rises to its walls, not the old level sole");
+
+            // The wall climbs back TOWARD the untouched hillside but never above it.
+            Check(wall > mid + 1f && wall < gentleY + 1e-3f,
+                  "the valley wall does not ease back to the hillside: the mid-band is " + mid
+                  + " m, the wall " + wall + " m, the hillside " + gentleY + " m. The valley must "
+                  + "rise back toward the hillside (wall above the floor) but never above it");
+
+            // Lower only - the sag never pushes ground above the untouched hillside.
+            Check(onBank <= gentleY + 1e-3f && nearCh <= gentleY + 1e-3f
+                  && mid <= gentleY + 1e-3f && wall <= gentleY + 1e-3f,
+                  "the sag raised ground above the untouched hillside at " + gentleY + " m (bank "
+                  + onBank + ", near " + nearCh + ", mid " + mid + ", wall " + wall + "). The valley "
+                  + "lowers only - it may rise back TO the hillside but never above it");
+
+            // The floodplain shelf is dry land at normal flow, not marsh at the waterline.
+            Check(mid >= surfaceY - 0.01f,
+                  "the floodplain shelf sits at " + mid + " m, at or below the water at "
+                  + surfaceY + " m. The valley floor is dry land at normal flow, not a backwater");
         }
 
         /// <summary>
@@ -1949,6 +1989,102 @@ namespace UniverseCreator.Editor.Diagnostics
                   + ", against a peak offset of " + amplitude + " m. Offsets near it:" + near
                   + ". A smooth loop turns gradually even where it turns fast; a curvature "
                   + "spike is a clip corner or a clamp snap - the faceted meander");
+        }
+
+        /// <summary>
+        /// The curvature-adaptive resample (Step 43 L) keeps the points a bend needs to
+        /// read as a curve while thinning the straights, and it never drops an endpoint.
+        /// </summary>
+        /// <remarks>
+        /// The river pipeline used a UNIFORM resample after the smooth Catmull-Rom pass,
+        /// which decimated the smooth curve back to fixed chords and re-cornered every tight
+        /// bend - the "snapped/cut" meander the author saw. ResampleAdaptive keeps a point
+        /// when EITHER a spacing budget OR a small heading budget has accumulated, so a bend
+        /// stays dense and a straight stays sparse. The fixture is a dense straight run into
+        /// a dense smooth quarter-arc: the arc must come back far more densely sampled than
+        /// the straight, both endpoints must survive, and the whole thing must still be
+        /// decimated (the point of it - a straight full of input points must thin out).
+        /// </remarks>
+        private static void TestResampleAdaptiveKeepsBendsAndEndpoints()
+        {
+            const float maxSpacing = 6f;
+            const float minSpacing = maxSpacing * 0.35f;
+            const float maxTurn = 0.14f;   // ~8 degrees, the pipeline's setting
+
+            Polyline src = new Polyline(0);
+
+            // Dense straight run: x 0..100 at 1 m, z=0. accTurn stays ~0 here, so only the
+            // spacing budget fires and the straight thins to ~maxSpacing chords.
+            for (int i = 0; i <= 100; i++) src.points.Add(new Vector3(i, 0f, 0f));
+
+            // Dense smooth quarter-arc, radius 20, centre (100,0,20): from (100,0,0) round
+            // to (120,0,20). ~180 samples over ~31 m of arc, so the INPUT is much finer than
+            // maxSpacing everywhere and any thinning on the arc is the algorithm's choice.
+            const int arcSamples = 180;
+            for (int i = 1; i <= arcSamples; i++)
+            {
+                float a = (i / (float)arcSamples) * (Mathf.PI * 0.5f);   // 0 .. 90 deg
+                float x = 100f + 20f * Mathf.Sin(a);
+                float z = 20f - 20f * Mathf.Cos(a);
+                src.points.Add(new Vector3(x, 0f, z));
+            }
+            src.DiscardWeights();
+
+            Polyline dst = SplineOperations.ResampleAdaptive(src, maxSpacing, minSpacing, maxTurn);
+
+            Check(dst != null && dst.Count >= 2, "ResampleAdaptive returned an empty or null curve");
+
+            // Endpoints survive exactly - a dropped mouth or head would leave the weld and
+            // the join detection reading the wrong point.
+            Check(Vector3.Distance(dst.PointAt(0), src.PointAt(0)) < 1e-3f,
+                  "ResampleAdaptive moved or dropped the first point");
+            Check(Vector3.Distance(dst.PointAt(dst.Count - 1), src.PointAt(src.Count - 1)) < 1e-3f,
+                  "ResampleAdaptive moved or dropped the last point");
+
+            // It must actually decimate: 281 input points on a mostly-straight course cannot
+            // all survive, or it is doing nothing and the perf argument is a lie.
+            Check(dst.Count < src.Count,
+                  "ResampleAdaptive kept every point (" + dst.Count + " of " + src.Count
+                  + ") - it decimated nothing");
+
+            // Classify kept points: straight (x <= 100 and z < 0.5) versus arc (the rest).
+            // The test is density: mean spacing along the arc must be well under mean spacing
+            // along the straight, which is what keeps a bend smooth after the resample.
+            int straightKept = 0, arcKept = 0;
+            for (int i = 0; i < dst.Count; i++)
+            {
+                Vector3 p = dst.PointAt(i);
+                if (p.x <= 100f + 1e-3f && p.z < 0.5f) straightKept++;
+                else arcKept++;
+            }
+
+            Check(straightKept >= 2,
+                  "the straight lost all its points (" + straightKept + ") - a 100 m run "
+                  + "should still carry a handful at ~" + maxSpacing + " m spacing");
+
+            // ~31 m of arc: a uniform 6 m resample would keep ~5 points; the turn budget
+            // (90 deg / 8 deg ~= 11) should keep more than that, and more per metre than the
+            // straight (100 m / 6 m ~= 17 points -> ~0.17/m; the arc must beat that).
+            float straightSpanM = 100f;
+            float arcSpanM = Mathf.PI * 0.5f * 20f;   // quarter circle, radius 20 ~= 31.4 m
+            float straightDensity = straightKept / straightSpanM;
+            float arcDensity = arcKept / arcSpanM;
+
+            Check(arcDensity > straightDensity * 1.5f,
+                  "ResampleAdaptive did not densify the bend: arc density "
+                  + arcDensity.ToString("F3") + "/m vs straight " + straightDensity.ToString("F3")
+                  + "/m. The turn budget must keep more points through a curve than along a "
+                  + "straight, or the meander corners just as it did with a uniform resample");
+
+            // And no chord may exceed maxSpacing by more than a hair anywhere - the spacing
+            // budget is a hard ceiling even where the turn budget has not fired.
+            float longest = 0f;
+            for (int i = 1; i < dst.Count; i++)
+                longest = Mathf.Max(longest, Vector3.Distance(dst.PointAt(i - 1), dst.PointAt(i)));
+
+            Check(longest <= maxSpacing + 1.5f,
+                  "ResampleAdaptive left a chord of " + longest.ToString("F2") + " m, over the "
+                  + maxSpacing + " m ceiling - the spacing budget is not holding");
         }
 
         // ---------------------------------------------------------------------

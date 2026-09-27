@@ -80,6 +80,15 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public Ecology.EcoScatterContext ecology;
 
+        /// <summary>
+        /// Per-bake memo of whole-world drainage solves, shared by every chunk of one
+        /// bake so a chunk-independent solve is computed once, not once per chunk (Step
+        /// 42). Set by the chunking system in Dispatch. Null on the single-tile path and
+        /// in tests, where <see cref="WorldDrainage.Solve"/> falls back to no caching -
+        /// exactly the original behaviour.
+        /// </summary>
+        public WorldDrainageCache drainageCache;
+
         // Set by GraphEvaluator.Evaluate before any node runs. Nodes reach it
         // indirectly through Generator.GetInputMatrix; they never touch it directly.
         private GraphEvaluator evaluator;

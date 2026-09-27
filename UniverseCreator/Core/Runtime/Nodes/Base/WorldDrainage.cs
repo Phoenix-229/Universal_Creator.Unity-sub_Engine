@@ -27,23 +27,70 @@
 //  the surface is solved coarse and read back per chunk pixel, while the ground it
 //  is subtracted from stays at chunk resolution.
 //
-//  NOT CACHED, DELIBERATELY
-//  ------------------------
-//  Two nodes asking for drainage do not necessarily mean the same drainage: each
-//  pulls its OWN input branch and may condition it differently, so a shared result
-//  would quietly hand one node the other's terrain. And any cache key short of
-//  hashing the entire upstream graph goes stale the moment a noise slider moves.
-//  At 256x256 against a 1025x1025 chunk the solve is a few per cent of the chunk's
-//  own work, and a river in the wrong place costs more than a re-solve.
+//  CACHED PER BAKE, NOT PER NODE AND NOT ACROSS EDITS (Step 42)
+//  ------------------------------------------------------------
+//  The original design cached nothing, for two good reasons: two DIFFERENT nodes
+//  asking for drainage may each pull their OWN input branch, so a result shared
+//  between nodes could hand one node the other's terrain; and any key short of
+//  hashing the whole upstream graph would go stale the moment a slider moved.
+//
+//  Both reasons survive here, and neither forbids the one form of caching that is
+//  free money: the SAME node re-solving the SAME whole-world drainage on every one
+//  of a bake's chunks. WholeWorld's rect and bounds are chunk-independent, so for a
+//  fixed (consumer, inputIndex, resPerSide, fillEpsilon, needFlow) the solve is
+//  BYTE-IDENTICAL on every chunk - and at 16+ chunks (900 for a large world) it is
+//  recomputed 16+ times for one answer. The <see cref="WorldDrainageCache"/> passed
+//  in via <see cref="TileData.drainageCache"/> memoises that, keyed by exactly those
+//  five fields so two different nodes NEVER alias, and lives for ONE bake so a graph
+//  edit (which funnels through a fresh RebuildAll with a fresh empty cache) can never
+//  serve a stale surface - within a bake the graph is immutable. A null cache (single
+//  tile, tests, any non-chunked caller) means "do not cache", identical to before.
 //
 //  Managed C# over float[] and int[]. No Unity API beyond Mathf and Vector2; safe
-//  on a worker Task.
+//  on a worker Task. The cache's own get/put are locked; the WorldDrainage it hands
+//  back is immutable (sealed, all fields readonly) and every consumer treats it
+//  read-only, so sharing one instance across concurrent workers is safe.
 // -----------------------------------------------------------------------------
 
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace UniverseCreator.Nodes
 {
+    /// <summary>
+    /// Per-bake memo of whole-world drainage solves. One instance is created per bake
+    /// (beside the ecology snapshot) and handed to every chunk's <see cref="TileData"/>,
+    /// so a solve computed for the first chunk is reused byte-for-byte by the rest
+    /// instead of recomputed 16+ (900+) times for the one answer.
+    ///
+    /// Keyed by the exact call-site parameters so two different nodes - or the same
+    /// node asked for two different things - never receive each other's surface. Lives
+    /// for one bake: a graph edit starts a fresh RebuildAll with a fresh empty cache,
+    /// which is why a slider move can never serve a stale result.
+    ///
+    /// Thread-safe: the get and the put are the only synchronised sections, and the
+    /// solve itself runs OUTSIDE the lock, so concurrent workers never serialise on it.
+    /// Two workers racing the same key both compute the identical result and one wins
+    /// the store; the loser's copy is equally correct for its own chunk.
+    /// </summary>
+    public sealed class WorldDrainageCache
+    {
+        private readonly Dictionary<string, WorldDrainage> map = new Dictionary<string, WorldDrainage>();
+        private readonly object gate = new object();
+
+        public bool TryGet(string key, out WorldDrainage value)
+        {
+            lock (gate) { return map.TryGetValue(key, out value); }
+        }
+
+        public void Put(string key, WorldDrainage value)
+        {
+            if (value == null) return;
+            lock (gate) { map[key] = value; }
+        }
+    }
+
+
     /// <summary>How a coarse world-scale field is read at chunk resolution.</summary>
     public enum WorldRead
     {
@@ -139,6 +186,23 @@ namespace UniverseCreator.Nodes
         {
             if (consumer == null || tile == null) return null;
 
+            // Per-bake memo (Step 42). The whole-world solve is chunk-independent for a
+            // fixed call site, so a key of exactly the arguments that change it lets the
+            // first chunk's result serve every later chunk of the same bake. A null cache
+            // (single tile / tests / non-chunked callers) skips this entirely - identical
+            // to the original no-cache behaviour.
+            WorldDrainageCache cache = tile.drainageCache;
+            string key = null;
+            if (cache != null)
+            {
+                key = consumer.id + "|" + inputIndex + "|" + resPerSide + "|"
+                    + fillEpsilon.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                    + "|" + (needFlow ? 1 : 0);
+
+                WorldDrainage hit;
+                if (cache.TryGet(key, out hit)) return hit;
+            }
+
             TileData worldView = TileWindows.WholeWorld(tile, resPerSide);
 
             // With no graph to re-pull through there is only this chunk to go on -
@@ -169,7 +233,14 @@ namespace UniverseCreator.Nodes
                 if (stop != null && stop.StopRequested) return null;
             }
 
-            return new WorldDrainage(source, filled, dir, accum);
+            WorldDrainage result = new WorldDrainage(source, filled, dir, accum);
+
+            // Store ONLY a completed, non-cancelled solve. A cancelled one means the bake
+            // is being torn down or superseded, and caching its (null-ish) result would
+            // hand a later chunk "no water" for a body that is really there.
+            if (cache != null && (stop == null || !stop.StopRequested)) cache.Put(key, result);
+
+            return result;
         }
 
         /// <summary>

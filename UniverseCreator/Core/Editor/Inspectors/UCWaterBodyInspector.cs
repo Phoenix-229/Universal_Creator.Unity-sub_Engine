@@ -36,7 +36,6 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool riverFoldout = true;
         private static bool digFoldout = true;
         private static bool routingFoldout = true;
-        private static bool connectionsFoldout = true;
         private static bool nodesFoldout;
         private static bool bedFoldout = true;
         private static bool meshFoldout;
@@ -103,16 +102,13 @@ namespace UniverseCreator.Editor.Inspectors
                 riverFoldout = Group(riverFoldout, "River Channel", UCInspectorUI.HeaderBlue);
                 if (riverFoldout) DrawRiver(body);
 
-                routingFoldout = Group(routingFoldout, "Routing and Junctions", UCInspectorUI.HeaderAmber);
+                // REFINEMENT #5 C4: the "Routing and Junctions" tab and the separate
+                // "Connections" tab are gone. Junctions are now made in the SCENE, at the
+                // node - a tick box appears on an end node the moment it touches another
+                // body's node (see DrawNodeConnectTicks in OnSceneGUI). What remains here is
+                // just the bank behaviour, so the foldout is renamed to match.
+                routingFoldout = Group(routingFoldout, "Banks", UCInspectorUI.HeaderAmber);
                 if (routingFoldout) DrawRouting(body);
-            }
-
-            // Connections (tick-on-touch): rivers and lakes only. The ocean connects
-            // from the river side and gets no child list; pools do not join. (§6)
-            if (body.kind == WaterBodyKind.River || body.kind == WaterBodyKind.Lake)
-            {
-                connectionsFoldout = Group(connectionsFoldout, "Connections", UCInspectorUI.HeaderAmber);
-                if (connectionsFoldout) DrawConnections(body);
             }
 
             // Waterfalls (§12): placed by hand on a river. The author drops a crest
@@ -201,7 +197,7 @@ namespace UniverseCreator.Editor.Inspectors
             // body still refitting, which is the opposite of what it promises.
             DrawPropertiesExcluding(serializedObject,
                 "m_Script", "bodyKind", "shape", "outline", "course",
-                "nodeDepthMetres", "nodeWidthMetres", "placementSaved",
+                "nodeDepthMetres", "nodeWidthMetres", "nodeFloodplainMetres", "placementSaved",
                 "useOwnMaterial", "water", "materialOverride");
             serializedObject.ApplyModifiedProperties();
 
@@ -266,7 +262,6 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         private int selectedNodeIndex = -1;
-        private bool isConnectingJunction = false;
         private bool isPlacingWaterfall = false;
         private static bool waterfallFoldout = true;
 
@@ -282,10 +277,11 @@ namespace UniverseCreator.Editor.Inspectors
                 RunAuthoringAction(body, "Snap river course", body.SnapCourseToGround);
             if (ActionButton("Clear Course", UCInspectorUI.ButtonRed))
                 RunAuthoringAction(body, "Clear river course", () => { 
-                    body.course.Clear(); 
+                    body.course.Clear();
                     if (body.nodeWidthMetres != null) body.nodeWidthMetres.Clear();
                     if (body.nodeDepthMetres != null) body.nodeDepthMetres.Clear();
-                    selectedNodeIndex = -1; 
+                    if (body.nodeFloodplainMetres != null) body.nodeFloodplainMetres.Clear();
+                    selectedNodeIndex = -1;
                 });
             EditorGUILayout.EndHorizontal();
 
@@ -362,6 +358,7 @@ namespace UniverseCreator.Editor.Inspectors
             // has validated, and an index past the end of these lists throws.
             while (body.nodeDepthMetres.Count < body.course.Count) body.nodeDepthMetres.Add(0f);
             while (body.nodeWidthMetres.Count < body.course.Count) body.nodeWidthMetres.Add(0f);
+            while (body.nodeFloodplainMetres.Count < body.course.Count) body.nodeFloodplainMetres.Add(0f);
 
             EditorGUI.BeginChangeCheck();
 
@@ -392,6 +389,34 @@ namespace UniverseCreator.Editor.Inspectors
                                + "of the last node that set one."),
                 body.nodeWidthMetres[i]);
 
+            // REFINEMENT #5 C5: the floodplain is a TICK plus a size, opt-in on THIS node
+            // (not every node, not the whole river). Ticked, it carves a natural valley
+            // beside the channel scaled by the size; unticked stores 0 so the reach is a
+            // plain trench. The valley never touches the bank, never reshapes the trench and
+            // never flattens the ground to a level plane - see WaterCarveLayer.ValleySag.
+            bool fpOn = body.nodeFloodplainMetres[i] > 0.01f;
+            bool newFpOn = EditorGUILayout.ToggleLeft(
+                new GUIContent("Floodplain valley",
+                               "Tick to ease a gentle NATURAL valley into the terrain either "
+                               + "side of the river at THIS node. Opt-in per node, not the "
+                               + "whole river. It never touches the bank or the trench and "
+                               + "never flattens the ground to a level plane - it grades a "
+                               + "scoop beside the channel, scaled by the size below."),
+                fpOn);
+
+            float newFloodplain = 0f;
+            if (newFpOn)
+            {
+                float shownSize = fpOn ? body.nodeFloodplainMetres[i] : Mathf.Max(8f, body.widthMetres);
+                newFloodplain = EditorGUILayout.FloatField(
+                    new GUIContent("Valley size (m)",
+                                   "How far to each side the natural valley reaches, in metres. "
+                                   + "Larger opens a broader, gentler valley; the depression is "
+                                   + "deepest mid-way and fades to nothing at the bank and at the "
+                                   + "untouched hillside."),
+                    shownSize);
+            }
+
             if (EditorGUI.EndChangeCheck())
             {
                 Undo.RecordObject(body, "Edit River Node");
@@ -407,6 +432,7 @@ namespace UniverseCreator.Editor.Inspectors
 
                 body.nodeDepthMetres[i] = newDepth;
                 body.nodeWidthMetres[i] = newWidth;
+                body.nodeFloodplainMetres[i] = newFpOn ? Mathf.Max(0.5f, newFloodplain) : 0f;
 
                 EditorUtility.SetDirty(body);
                 // Per-node typing fires EndChangeCheck on EVERY keystroke. Do NOT rebuild here;
@@ -437,49 +463,103 @@ namespace UniverseCreator.Editor.Inspectors
 
             EditorGUILayout.Space(4);
 
+            // REFINEMENT #5 C4: connection is a TICK BOX under the node - no "Connect"
+            // button, no scene-pick mode, no target dropdown. The tick appears the moment
+            // this END node touches another river or lake (the same tick is drawn in the
+            // Scene at the node by DrawNodeConnectTicks). Ticking wires the join node-to-node
+            // where they meet; the ocean connects on its own and is never listed.
             if (body.IsEndNode(i))
             {
                 UCWaterBody joined = body.JunctionAt(i);
+                UCWaterBody touch = NodeConnectCandidate(body, i);
 
                 if (joined != null)
                 {
-                    EditorGUILayout.LabelField("Joined to", joined.name + "  (" + joined.kind + ")");
+                    bool keep = EditorGUILayout.ToggleLeft(
+                        new GUIContent("Connected to " + joined.name + "  (" + joined.kind + ")",
+                            "This node is joined to another body where they touch. Untick to "
+                            + "drop the junction."),
+                        true);
 
-                    if (GUILayout.Button(new GUIContent("Clear Connection",
-                            "Drops the junction. An end left unjoined that runs into water "
-                            + "on its way downhill will be reconnected by the build.")))
-                    {
-                        Undo.RecordObject(body, "Clear River Junction");
-
-                        if (i == 0) body.joinUpstreamFrom = null;
-                        else body.joinDownstreamTo = null;
-
-                        EditorUtility.SetDirty(body);
-                        if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-                    }
+                    if (!keep) WireNodeJoin(body, joined, false);
                 }
-                else if (isConnectingJunction)
+                else if (touch != null)
+                {
+                    bool now = EditorGUILayout.ToggleLeft(
+                        new GUIContent("Connect to " + touch.name + "  (" + touch.kind + ")",
+                            "This end node is touching another body. Tick to connect them "
+                            + "node-to-node, where they meet - the surfaces weld and the "
+                            + "connection keeps the trench width."),
+                        false);
+
+                    if (now) WireNodeJoin(body, touch, true);
+                }
+                else
                 {
                     EditorGUILayout.HelpBox(
-                        "Click another water body in the Scene view to connect this node to "
-                        + "it. Press ESC to cancel.", MessageType.Info);
-
-                    if (GUILayout.Button("Cancel Connection"))
-                    {
-                        isConnectingJunction = false;
-                        SceneView.RepaintAll();
-                    }
-                }
-                else if (GUILayout.Button(new GUIContent("Connect to Water Body",
-                             "Click to select a target water body in the scene view to join "
-                             + "this end to.")))
-                {
-                    isConnectingJunction = true;
-                    SceneView.RepaintAll();
+                        "Move this end node onto another river or lake's edge to connect them. "
+                        + "A tick box appears here and in the Scene at the node the moment they "
+                        + "touch. A river mouth meeting the ocean connects on its own.",
+                        MessageType.None);
                 }
             }
 
             EditorGUILayout.EndVertical();
+        }
+
+        /// <summary>
+        /// REFINEMENT #5 C4 - the joinable body whose edge is touching a specific END node,
+        /// or null. Used by both the node inspector tick and the Scene tick so the two agree
+        /// on when a connection is offered and to whom. Tight radius (the node must be ON the
+        /// other body's edge, not merely within Auto Connect metres) so the tick means "these
+        /// two nodes meet here."
+        /// </summary>
+        private UCWaterBody NodeConnectCandidate(UCWaterBody body, int i)
+        {
+            if (body == null || !body.IsEndNode(i)) return null;
+
+            List<UCWaterBody> touching = body.TouchingJoinables();
+            if (touching == null || touching.Count == 0) return null;
+
+            Vector3 p = body.NodeWorldPoint(i);
+            float radius = Mathf.Max(5f, body.widthMetres);
+
+            UCWaterBody best = null;
+            float bestGap = float.MaxValue;
+            foreach (UCWaterBody other in touching)
+            {
+                if (other == null) continue;
+                Vector3 edge;
+                float sY, dJ;
+                if (!other.NearestEdgePoint(p, body.joinBlendMetres, out edge, out sY, out dJ)) continue;
+                float gap = new Vector2(edge.x - p.x, edge.z - p.z).magnitude;
+                if (gap <= radius && gap < bestGap) { bestGap = gap; best = other; }
+            }
+            return best;
+        }
+
+        /// <summary>
+        /// REFINEMENT #5 C4 - wire or clear a node-to-node join and rebuild both sides. A
+        /// lake ticked against a river stores the join on the RIVER (SetJoinTicked handles
+        /// which side carries it), so both objects are recorded for Undo and rebuilt.
+        /// </summary>
+        private void WireNodeJoin(UCWaterBody body, UCWaterBody other, bool on)
+        {
+            if (body == null || other == null) return;
+
+            UCWaterBody wired = (body.shape != UCWaterBody.ShapeMode.RiverSpline &&
+                                 other.shape == UCWaterBody.ShapeMode.RiverSpline)
+                                ? other : body;
+
+            Undo.RecordObject(body, on ? "Connect Water Bodies" : "Disconnect Water Bodies");
+            Undo.RecordObject(wired, on ? "Connect Water Bodies" : "Disconnect Water Bodies");
+
+            body.SetJoinTicked(other, on);
+
+            EditorUtility.SetDirty(body);
+            EditorUtility.SetDirty(wired);
+            if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
+            if (wired != body && wired.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(wired);
         }
 
         // =====================================================================
@@ -694,7 +774,7 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         // =====================================================================
-        //  ROUTING
+        //  BANKS
         // =====================================================================
 
         private void DrawRouting(UCWaterBody body)
@@ -713,85 +793,11 @@ namespace UniverseCreator.Editor.Inspectors
                     "default, so the river raises no ground unless you ask; on gentle ground " +
                     "it does nothing.", MessageType.None);
 
-            EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField("Junctions", EditorStyles.miniBoldLabel);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("autoConnectMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinDownstreamTo"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinUpstreamFrom"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinBlendMetres"));
-
-            EditorGUILayout.HelpBox(
-                "A river can join an ocean, a lake or another river - never a pool. " +
-                "Leave the two fields empty and the mouth connects by itself to " +
-                "whatever ocean or lake it reaches within Auto Connect metres.",
-                MessageType.None);
-
-            EditorGUI.indentLevel--;
-        }
-
-        /// <summary>
-        /// Tick-on-touch (§6). Lists the joinable water bodies whose edge is within Auto
-        /// Connect metres of one of this body's endpoints, each with a checkbox that
-        /// wires (or clears) the join. The checkbox only activates when the bodies are
-        /// actually touching - it is disabled otherwise, so a tick always means "these
-        /// two meet here." The ocean is never listed: a river's mouth connects to the sea
-        /// by itself and the sea carries no child connection node.
-        /// </summary>
-        private void DrawConnections(UCWaterBody body)
-        {
-            EditorGUI.indentLevel++;
-
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("autoConnectMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("joinBlendMetres"));
-            serializedObject.ApplyModifiedProperties();
-
-            EditorGUILayout.Space(2);
-
-            List<UCWaterBody> touching = body.TouchingJoinables();
-
-            if (touching.Count == 0)
-            {
-                EditorGUILayout.HelpBox(
-                    "No other river or lake is touching this one. Move an endpoint within " +
-                    "Auto Connect metres of another body's edge and it appears here with a " +
-                    "checkbox. A river mouth meeting the ocean connects on its own - the sea " +
-                    "is never listed.", MessageType.None);
-                EditorGUI.indentLevel--;
-                return;
-            }
-
-            EditorGUILayout.LabelField("Touching bodies", EditorStyles.miniBoldLabel);
-
-            foreach (UCWaterBody other in touching)
-            {
-                if (other == null) continue;
-
-                bool joined = body.IsJoinedTo(other) ||
-                              (other.shape == UCWaterBody.ShapeMode.RiverSpline && other.IsJoinedTo(body));
-
-                EditorGUILayout.BeginHorizontal();
-                bool now = EditorGUILayout.ToggleLeft(
-                    new GUIContent(other.name + "  (" + other.kind + ")",
-                        "Tick to connect the two bodies where they touch: their surfaces " +
-                        "are welded at the join and the shader blends the seam over Join " +
-                        "Blend Metres, so they read as one continuous surface."),
-                    joined);
-                EditorGUILayout.EndHorizontal();
-
-                if (now != joined)
-                {
-                    Undo.RecordObject(body, now ? "Connect Water Bodies" : "Disconnect Water Bodies");
-                    UCWaterBody wired = (body.shape != UCWaterBody.ShapeMode.RiverSpline &&
-                                         other.shape == UCWaterBody.ShapeMode.RiverSpline)
-                                        ? other : body;
-                    Undo.RecordObject(wired, now ? "Connect Water Bodies" : "Disconnect Water Bodies");
-                    body.SetJoinTicked(other, now);
-                    EditorUtility.SetDirty(body);
-                    EditorUtility.SetDirty(wired);
-                    if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-                    if (wired != body && wired.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(wired);
-                }
-            }
+            // REFINEMENT #5 C4: junction fields (Auto Connect, Join Downstream/Upstream,
+            // Join Blend) and the whole "Connections" list are removed from the inspector.
+            // A river joins another body by ticking the box that appears on its END NODE in
+            // the SCENE when that node touches the other body - node to node, where they
+            // actually meet. See DrawNodeConnectTicks / DrawSelectedNode.
 
             EditorGUI.indentLevel--;
         }
@@ -1150,84 +1156,85 @@ namespace UniverseCreator.Editor.Inspectors
         //  SCENE VIEW
         // =====================================================================
 
+        /// <summary>
+        /// REFINEMENT #5 C4 - the scene tick box at the node. For each END node of a river
+        /// that is either already joined or touching another body's node, draws a small
+        /// GUI.Toggle floating at the node in the scene. Ticking it connects the two
+        /// node-to-node where they meet; unticking drops the join. No button, no pick mode,
+        /// no dropdown - the tick simply appears when the nodes touch and wires the same
+        /// join the inspector node panel does. The ocean is never offered here: a river mouth
+        /// meeting the sea connects on its own. Rivers own the junction, so ticks are drawn
+        /// on river end nodes (a lake ticked from the river side is wired by SetJoinTicked).
+        /// </summary>
+        private void DrawNodeConnectTicks(UCWaterBody body)
+        {
+            if (body == null || body.shape != UCWaterBody.ShapeMode.RiverSpline) return;
+            if (body.course == null || body.course.Count < 2) return;
+
+            int last = body.course.Count - 1;
+            int[] ends = { 0, last };
+
+            Handles.BeginGUI();
+            for (int k = 0; k < ends.Length; k++)
+            {
+                int i = ends[k];
+
+                UCWaterBody joined = body.JunctionAt(i);
+                UCWaterBody touch = joined == null ? NodeConnectCandidate(body, i) : joined;
+                if (touch == null) continue;   // nothing in reach and nothing joined - no tick
+
+                Vector3 worldPos = body.NodeSurfacePoint(i);
+                Vector2 gui = HandleUtility.WorldToGUIPoint(worldPos);
+
+                // A node behind the camera projects to a bogus point; skip it.
+                if (float.IsNaN(gui.x) || float.IsInfinity(gui.x)) continue;
+
+                bool joinedNow = joined != null;
+                string label = joinedNow
+                    ? "✓ " + touch.name
+                    : "Connect " + touch.name;
+
+                // Sized to the label so the box does not clip the name, offset up-right of
+                // the node so it does not sit under the node's own handle.
+                GUIContent gc = new GUIContent(label,
+                    joinedNow
+                        ? "Connected here. Untick to drop this node-to-node junction."
+                        : "This node touches " + touch.name + ". Tick to connect them where "
+                        + "they meet.");
+                Vector2 size = EditorStyles.miniButton.CalcSize(gc);
+                float w = Mathf.Max(90f, size.x + 22f);
+                Rect r = new Rect(gui.x + 10f, gui.y - 12f, w, 20f);
+
+                Color bg = GUI.backgroundColor;
+                GUI.backgroundColor = joinedNow
+                    ? new Color(0.45f, 0.85f, 0.5f)
+                    : new Color(0.95f, 0.85f, 0.45f);
+
+                bool now = GUI.Toggle(r, joinedNow, gc, EditorStyles.miniButton);
+
+                GUI.backgroundColor = bg;
+
+                if (now != joinedNow)
+                {
+                    WireNodeJoin(body, touch, now);
+                    GUI.changed = true;
+                    if (SceneView.currentDrawingSceneView != null)
+                        SceneView.currentDrawingSceneView.Repaint();
+                }
+            }
+            Handles.EndGUI();
+        }
+
         private void OnSceneGUI()
         {
             UCWaterBody body = target as UCWaterBody;
             if (body == null) return;
 
             Event e = Event.current;
-            
-            // ---- Junction Connection Mode ----
-            if (isConnectingJunction && body.course != null
-                && selectedNodeIndex >= 0 && selectedNodeIndex < body.course.Count)
-            {
-                if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
-                {
-                    isConnectingJunction = false;
-                    e.Use();
-                    return;
-                }
 
-                // Prevent default scene interactions (orbit, selection) while connecting
-                if (e.type == EventType.Layout)
-                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
-
-                Vector3 startPoint = body.transform.TransformPoint(body.course.points[selectedNodeIndex]);
-                Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                Vector3 endPoint = ray.GetPoint(100f);
-                if (Physics.Raycast(ray, out RaycastHit hit, 10000f)) endPoint = hit.point;
-                else
-                {
-                    Plane plane = new Plane(Vector3.up, Vector3.zero);
-                    if (plane.Raycast(ray, out float enter)) endPoint = ray.GetPoint(enter);
-                }
-
-                Handles.color = Color.green;
-                Handles.DrawDottedLine(startPoint, endPoint, 4f);
-                SceneView.currentDrawingSceneView.Repaint();
-
-                if (e.type == EventType.MouseDown && e.button == 0)
-                {
-                    GameObject picked = HandleUtility.PickGameObject(e.mousePosition, false);
-                    if (picked != null)
-                    {
-                        UCWaterBody targetBody = picked.GetComponentInParent<UCWaterBody>();
-                        if (targetBody != null && targetBody != body)
-                        {
-                            Undo.RecordObject(body, "Connect Water Body");
-                            
-                            // Snap position to closest node on target
-                            if (targetBody.course != null && targetBody.course.Count > 0)
-                            {
-                                float closestDist = float.MaxValue;
-                                Vector3 closestWorld = Vector3.zero;
-                                foreach (Vector3 tp in targetBody.course.points)
-                                {
-                                    Vector3 tw = targetBody.transform.TransformPoint(tp);
-                                    float dist = Vector3.Distance(tw, endPoint);
-                                    if (dist < closestDist)
-                                    {
-                                        closestDist = dist;
-                                        closestWorld = tw;
-                                    }
-                                }
-                                body.course.points[selectedNodeIndex] = body.transform.InverseTransformPoint(closestWorld);
-                            }
-
-                            if (selectedNodeIndex == body.course.Count - 1)
-                                body.joinDownstreamTo = targetBody;
-                            else if (selectedNodeIndex == 0)
-                                body.joinUpstreamFrom = targetBody;
-
-                            EditorUtility.SetDirty(body);
-                            if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-                            isConnectingJunction = false;
-                        }
-                    }
-                    e.Use();
-                    return;
-                }
-            }
+            // REFINEMENT #5 C4: the click-to-pick "Junction Connection Mode" is removed.
+            // Connections are made by a TICK BOX drawn at the end node in the scene (see
+            // DrawNodeConnectTicks), not by entering a mode and clicking a target body.
 
             // ---- Waterfall Placement Mode (§12) ----
             // The author clicks the river where it crosses a scarp. The hit is snapped
@@ -1402,6 +1409,10 @@ namespace UniverseCreator.Editor.Inspectors
                 HandleDelete(body, line);
             }
 
+            // REFINEMENT #5 C4: the scene tick box at the end node. It appears the moment an
+            // end node touches another body's node and connects them where they meet.
+            DrawNodeConnectTicks(body);
+
             // One rebuild per drag, on release.
             if (dragging && Event.current.type == EventType.MouseUp)
             {
@@ -1439,17 +1450,20 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         /// <summary>
-        /// Ensures nodeDepthMetres and nodeWidthMetres have the same count as the
-        /// course points. New entries default to 0 (inherit from the global value).
+        /// Ensures nodeDepthMetres, nodeWidthMetres and nodeFloodplainMetres have the same
+        /// count as the course points. New entries default to 0 (inherit from the global value).
         /// </summary>
         private static void SyncNodeArrays(UCWaterBody body, Polyline line)
         {
             if (body.nodeDepthMetres == null) body.nodeDepthMetres = new System.Collections.Generic.List<float>();
             if (body.nodeWidthMetres == null) body.nodeWidthMetres = new System.Collections.Generic.List<float>();
+            if (body.nodeFloodplainMetres == null) body.nodeFloodplainMetres = new System.Collections.Generic.List<float>();
             while (body.nodeDepthMetres.Count < line.points.Count) body.nodeDepthMetres.Add(0f);
             while (body.nodeWidthMetres.Count < line.points.Count) body.nodeWidthMetres.Add(0f);
+            while (body.nodeFloodplainMetres.Count < line.points.Count) body.nodeFloodplainMetres.Add(0f);
             while (body.nodeDepthMetres.Count > line.points.Count) body.nodeDepthMetres.RemoveAt(body.nodeDepthMetres.Count - 1);
             while (body.nodeWidthMetres.Count > line.points.Count) body.nodeWidthMetres.RemoveAt(body.nodeWidthMetres.Count - 1);
+            while (body.nodeFloodplainMetres.Count > line.points.Count) body.nodeFloodplainMetres.RemoveAt(body.nodeFloodplainMetres.Count - 1);
         }
 
         /// <summary>
@@ -1605,7 +1619,6 @@ namespace UniverseCreator.Editor.Inspectors
                                    Handles.CubeHandleCap))
                 {
                     selectedNodeIndex = i;
-                    isConnectingJunction = false;
                     Repaint();
                 }
 
@@ -1725,6 +1738,8 @@ namespace UniverseCreator.Editor.Inspectors
                 body.nodeDepthMetres.Insert(insertAt, 0f);
             if (body.nodeWidthMetres != null && body.nodeWidthMetres.Count >= insertAt)
                 body.nodeWidthMetres.Insert(insertAt, 0f);
+            if (body.nodeFloodplainMetres != null && body.nodeFloodplainMetres.Count >= insertAt)
+                body.nodeFloodplainMetres.Insert(insertAt, 0f);
 
             SyncNodeArrays(body, line);
             selectedNodeIndex = insertAt;
@@ -1772,6 +1787,8 @@ namespace UniverseCreator.Editor.Inspectors
                 body.nodeDepthMetres.RemoveAt(best);
             if (body.nodeWidthMetres != null && body.nodeWidthMetres.Count == line.points.Count + 1)
                 body.nodeWidthMetres.RemoveAt(best);
+            if (body.nodeFloodplainMetres != null && body.nodeFloodplainMetres.Count == line.points.Count + 1)
+                body.nodeFloodplainMetres.RemoveAt(best);
 
             SyncNodeArrays(body, line);
                 

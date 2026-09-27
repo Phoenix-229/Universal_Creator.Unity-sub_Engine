@@ -214,15 +214,35 @@ namespace UniverseCreator.TerrainSystem
                  "this, so a river can widen as it goes.")]
         public float widthMetres = 12f;
 
-        [Tooltip("§38 - Read the trenches. On, the channel width AND depth at each " +
-                 "point are MEASURED from the terrain trench the river sits in (its own " +
-                 "cross-section) instead of coming from Width and Channel Depth above; " +
-                 "the water fills the procedural channel it was drawn into, up to the " +
-                 "bank so it never hangs, and NOTHING is dug - no carve, no terrain math. " +
+        [Tooltip("Read Trenches AND Banks. On, the river reads the terrain it was drawn " +
+                 "onto and behaves like a real river inside it:\n\n" +
+                 " - Where the ground already holds a CONTAINING BANK on both sides (a " +
+                 "trench or valley), the channel width and depth are MEASURED from it and " +
+                 "the water fills it to just under the bank crest (see Bank Freeboard) so " +
+                 "the bank always shows above the water. Nothing is dug there.\n" +
+                 " - Where there is NO bank (open flat ground), nothing is dug and the " +
+                 "water rests on the surface - UNTIL the course reaches a downstream bank " +
+                 "or its mouth joins a lake/ocean. Then the bed is dug with depth that " +
+                 "RAMPS UP GRADUALLY across the flat run to match the bank it meets, so " +
+                 "the river deepens smoothly into it instead of stepping.\n\n" +
                  "Off (default), Width, Channel Depth and the per-node overrides set the " +
-                 "cross-section and the river cuts its own channel. Either way the course " +
-                 "stays exactly on the line you drew.")]
+                 "cross-section and the river cuts its own channel everywhere. Either way " +
+                 "the course stays exactly on the line you drew.")]
+        [InspectorName("Read Trenches And Banks")]
         public bool readTrenchWidth = false;
+
+        [Tooltip("Read Trenches And Banks only. How far the water surface sits BELOW the " +
+                 "bank crest where a bank contains it, in metres. A small freeboard keeps " +
+                 "the bank visible above the water so the river reads as sitting in its " +
+                 "banks, not brimming over them. Default 0.10 m.")]
+        public float bankFreeboardMetres = 0.10f;
+
+        [Tooltip("How far the water plane stops SHORT of the channel bank, in metres. A " +
+                 "small inset tucks the water inside its banks so its edge is not a flat " +
+                 "sheet laid over the bank top. Clamped to a fraction of the local " +
+                 "half-width so a narrow brook is never inverted. Smaller reads tighter to " +
+                 "the bank; 0 meets the bank exactly. Default 0.5 m.")]
+        public float bankGapMetres = 0.5f;
 
         [Tooltip("Vertices across the channel. 4 is enough for a stream, 8 for a " +
                  "wide river whose banks need a smooth curve.")]
@@ -274,6 +294,49 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Width at each course node, in metres. Same rule as the depths - 0 " +
                  "inherits from upstream, and the first unset run takes Width.")]
         public List<float> nodeWidthMetres = new List<float>();
+
+        [Tooltip("Floodplain half-width at each course node, in metres. Same inherit rule " +
+                 "as depth and width - 0 means 'not set here' and carries the last set " +
+                 "value downstream. Where a node has a floodplain the dig cuts a gentle " +
+                 "valley out to this distance either side of the channel, so a river " +
+                 "crossing a soft slope reads like a real valley floor instead of a slot. " +
+                 "Left at 0 everywhere (the default) the river cuts only its channel, " +
+                 "exactly as before - the floodplain is opt-in, per node.")]
+        public List<float> nodeFloodplainMetres = new List<float>();
+
+        // ---- Source stream & lake inheritance -------------------------------
+        //
+        //  A river is not born full sized. At its spring it is a shallow scrape a
+        //  hand's-depth deep; it gathers water downstream. But a head that JOINS a
+        //  lake is different: it should start at the lake's own level and depth, so
+        //  the two waters read as one. These say which of the two a head is.
+
+        [Tooltip("Depth of the river at its SOURCE (the head node), in metres, when the " +
+                 "head is not joined to another body. A real spring starts as a shallow " +
+                 "stream, never a full-depth channel and never zero - the default 0.10 m " +
+                 "is ankle-deep. The channel eases from this up to the first depth you " +
+                 "author downstream.")]
+        public float sourceStreamDepthMetres = 0.10f;
+
+        [Tooltip("Width of the river at its SOURCE (the head node), in metres, when the " +
+                 "head is not joined to another body. A spring is a narrow trickle - the " +
+                 "default 0.30 m is a stride across - and the channel widens from this up " +
+                 "to the mouth by the natural downstream law. A pure FLOOR: it never caps " +
+                 "a genuinely wider source you author.")]
+        public float sourceStreamWidthMetres = 0.30f;
+
+        [Tooltip("When the head is joined to a lake or river, start it at that body's " +
+                 "water level and depth instead of the source-stream depth, so the join " +
+                 "reads as one continuous body from the point they touch. Off by default; " +
+                 "has no effect unless the head end is connected.")]
+        public bool inheritLevelFromJunction = false;
+
+        [Tooltip("Keep course nodes snapped to the ground as you drag them, so the river " +
+                 "sits on the terrain. On by default. Turn it off to lift a node by hand " +
+                 "with the move gizmo - the node then holds the height you place it at " +
+                 "(useful for an aqueduct or a raised source); turn it back on to drop it " +
+                 "onto the ground again.")]
+        public bool snapNodesToGround = true;
 
         // ---- Waterfalls -----------------------------------------------------
         //
@@ -1018,6 +1081,10 @@ namespace UniverseCreator.TerrainSystem
 
             TrimNodeSeries(nodeDepthMetres);
             TrimNodeSeries(nodeWidthMetres);
+            TrimNodeSeries(nodeFloodplainMetres);
+
+            sourceStreamDepthMetres = Mathf.Max(0.01f, sourceStreamDepthMetres);
+            sourceStreamWidthMetres = Mathf.Max(0.05f, sourceStreamWidthMetres);
 
             corridorMetres = Mathf.Max(0f, corridorMetres);
             valleyWidthMultiple = Mathf.Max(0f, valleyWidthMultiple);
@@ -1334,39 +1401,89 @@ namespace UniverseCreator.TerrainSystem
 
             carve.confineBanks = confineBanks && bedSource != BedSource.FlatFloor;
 
-            // §38 - THE FLOODPLAIN IS OFF for a manual river. carve.valley drives
-            // ValleySag, the wide gentle depression dropped around the channel; left on
-            // (its default) it reshaped a broad band of ground either side of every
-            // hand-placed river - the "it flattens the terrain" and the floodplain bug
-            // the author reported. A manual river now cuts its channel and nothing else;
-            // it fits the procedural trench it was drawn into rather than carving a valley
-            // around itself. (The graph/procedural river uses its own carve layer and is
-            // unaffected.)
+            // Step 43 (G) - THE FLOODPLAIN IS PER-NODE, OFF BY DEFAULT. carve.valley drives
+            // ValleySag, the wide gentle depression dropped around the channel. §38 forced
+            // it off for every manual river because it was GLOBAL and reshaped a broad band
+            // either side of EVERY river - the "it flattens the terrain" bug. It is now
+            // authored per node (nodeFloodplainMetres, resolved into solvedFloodplain): a
+            // river cuts only its channel UNLESS a node opts into a floodplain, and then
+            // only around that reach. All nodes at 0 (the default) => valley stays off =>
+            // byte-for-byte the §38 behaviour. Set below once the course is solved.
             carve.valley = false;
 
             if (!SolveRiverCourse()) return;
 
-            // §38 - READ-MODE NEVER TOUCHES THE TERRAIN. When the river is reading the
-            // trench, the channel it would cut is already in the ground (the node graph
-            // put it there), so this body registers NO carve at all: no dig, no valley
-            // sag, no confine wall, no bank raise, no slope dilation. The course is still
-            // solved above because the water surface mesh is built from solvedPoints /
-            // solvedSurfaceY - the water flows the existing trench, filled to the measured
-            // bank. Disabling the layer takes it out of ReapplyCarves (WaterCarveRegistry
-            // skips a layer whose enabled is false), and leaving the layer shapeless keeps
-            // the surface trim reading the real trench floor instead of a bed that was
-            // never actually cut. This is the literal "it never digs or applies any math".
+            // How far any node asked the valley to reach, and whether any did at all.
+            bool anyFloodplain = false;
+            float maxFloodplain = 0f;
+            if (solvedFloodplain != null)
+                for (int i = 0; i < solvedFloodplain.Length; i++)
+                {
+                    float f = Mathf.Max(0f, solvedFloodplain[i]);
+                    if (f > 0.01f) { anyFloodplain = true; if (f > maxFloodplain) maxFloodplain = f; }
+                }
+            carve.valley = anyFloodplain;
+
+            // Step 43 (I) + Refinement #4 (P5) - READ-MODE IS A CUT-ONLY, BANK-AWARE HYBRID.
+            // §38 disabled the carve entirely in read mode ("flow the existing trench, dig
+            // nothing"). Step 43 (I) re-enabled it but then dug the NATURAL depth on every
+            // untrenched station, which trenched open flat ground that has no bank. P5 keeps
+            // the carve ENABLED but drives the bed target from BuildBankAwareReadChannel:
+            // WaterCarveLayer.HeightAt cuts with Min against the ground (cut-only), so a real
+            // trench (deep, or wide-and-shallow) has its bed target AT the trench floor and the
+            // Min is a no-op - read untouched; a flat reach that never meets a bank or a joined
+            // mouth carries only the 0.05 m sentinel, so it is NOT dug and the water rests on
+            // the surface; and a flat reach that DOES reach one is dug on a ramp that deepens
+            // into it. What read mode must still NOT do is reshape the hillsides around a real
+            // trench, so the corridor (CorridorCap / ValleySag reach) is held at 0 here unless a
+            // node explicitly opted into a floodplain. Dig mode keeps its width-derived corridor
+            // as before (§38), widened to any floodplain a node asked for.
             if (readTrenchWidth)
-            {
-                carve.enabled = false;
-                return;
-            }
+                carve.corridorMetres = anyFloodplain ? Mathf.Max(ValleyCorridorMetres, maxFloodplain) : 0f;
+            else if (anyFloodplain)
+                carve.corridorMetres = Mathf.Max(ValleyCorridorMetres, maxFloodplain);
 
             for (int i = 0; i < solvedPoints.Count; i++)
             {
                 carve.coursePoints.Add(solvedPoints[i]);
-                carve.courseWidths.Add(Mathf.Max(0.2f, solvedWidths[i]));
-                carve.courseDepths.Add(Mathf.Max(0.05f, solvedDepths[i]));
+
+                float w = Mathf.Max(0.2f, solvedWidths[i]);
+                carve.courseWidths.Add(w);
+
+                // Step 43 (B, E, I) - THE BED TARGET, NEVER ZERO, HYBRID READ/DIG.
+                //   read mode : a station that sits in a real trench carries the MEASURED
+                //               crest depth in solvedDepths (> the 0.05 m sentinel) - that
+                //               becomes the bed target and, because HeightAt cuts with Min,
+                //               the real trench floor is read untouched, cut-only. A station
+                //               on OPEN FLAT ground carries the bank-aware RAMP in
+                //               solvedDigDepths - zero where the reach never meets a bank or a
+                //               joined mouth (there the river rests on the surface, only the
+                //               0.05 m sentinel is cut) and ramping up to the downstream bank's
+                //               depth / the mouth's natural depth where it does, so the bed
+                //               deepens gradually instead of trenching the whole flat.
+                //               (Refinement #4 P5 - replaces the old blanket NaturalDepthForWidth
+                //               everywhere, which dug a channel across flat ground with no bank.)
+                //   dig  mode : the natural depth for the width is the floor, never under
+                //               the source trickle (NaturalDepthForWidth clamps to
+                //               sourceStreamDepthMetres), and an author-set node depth
+                //               deepens it further if larger.
+                // Digging deeper never widens: courseWidths is set from the width series
+                // alone, independent of this depth.
+                float dTarget;
+                if (readTrenchWidth)
+                {
+                    // solvedDepths holds the crest where banked (dig 0) and the ramp where
+                    // flat; solvedDigDepths holds the ramp and 0 where banked. Taking the
+                    // larger keeps the mouth's dug depth even where ApplyCoastalTaper later
+                    // shaved solvedDepths for the estuary widening (Refinement #4 P4).
+                    float digRamp = (solvedDigDepths != null && i < solvedDigDepths.Length)
+                        ? solvedDigDepths[i] : 0f;
+                    dTarget = Mathf.Max(solvedDepths[i], digRamp);
+                }
+                else
+                    dTarget = Mathf.Max(NaturalDepthForWidth(w), solvedDepths[i]);
+                carve.courseDepths.Add(Mathf.Max(0.05f, dTarget));
+
                 carve.courseSurfaceY.Add(solvedSurfaceY[i]);
 
                 // §14: the confining wall target, per node. NegInf means "not confined
@@ -1377,12 +1494,30 @@ namespace UniverseCreator.TerrainSystem
                 carve.courseConfineY.Add(
                     carve.confineBanks ? ConfineTargetAt(i) : float.NegativeInfinity);
 
-                // §38 - NO SLOPE-DILATED CARVING. The §33 Fix E dilation fanned the trench
-                // wider on steep ground, grading a whole hillside into a V-canyon - more
-                // of the "flattening" the author reported. Held at 1 (channel width) so
-                // the cut stays the width of the water and the river sits in the trench
-                // instead of reshaping the slope around it.
-                carve.courseValleyWiden.Add(1f);
+                // Step 43 (G) - PER-NODE FLOODPLAIN. 1 everywhere by default => ValleySag
+                // never engages => the cut stays channel-width and the §38 "no valley"
+                // behaviour holds byte-for-byte. Where a node opted into a floodplain, the
+                // widen opens the ValleySag band to roughly the authored width in channel
+                // half-widths (the carve clamps it against ValleyWidenMax), so the gentle
+                // valley appears only around that reach and nowhere else.
+                float widen = 1f;
+                if (anyFloodplain && solvedFloodplain != null &&
+                    i < solvedFloodplain.Length && solvedFloodplain[i] > 0.01f)
+                {
+                    float half = Mathf.Max(0.5f, w * 0.5f);
+                    widen = Mathf.Max(1f, solvedFloodplain[i] / half);
+                }
+                carve.courseValleyWiden.Add(widen);
+
+                // REFINEMENT #5 C1: mark a station read-only when its ground already holds
+                // the channel (banked). WaterCarveLayer then carves NOTHING there - it reads
+                // the authored trench instead of imposing its own parabola + bank bevel on
+                // top of it, which was reshaping ("flattening") the hand-cut trench. Only in
+                // read mode; a dig-mode station is always 0 (carve as before). Never 1 unless
+                // solvedBanked confirms both banks were measured at this station.
+                bool readOnly = readTrenchWidth && solvedBanked != null &&
+                                i < solvedBanked.Length && solvedBanked[i];
+                carve.courseRead.Add(readOnly ? 1f : 0f);
             }
         }
 
@@ -1501,6 +1636,29 @@ namespace UniverseCreator.TerrainSystem
         [System.NonSerialized] private List<float> solvedDepths;
         [System.NonSerialized] private float[] solvedSurfaceY;
 
+        // Per-station floodplain half-width, resolved from nodeFloodplainMetres with the
+        // same downstream inheritance as depth and width. All zeros (the default: no node
+        // opted in) means the dig cuts only the channel - byte-for-byte the §38 behaviour.
+        [System.NonSerialized] private float[] solvedFloodplain;
+
+        // Read-Trenches-And-Banks only. Per-station dig depth (metres cut below the water
+        // surface) for stations that sit on OPEN FLAT ground - zero where a bank already
+        // contains the channel (there the dig is cut-only from the measured crest) and zero
+        // on flat ground that never reaches a downstream bank or a joined mouth. On a flat
+        // run that DOES reach one, it ramps 0 -> the anchor's depth across the run so the
+        // river deepens gradually into the bank instead of stepping. Null in dig mode and
+        // when Read Trenches And Banks is off. Kept SEPARATE from solvedDepths because in
+        // read mode solvedDepths drives the surface FILL, so a ramped dig cannot live there
+        // or the water plane would float. See BuildBankAwareReadChannel / BuildRiverDig.
+        [System.NonSerialized] private float[] solvedDigDepths;
+
+        // REFINEMENT #5 C1: true at every station whose ground ALREADY contains the channel
+        // (both banks found by MeasureTrenchWidths). BuildRiverDig turns this into
+        // carve.courseRead so WaterCarveLayer reads the authored trench and carves NOTHING
+        // there - the fix for "adding a river flattens the trench instead of reading it".
+        // 1:1 with solvedPoints. Null in dig mode / when Read Trenches And Banks is off.
+        [System.NonSerialized] private bool[] solvedBanked;
+
         /// <summary>
         /// One steep reach of a river where the solved surface plunges fast enough to
         /// read as a waterfall or cascade. Found at solve time from the surface profile,
@@ -1539,6 +1697,9 @@ namespace UniverseCreator.TerrainSystem
             solvedWidths = null;
             solvedDepths = null;
             solvedSurfaceY = null;
+            solvedFloodplain = null;
+            solvedDigDepths = null;
+            solvedBanked = null;
             solvedCascades = null;
         }
 
@@ -1713,32 +1874,44 @@ namespace UniverseCreator.TerrainSystem
             // Junctions extend the course onto whatever it meets, so the channel is
             // actually cut all the way to the water it empties into rather than
             // stopping a few metres short with a bank between them.
+            //
+            // Step 43 (J/K): before the downstream extend, name the ocean or lake the
+            // mouth has arrived at when the author left joinDownstreamTo empty. §38 removed
+            // the descent walk that used to set autoJoinDownstream, which orphaned every
+            // downstream consumer (ExtendToJunction/BlendJunction/IsConnected). This is the
+            // cheap endpoint proximity read that restores it WITHOUT moving the course, and
+            // the reach is capped to what BlendJunction can actually weld so a detected join
+            // is never left as a visible gap. River→ocean/lake carries no node connection -
+            // this weld is the whole connection - which is exactly what the author asked for.
+            if (joinDownstreamTo == null && world.Count >= 2)
+                IsAtJoinableWater(world[world.Count - 1],
+                    Mathf.Min(autoConnectMetres, JunctionReachMetres()));
+
             ExtendToJunction(world, widths, depths, false);
             ExtendToJunction(world, widths, depths, true);
 
             int n = world.Count;
             float[] surf = new float[n];
 
-            // §38 read-mode: the water surface FILLS the measured trench. RawSurfaceAt
-            // would sit the plane one surfaceOffset above the bed - at the trench FLOOR,
-            // which is the pristine graph height here - and the water would read as a thin
-            // ribbon in the bottom of the ditch with a gap up to both banks. Instead lift
-            // it to the bed plus the measured depth (the lower bank crest), so the channel
-            // is full to that bank. ContainToBanks below then trims any spot where a bank
-            // actually dips lower, so it never spills - between the two the water meets the
-            // bank with no gap. Default mode keeps the original ground-referenced surface.
-            for (int i = 0; i < n; i++)
+            // §38 / Refinement #4 read-mode: the water surface FILLS the measured trench,
+            // and OPEN FLAT ground is left alone until the course reaches a bank or a joined
+            // mouth. RawSurfaceAt would sit the plane one surfaceOffset above the bed - at the
+            // trench FLOOR - so the water would read as a thin ribbon in the bottom of the
+            // ditch with a gap up to both banks. Instead BuildBankAwareReadChannel lifts each
+            // BANKED station to just under its crest (Bank Freeboard, so the bank always shows
+            // above the water), rests each UNBANKED station on the ground, and RAMPS a separate
+            // dig depth up across any flat run that reaches a downstream bank or the joined
+            // mouth so the bed deepens gradually into it. ContainToBanks below still trims any
+            // banked spot where a bank actually dips lower, so the water never spills. Default
+            // mode keeps the original ground-referenced surface and digs everywhere.
+            if (readTrenchWidth)
             {
-                if (readTrenchWidth)
-                {
-                    float floor = SampleGround(world[i].x, world[i].z);
-                    float d = (depths != null && i < depths.Count) ? Mathf.Max(0f, depths[i]) : 0f;
-                    surf[i] = floor + d;
-                }
-                else
-                {
+                solvedDigDepths = BuildBankAwareReadChannel(world, widths, depths, surf);
+            }
+            else
+            {
+                for (int i = 0; i < n; i++)
                     surf[i] = RawSurfaceAt(world[i]);
-                }
             }
 
             // Water cannot run uphill, and must not sit dead flat. Without this a course
@@ -1781,6 +1954,12 @@ namespace UniverseCreator.TerrainSystem
             solvedWidths = widths;
             solvedDepths = depths;
             solvedSurfaceY = surf;
+
+            // Per-node floodplain (Step 43-G), sampled onto the FINAL course - after the
+            // junction extension above so the extended run carries the end node's value -
+            // by arc position along the authored nodes, the same way width and depth ease.
+            // All zeros when no node opted in, which the dig treats as "channel only".
+            solvedFloodplain = SampleFloodplainAlong(world);
             // Falls are placed by hand: the author's crests, measured against this
             // freshly solved surface, unless they opted back into automatic detection.
             solvedCascades = autoDetectWaterfalls
@@ -1788,6 +1967,121 @@ namespace UniverseCreator.TerrainSystem
                 : BuildManualCascades(world, surf, widths);
 
             return true;
+        }
+
+        /// <summary>
+        /// Read Trenches And Banks: fills the surface where the ground already contains the
+        /// channel, rests it on open flat ground, and ramps a SEPARATE dig depth up across any
+        /// flat run that reaches a downstream bank or a joined mouth. Writes the water surface
+        /// into <paramref name="surf"/>, rewrites <paramref name="depths"/> to the water COLUMN
+        /// at each station (crest where banked, the ramped dig where flat), and returns the
+        /// per-station DIG depth (how far the bed is cut below the surface) - zero on banked
+        /// stations (there the cut is measured cut-only) and zero on flat ground that reaches
+        /// no bank. Kept separate from depths because depths drives the surface fill.
+        /// </summary>
+        private float[] BuildBankAwareReadChannel(List<Vector3> world, List<float> widths, List<float> depths, float[] surf)
+        {
+            int n = world.Count;
+            float[] dig = new float[n];               // bed cut below surface; 0 = no dig
+            float[] floor = new float[n];             // pristine ground at each station
+            bool[] banked = new bool[n];              // ground already contains the channel
+
+            // A station is "banked" when MeasureTrenchWidths found a containing bank on both
+            // sides and stored its crest in depths[] (> 5 cm). Snapshot this BEFORE depths is
+            // rewritten below, or a ramped flat station would masquerade as a bank.
+            for (int i = 0; i < n; i++)
+            {
+                floor[i] = SampleGround(world[i].x, world[i].z);
+                float crest = (depths != null && i < depths.Count) ? Mathf.Max(0f, depths[i]) : 0f;
+                banked[i] = crest > 0.05f;
+            }
+
+            // Arc length along the course, so the ramp is proportional to real distance
+            // travelled and not to station count (adaptive resampling spaces them unevenly).
+            float[] arc = new float[n];
+            for (int i = 1; i < n; i++)
+                arc[i] = arc[i - 1] + Vector3.Distance(world[i - 1], world[i]);
+
+            // Does the mouth empty into a lake/ocean? Then the final flat run digs down to a
+            // natural channel depth so the river arrives WITH depth instead of petering out
+            // level with the seabed (Refinement #4 P4). River->ocean carries no node, so this
+            // join is the only thing that authorises a dig at the end of an open reach.
+            bool mouthJoins = ResolveJoin(true) != null;
+
+            // Walk each maximal run of UNBANKED stations and, if it ends at a bank (the next
+            // station downstream) or at the joined mouth (the run reaches the last station),
+            // ramp the dig 0 -> that anchor's depth across the run. A run that reaches neither
+            // never digs: open flat ground the river merely rests on.
+            int idx = 0;
+            while (idx < n)
+            {
+                if (banked[idx]) { idx++; continue; }
+
+                int s = idx;
+                int e = idx;
+                while (e + 1 < n && !banked[e + 1]) e++;
+
+                float targetD = 0f;
+                int anchor = -1;
+                if (e + 1 < n && banked[e + 1])
+                {
+                    // Deepen to match the trench it flows into.
+                    anchor = e + 1;
+                    targetD = (depths != null && anchor < depths.Count) ? Mathf.Max(0f, depths[anchor]) : 0f;
+                }
+                else if (e == n - 1 && mouthJoins)
+                {
+                    // Deepen to a natural channel for the mouth width at the join.
+                    anchor = n - 1;
+                    float wMouth = (widths != null && widths.Count > 0) ? Mathf.Max(0.2f, widths[widths.Count - 1]) : 1f;
+                    targetD = Mathf.Max(0f, NaturalDepthForWidth(wMouth));
+                }
+
+                if (anchor >= 0 && targetD > 0.001f)
+                {
+                    float span = arc[anchor] - arc[s];
+                    if (span > 0.001f)
+                        for (int k = s; k <= e; k++)
+                            dig[k] = targetD * Mathf.Clamp01((arc[k] - arc[s]) / span);
+                }
+                // else: no downstream bank and no joined mouth -> dig stays 0 (rest on ground).
+
+                idx = e + 1;
+            }
+
+            // Now lay the surface and rewrite the water column. Banked stations fill to just
+            // under the crest (freeboard keeps the bank visible); flat stations rest on the
+            // ground and carry the ramped dig as their column so the mesh skirt shows the
+            // deepening. The dig array is what BuildRiverDig cuts below the surface.
+            float freeboard = Mathf.Max(0f, bankFreeboardMetres);
+            for (int i = 0; i < n; i++)
+            {
+                if (banked[i])
+                {
+                    float crest = (depths != null && i < depths.Count) ? Mathf.Max(0f, depths[i]) : 0f;
+                    surf[i] = floor[i] + Mathf.Max(0f, crest - freeboard);
+                    dig[i] = 0f;                       // cut-only from the measured crest
+                    if (depths != null && i < depths.Count) depths[i] = crest;   // column = crest
+                }
+                else
+                {
+                    // REFINEMENT #5 C2: on LEVEL ground the water is offset a freeboard below
+                    // the surface so a river reads as a shallow inset channel, not a sheet
+                    // lying on top of the terrain ("freeboard not showing"). The bed carries
+                    // at least the freeboard as its column so there is real water in it; a
+                    // ramped-toward-a-bank station keeps its (larger) ramp instead. This does
+                    // NOT trench flat ground - the offset is centimetres, not a NaturalDepth.
+                    surf[i] = floor[i] - freeboard;    // rest a freeboard into the ground
+                    dig[i] = Mathf.Max(dig[i], freeboard);
+                    if (depths != null && i < depths.Count) depths[i] = dig[i];  // column = ramped dig / freeboard
+                }
+            }
+
+            // REFINEMENT #5 C1: hand the banked mask up to the solver so BuildRiverDig can
+            // mark those stations read-only (carve nothing) - the trench is read, not re-dug.
+            solvedBanked = banked;
+
+            return dig;
         }
 
         // A reach is a waterfall when the water surface itself drops faster than this
@@ -2173,6 +2467,37 @@ namespace UniverseCreator.TerrainSystem
         /// Walks the course out to the edge of the body it joins, adding points at the
         /// authored spacing so the dig carries on into the junction.
         /// </summary>
+        /// <summary>
+        /// How far a mouth may be from the body it joins and still be carried onto it.
+        /// One definition shared by the extend, the surface blend and the mouth auto-detect,
+        /// so a join that is DETECTED can always be cleanly EXTENDED and WELDED - never
+        /// detected far away and then blended in mid-air. Scales with the blend length, with
+        /// a floor so a body with a tiny blend can still reach a neighbour it is touching.
+        /// </summary>
+        private float JunctionReachMetres()
+        {
+            return Mathf.Max(50f, joinBlendMetres * 4f);
+        }
+
+        /// <summary>
+        /// REFINEMENT #5 C3 - the authored channel width at the joining END of the river
+        /// (the last node for a downstream mouth, the first for an upstream head), resolved
+        /// through the same per-node inheritance the solver uses so an unset end inherits the
+        /// body's widthMetres. This is the width the CONNECTION must not exceed: at a join the
+        /// measured-trench scan bleeds into the body being joined and reports an abnormal
+        /// width, which the old copy-the-last-width extension then carried straight into the
+        /// junction ("abnormal width instead of the size of the trenches"). Clamping the
+        /// connection to this keeps the join at the trench's own size.
+        /// </summary>
+        private float AuthoredEndWidth(bool downstream)
+        {
+            if (course == null || course.Count == 0) return Mathf.Max(0.5f, widthMetres);
+            float[] resolved = ResolveNodeSeries(nodeWidthMetres, widthMetres);
+            int idx = downstream ? resolved.Length - 1 : 0;
+            idx = Mathf.Clamp(idx, 0, resolved.Length - 1);
+            return Mathf.Max(0.5f, resolved[idx]);
+        }
+
         private void ExtendToJunction(List<Vector3> world, List<float> widths,
                                       List<float> depths, bool downstream)
         {
@@ -2194,8 +2519,36 @@ namespace UniverseCreator.TerrainSystem
             // Beyond this the two bodies are not neighbours and joining them would
             // trench a channel across whatever happens to lie between. Left alone
             // rather than forced, so the fix is to drag the spline closer.
-            float reach = Mathf.Max(50f, joinBlendMetres * 4f);
+            float reach = JunctionReachMetres();
             if (gap > reach) return;
+
+            // REFINEMENT #5 C3 - the connection carries the trench's OWN width, never the
+            // ballooned figure the trench scan reported where it bled into the joined body.
+            // connW is the authored channel width at this end; the near-end stations are
+            // clamped DOWN to it (clamp-only, so a reach that legitimately narrows toward the
+            // mouth is left alone) and the appended junction points are laid at exactly connW
+            // instead of copying widths[end]. Applies to every target kind - a river must not
+            // fan out at its mouth just because it meets another body; the estuary widening a
+            // sea mouth gets is added later by ApplyCoastalTaper, not here.
+            float connW = AuthoredEndWidth(downstream);
+            float endW = Mathf.Max(0.2f, Mathf.Min(widths[end], connW));
+
+            // Rein in the abnormal measured widths over the blend band leading into the join,
+            // walking inward from the end until joinBlendMetres of arc is covered.
+            float blendBand = Mathf.Max(0.01f, joinBlendMetres);
+            {
+                float walked = 0f;
+                int step = downstream ? -1 : 1;
+                int prev = end;
+                for (int i = end; i >= 0 && i < world.Count; i += step)
+                {
+                    if (i != end)
+                        walked += new Vector2(world[i].x - world[prev].x, world[i].z - world[prev].z).magnitude;
+                    if (walked > blendBand) break;
+                    if (widths[i] > connW) widths[i] = connW;
+                    prev = i;
+                }
+            }
 
             int steps = Mathf.Max(1, Mathf.CeilToInt(gap / Mathf.Max(0.5f, pointSpacingMetres)));
 
@@ -2207,7 +2560,7 @@ namespace UniverseCreator.TerrainSystem
                 if (downstream)
                 {
                     world.Add(p);
-                    widths.Add(widths[widths.Count - 1]);
+                    widths.Add(endW);
                     depths.Add(depths[depths.Count - 1]);
                 }
                 else
@@ -2215,7 +2568,7 @@ namespace UniverseCreator.TerrainSystem
                     // Inserted at the head in increasing t, which lands them in
                     // upstream-first order with the snapped point at index 0.
                     world.Insert(0, p);
-                    widths.Insert(0, widths[0]);
+                    widths.Insert(0, endW);
                     depths.Insert(0, depths[0]);
                 }
             }
@@ -2264,11 +2617,24 @@ namespace UniverseCreator.TerrainSystem
 
                 surf[i] = Mathf.Lerp(surf[i], targetY, w);
 
-                // §38: the mouth is NOT deepened to the target's bed any more. Matching a
-                // lake's dig depth here dropped the river bed to (lakeSurface - lakeDepth)
-                // at the join, which was the crater the author reported. The channel keeps
-                // its own depth all the way in; only the water surface is blended, so the
-                // two planes meet flush with no pit between them.
+                // Step 43 (C) - SOURCE/OUTLET DEPTH INHERIT, HEAD ONLY, OPT-IN.
+                // At a HEAD joined to a lake it DRAINS (an outlet), or to another river,
+                // and only when the author ticked Inherit Level From Junction, seed the
+                // channel depth at the join from the body the river flows FROM - the lake's
+                // edge depth (targetDepth from NearestEdgePoint), or the upstream river's -
+                // and ease it back to the river's own solved depth across the blend. The
+                // bed at the head then meets the lake basin floor at its edge, and since the
+                // surface is welded to the lake plane just above, the head starts at the
+                // lake's level and depth instead of a trickle perched on the water. In read
+                // mode the lake edge is a real trench, so this simply pins the read series to
+                // the true connection depth at that end and lets it carry downstream.
+                //
+                // The MOUTH (downstream) is deliberately NOT touched: a river emptying INTO a
+                // lake is already submerged there, so it needs no depth read - deepening it
+                // to the lake bed is exactly the §38 crater. The surface weld above is all a
+                // mid-lake inlet needs to read as one body.
+                if (!downstream && inheritLevelFromJunction && depths != null && i < depths.Count)
+                    depths[i] = Mathf.Lerp(depths[i], targetDepth, w);
             }
         }
 
@@ -2302,7 +2668,29 @@ namespace UniverseCreator.TerrainSystem
             List<Vector3> ring = WorldShoreRing();
             if (ring == null || ring.Count < 3) return false;
 
-            if (!NearestOnPolyline(ring, true, fromWorld, out point)) return false;
+            // Refinement #4 (P3) - a river joining a LAKE snaps to the nearest lake POLYGON
+            // NODE, not to an interpolated point along an edge. A polygon lake's ring IS its
+            // authored outline (WorldShoreRing returns ToWorld(outline) for a Polygon), so its
+            // vertices are exactly the nodes the author dropped. Landing the mouth on a node
+            // makes the two bodies touch where the lake was actually pinned, so they read as
+            // one sheet instead of the river ending at a gizmo edge a little off the node. The
+            // OCEAN carries no node connection (the author never places its outline the same
+            // way), and a rectangle has no meaningful "nodes", so both keep the edge-point snap.
+            if (shape == ShapeMode.Polygon && kind != WaterBodyKind.Ocean)
+            {
+                int best = -1;
+                float bestD2 = float.MaxValue;
+                for (int i = 0; i < ring.Count; i++)
+                {
+                    float ex = fromWorld.x - ring[i].x;
+                    float ez = fromWorld.z - ring[i].z;
+                    float d2 = ex * ex + ez * ez;
+                    if (d2 < bestD2) { bestD2 = d2; best = i; }
+                }
+                if (best < 0) return false;
+                point = ring[best];
+            }
+            else if (!NearestOnPolyline(ring, true, fromWorld, out point)) return false;
 
             // How deep this basin is one blend-length in from its own shore. A river
             // arriving at a lake should be as deep as the lake is where it arrives,
@@ -2654,7 +3042,7 @@ namespace UniverseCreator.TerrainSystem
         // onto flat land does not collapse to nothing. This measures only; it never writes
         // the terrain - read-mode is "the river flows the trench", no dig, no carve math.
         private void MeasureTrenchWidths(List<Vector3> pts, List<float> widths,
-                                         List<float> depths)
+                                         List<float> depths, List<bool> found = null)
         {
             if (pts == null || widths == null || pts.Count < 2) return;
 
@@ -2683,12 +3071,19 @@ namespace UniverseCreator.TerrainSystem
                 if (measured > 0.5f)
                     widths[i] = Mathf.Clamp(measured, 0.5f, maxReach);
 
+                // A CONTAINING trench needs a wall on BOTH sides - that is what holds
+                // the water so it touches both banks and hangs on neither. One wall is a
+                // hillside, not a trench. Reported per station so the hybrid dig can tell
+                // "read this trench (even a wide shallow one)" from "no trench here, dig".
+                bool bothWalls = left > 0.5f && right > 0.5f;
+                if (found != null && i < found.Count) found[i] = bothWalls;
+
                 // Depth = the LOWER containing bank crest above the bed. Water can rise no
                 // higher than that before it spills the shallow side, so this is what fills
                 // the trench without hanging over the low bank. Only set when both sides
                 // have a wall - a one-sided rise is a hillside, not a trench, and there the
                 // authored depth is kept and ContainToBanks lowers the surface honestly.
-                if (depths != null && i < depths.Count && left > 0.5f && right > 0.5f)
+                if (depths != null && i < depths.Count && bothWalls)
                 {
                     float crest = Mathf.Min(leftPeak, rightPeak);
                     if (crest > 0.25f)
@@ -2761,7 +3156,14 @@ namespace UniverseCreator.TerrainSystem
             Polyline smooth = SplineOperations.TessellateCatmullRom(
                 line, Mathf.Max(0.25f, pointSpacingMetres * 0.5f));
 
-            Polyline spaced = SplineOperations.Resample(smooth, Mathf.Max(0.5f, pointSpacingMetres), true);
+            // Step 43 (L) - CURVATURE-ADAPTIVE, not uniform. A plain Resample decimates the
+            // smooth curve back to evenly spaced chords, re-cornering every tight bend into
+            // the "snapped/cut" meander the author saw. ResampleAdaptive keeps the curve's
+            // points through a bend (heading budget ~8 deg, floored at a third of the spacing
+            // so it cannot explode) while leaving straights at the full spacing.
+            Polyline spaced = SplineOperations.ResampleAdaptive(
+                smooth, Mathf.Max(0.5f, pointSpacingMetres),
+                Mathf.Max(0.5f, pointSpacingMetres) * 0.35f, 0.14f);
             if (spaced == null || spaced.Count < 2) return null;
 
             List<Vector3> result = new List<Vector3>(spaced.Count);
@@ -2794,18 +3196,44 @@ namespace UniverseCreator.TerrainSystem
             // manual river behaved ~30 commits before the push, and it is what we restore.
             lastDescentEnding = RiverCourseSolver.DescentEnding.ReachedEnd;
 
-            // §38 - "Read the trenches" (opt-in). When on, BOTH the channel width and
-            // depth at each point are MEASURED from the procedural trench the river
-            // already sits in - the terrain's own cross-section - rather than taken from
-            // the Width and Depth fields. Off (the default), those fields and their
-            // per-node overrides are used unchanged. Neither setting moves the course;
-            // this only decides where the cross-section comes from. In read-mode the river
-            // digs NOTHING and applies no carve math (see BuildRiverDig): it reads the bank
-            // position, width and depth and lets the water flow the trench, filled up to
-            // the lower bank so it never hangs. The surface solve below turns the measured
-            // depth into that fill.
+            // Step 43 (I) - "Read the trenches" is now HYBRID, not all-or-nothing. When
+            // on, the channel width and depth are MEASURED from the procedural trench the
+            // river sits in - the terrain's own cross-section - WHERE A CONTAINING TRENCH
+            // EXISTS (a wall on both sides). A wide-shallow trench counts: it is read as
+            // wide and shallow, and the water fills it to the lower bank so it touches
+            // both sides and hangs on neither. But where the ground holds NO trench (open
+            // ground, or the trench pinching out so bed == bank == plain and the measured
+            // depth is zero), the fields are useless: sitting the water on the authored
+            // depth would float it above the plain. Instead the station is handed the
+            // NATURAL channel - a real width and depth from the river math (source stream
+            // growing downstream) - with depth 0 so the surface sits ON the ground, and
+            // BuildRiverDig cuts that natural depth below it. So: read a trench where one
+            // exists, dig a channel where one does not, with no seam between the two.
+            // Off (the default) the Width/Depth fields and per-node overrides are used
+            // unchanged. Neither setting moves the course.
             if (readTrenchWidth)
-                MeasureTrenchWidths(result, widths, depths);
+            {
+                List<bool> found = new List<bool>(result.Count);
+                for (int i = 0; i < result.Count; i++) found.Add(false);
+
+                MeasureTrenchWidths(result, widths, depths, found);
+
+                float[] natW, natD;
+                ComputeNaturalChannel(result, out natW, out natD);
+
+                for (int i = 0; i < result.Count && i < widths.Count && i < depths.Count; i++)
+                {
+                    if (found[i]) continue;                  // real trench (any depth): read it
+
+                    // No containing trench here. Give it a real dug channel: natural width
+                    // for the mesh and the dig, and depth 0 so the water surface rests on
+                    // the ground (the dig below provides the depth). natD is carried in
+                    // solvedWidths' companion so the dig can floor to it (see BuildRiverDig,
+                    // which recovers the natural depth from the width where depth is 0).
+                    widths[i] = natW[i];
+                    depths[i] = 0f;
+                }
+            }
 
             // Let the fitted line wander into natural meander loops where the ground is
             // flat enough to have a floodplain. Last, so it works on the planform the
@@ -2829,6 +3257,14 @@ namespace UniverseCreator.TerrainSystem
             // terrain cross-section the author asked us to follow.
             if (autoHydraulicGeometry && !readTrenchWidth)
                 ApplyHydraulicGeometry(result, widths, depths);
+
+            // Step 43 (E + H) - the SOURCE is a narrow shallow brook that grows downstream.
+            // Dig mode only: ease width/depth from the source-stream floor up to the solved
+            // size over the first stretch, and hold every station at or above the natural
+            // depth for its width so the river never solves to zero depth. Read mode gets
+            // its source shape from the natural fallback above where no trench contains it.
+            if (!readTrenchWidth)
+                ApplySourceStreamProfile(result, widths, depths);
 
             // RE-TESSELLATE THE FITTED PLANFORM. Everything above - the valley seek, the
             // descent walk and especially Meander - moves the resampled POINTS sideways
@@ -2857,8 +3293,10 @@ namespace UniverseCreator.TerrainSystem
 
                 Polyline curved = SplineOperations.TessellateCatmullRom(
                     moved, Mathf.Max(0.25f, pointSpacingMetres * 0.5f));
-                Polyline respaced = SplineOperations.Resample(
-                    curved, Mathf.Max(0.5f, pointSpacingMetres), true);
+                // Step 43 (L) - keep the meandered planform smooth through its bends too.
+                Polyline respaced = SplineOperations.ResampleAdaptive(
+                    curved, Mathf.Max(0.5f, pointSpacingMetres),
+                    Mathf.Max(0.5f, pointSpacingMetres) * 0.35f, 0.14f);
 
                 if (respaced != null && respaced.Count >= 2)
                 {
@@ -2970,6 +3408,103 @@ namespace UniverseCreator.TerrainSystem
             }
         }
 
+        // -----------------------------------------------------------------------
+        //  Step 43 (H + I): the natural channel a river of a given width carries, and
+        //  the source-stream floor. These give the HYBRID read/dig trench mode a
+        //  fallback to size a channel WHERE THE GROUND HOLDS NO TRENCH, and pin the
+        //  spring to a narrow shallow brook that grows downstream by the same law the
+        //  hydraulic geometry uses - so a read river and a dug river agree on "how big
+        //  should a river THIS far down actually be".
+        // -----------------------------------------------------------------------
+
+        /// <summary>
+        /// The depth an alluvial channel of the given width carries, floored at the
+        /// source-stream minimum. Width grows downstream (see <see cref="ComputeNaturalChannel"/>),
+        /// so this floor is only ever binding near the head - which is exactly the
+        /// "starts a shallow brook, deepens naturally" behaviour. Never returns zero.
+        /// </summary>
+        private float NaturalDepthForWidth(float width)
+        {
+            return Mathf.Max(sourceStreamDepthMetres, Mathf.Max(0f, width) / BaseWidthDepthRatio);
+        }
+
+        /// <summary>
+        /// A natural width/depth profile along the course, source -> mouth, WITHOUT
+        /// touching the measured or authored series. Width eases from the source-stream
+        /// floor up to the authored body width by the area^0.4 downstream law; depth
+        /// tracks it at the alluvial ratio, floored at the source-stream depth. Used as
+        /// the dig fallback in read-trench mode where the ground holds no containing
+        /// trench, so an untrenched reach is cut a real channel instead of a zero film.
+        /// </summary>
+        private void ComputeNaturalChannel(List<Vector3> pts, out float[] natW, out float[] natD)
+        {
+            int n = pts != null ? pts.Count : 0;
+            natW = new float[n];
+            natD = new float[n];
+            if (n == 0) return;
+
+            float[] s = new float[n];
+            for (int i = 1; i < n; i++) s[i] = s[i - 1] + Horizontal(pts[i - 1], pts[i]);
+            float total = Mathf.Max(1e-3f, s[n - 1]);
+
+            float mouthW = Mathf.Max(sourceStreamWidthMetres, widthMetres);
+            float src = Mathf.Clamp01(sourceWidthFraction);
+
+            for (int i = 0; i < n; i++)
+            {
+                float f = s[i] / total;                                   // 0 source .. 1 mouth
+                float grow = src + (1f - src) * Mathf.Pow(f, WidthAreaExponent);
+                float w = Mathf.Max(sourceStreamWidthMetres, mouthW * grow);
+                natW[i] = w;
+                natD[i] = NaturalDepthForWidth(w);
+            }
+        }
+
+        /// <summary>
+        /// Eases the DUG channel from the source-stream floor (a narrow shallow brook)
+        /// up to its solved size over the first stretch of the course, and holds every
+        /// station at or above the natural depth for its width so a river never solves
+        /// to zero depth. Dig mode only - read mode gets its source shape from the
+        /// natural fallback where no trench contains it. Skipped at a head that joins
+        /// another body, which the junction blend sizes to the water it meets.
+        /// </summary>
+        private void ApplySourceStreamProfile(List<Vector3> pts, List<float> widths, List<float> depths)
+        {
+            int n = Mathf.Min(pts != null ? pts.Count : 0,
+                              Mathf.Min(widths != null ? widths.Count : 0,
+                                        depths != null ? depths.Count : 0));
+            if (n < 2) return;
+
+            float[] s = new float[n];
+            for (int i = 1; i < n; i++) s[i] = s[i - 1] + Horizontal(pts[i - 1], pts[i]);
+            float total = Mathf.Max(1e-3f, s[n - 1]);
+
+            // Ease over the first ~15% of the run, clamped so a very long or very short
+            // river still gets a sensible source reach.
+            float run = Mathf.Clamp(total * 0.15f, 10f, 300f);
+
+            // A source that joins another body is not a spring: it starts at the water
+            // it meets, so leave the head to the junction blend and only floor depth.
+            bool headJoined = joinUpstreamFrom != null;
+
+            for (int i = 0; i < n; i++)
+            {
+                float ease = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(s[i] / run));
+
+                if (!headJoined)
+                {
+                    // Pull DOWN toward the stream floor near the head (never enlarge a
+                    // reach), releasing to the solved size downstream.
+                    widths[i] = Mathf.Lerp(Mathf.Min(widths[i], sourceStreamWidthMetres), widths[i], ease);
+                    depths[i] = Mathf.Lerp(Mathf.Min(depths[i], sourceStreamDepthMetres), depths[i], ease);
+                }
+
+                // Never zero, never below the natural depth for the (possibly narrowed) width.
+                widths[i] = Mathf.Max(0.2f, widths[i]);
+                depths[i] = Mathf.Max(depths[i], NaturalDepthForWidth(widths[i]));
+            }
+        }
+
         // §38: the bounded de-bow constants are gone with the de-bow pass that used them.
 
         // The width-to-depth ratio of an ordinary alluvial channel in an average valley.
@@ -3060,12 +3595,12 @@ namespace UniverseCreator.TerrainSystem
         /// first authored node takes the body-wide default, so a course with nothing
         /// typed on it behaves exactly as it did before per-node values existed.
         /// </summary>
-        private float[] ResolveNodeSeries(List<float> authored, float fallback)
+        private float[] ResolveNodeSeries(List<float> authored, float fallback, float floor = 0.05f)
         {
             int n = course.Count;
             float[] resolved = new float[Mathf.Max(1, n)];
 
-            float carried = Mathf.Max(0.05f, fallback);
+            float carried = Mathf.Max(floor, fallback);
 
             for (int i = 0; i < n; i++)
             {
@@ -3158,6 +3693,58 @@ namespace UniverseCreator.TerrainSystem
                 widths.Add(Mathf.Lerp(nodeW[seg], nodeW[Mathf.Min(seg + 1, n - 1)], t));
                 depths.Add(Mathf.Lerp(nodeD[seg], nodeD[Mathf.Min(seg + 1, n - 1)], t));
             }
+        }
+
+        /// <summary>
+        /// Resolves the per-node floodplain half-width (0 = inherit, and the run before
+        /// the first set node takes 0, so a course with nothing typed stays OFF) and reads
+        /// it at every final course point by arc position along the AUTHORED nodes - the
+        /// same easing width and depth get. Returns an array the length of
+        /// <paramref name="finalPts"/>. Points beyond either authored end (added by the
+        /// junction extension) clamp to the end node's value. All zeros - the default,
+        /// nothing opted in - is the signal the dig reads as "cut the channel only",
+        /// byte-for-byte the §38 behaviour before per-node floodplains existed.
+        /// </summary>
+        private float[] SampleFloodplainAlong(List<Vector3> finalPts)
+        {
+            int m = finalPts != null ? finalPts.Count : 0;
+            float[] outF = new float[m];
+            if (m == 0) return outF;
+
+            List<Vector3> nodes = ToWorld(course);
+            if (nodes == null || nodes.Count < 2) return outF;
+
+            // Floor 0, not the usual 0.05: a floodplain of zero means OFF here, and
+            // flooring it to 0.05 would switch a hair-width valley on under every river,
+            // which is precisely the global flattening §38 removed.
+            float[] nodeF = ResolveNodeSeries(nodeFloodplainMetres, 0f, 0f);
+
+            int n = nodes.Count;
+            float[] arc = new float[n];
+            for (int i = 1; i < n; i++)
+                arc[i] = arc[i - 1] + new Vector2(nodes[i].x - nodes[i - 1].x,
+                                                  nodes[i].z - nodes[i - 1].z).magnitude;
+            float total = Mathf.Max(1e-4f, arc[n - 1]);
+
+            float travelled = 0f;
+            for (int s = 0; s < m; s++)
+            {
+                if (s > 0)
+                    travelled += new Vector2(finalPts[s].x - finalPts[s - 1].x,
+                                             finalPts[s].z - finalPts[s - 1].z).magnitude;
+
+                float u = Mathf.Clamp(travelled, 0f, total);
+
+                int seg = 0;
+                while (seg < n - 2 && arc[seg + 1] < u) seg++;
+
+                float span = Mathf.Max(1e-4f, arc[seg + 1] - arc[seg]);
+                float t = Mathf.Clamp01((u - arc[seg]) / span);
+
+                outF[s] = Mathf.Lerp(nodeF[seg], nodeF[Mathf.Min(seg + 1, n - 1)], t);
+            }
+
+            return outF;
         }
 
         /// <summary>
@@ -3325,19 +3912,27 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Whether this point has reached standing water the river can join. Handed to
-        /// the descent walk, which stops there and reports ReachedWater.
+        /// Sets <see cref="autoJoinDownstream"/> to the nearest ocean or lake whose edge is
+        /// within <paramref name="reach"/> of <paramref name="p"/> (the river mouth), and
+        /// returns whether one was found. This is the river→ocean/lake auto-connect: it names
+        /// the standing water a mouth has arrived at so ExtendToJunction and BlendJunction can
+        /// weld the two into one surface. Nothing here MOVES the course - it is a proximity
+        /// read of the mouth as the author drew it (§38: the drawn line is the course).
         ///
-        /// Oceans and lakes only. Pools are decorative and a river running into one
-        /// should carry on past it; river-to-river junctions are set on the nodes,
-        /// where the designer can say which one joins which.
+        /// Oceans and lakes only. Pools are decorative and a river running into one should
+        /// carry on past it; river-to-river junctions are set on the nodes, where the designer
+        /// says which joins which. Disabled entirely when autoConnectMetres is 0.
         /// </summary>
-        private bool IsAtJoinableWater(Vector3 p)
+        private bool IsAtJoinableWater(Vector3 p, float reach)
         {
             if (joinCandidates == null) return false;
+            if (autoConnectMetres <= 0f) return false;
 
-            float reach = Mathf.Max(0f, autoConnectMetres);
+            reach = Mathf.Min(reach, autoConnectMetres);
             if (reach <= 0f) return false;
+
+            UCWaterBody nearest = null;
+            float bestGap = float.MaxValue;
 
             for (int i = 0; i < joinCandidates.Length; i++)
             {
@@ -3354,15 +3949,13 @@ namespace UniverseCreator.TerrainSystem
                 float gap = new Vector2(edge.x - p.x, edge.z - p.z).magnitude;
                 if (gap > reach) continue;
 
-                // First match wins rather than nearest. The walk moves a fraction of a
-                // step at a time, so by the time anything is in reach at all it is the
-                // one the river is arriving at, and scoring them all every step would
-                // cost far more than it could ever change.
-                autoJoinDownstream = other;
-                return true;
+                // Nearest wins: called once at the mouth (not per walk-step as it once was),
+                // so the closest body is the one the river actually empties into.
+                if (gap < bestGap) { bestGap = gap; nearest = other; }
             }
 
-            return false;
+            autoJoinDownstream = nearest;
+            return nearest != null;
         }
 
         /// <summary>
@@ -4175,6 +4768,16 @@ namespace UniverseCreator.TerrainSystem
             float[] arcStep = new float[count];
             float[] halfWidth = new float[count];
 
+            // Step 43 (D) - CURVATURE HALF-WIDTH CAP. At a meander tighter than the ribbon
+            // is wide, the inner edge of the band wraps past the centre of the turn and the
+            // two banks cross - the "bends climb each other / hang at the corner" the author
+            // saw. A parallel-offset ribbon can only stay simple while its half-width is
+            // under the local radius of curvature; held to 0.8 of it, the inner edge always
+            // leaves clearance. Straight reaches have an effectively infinite radius, so the
+            // cap is inert there and only bites on genuine hairpins - where a narrower ribbon
+            // is the honest result, since a trench that wide could not turn that sharply either.
+            float[] curveCap = new float[count];
+
             for (int i = 0; i < count; i++)
             {
                 int prev = Mathf.Max(i - 1, 0);
@@ -4192,6 +4795,26 @@ namespace UniverseCreator.TerrainSystem
 
                 float run = t2.magnitude;
                 arcStep[i] = Mathf.Max(0.01f, run / Mathf.Max(1, next - prev));
+
+                // Turn angle between the incoming and outgoing segment at this station,
+                // divided into the local run, is the discrete curvature; its reciprocal is
+                // the radius. A near-straight joint gives a tiny angle and a huge radius, so
+                // curveCap is effectively unbounded off the bends.
+                Vector2 inSeg = new Vector2(solvedPoints[i].x - solvedPoints[prev].x,
+                                            solvedPoints[i].z - solvedPoints[prev].z);
+                Vector2 outSeg = new Vector2(solvedPoints[next].x - solvedPoints[i].x,
+                                             solvedPoints[next].z - solvedPoints[i].z);
+                if (inSeg.sqrMagnitude > 1e-8f && outSeg.sqrMagnitude > 1e-8f)
+                {
+                    float dot = Mathf.Clamp(Vector2.Dot(inSeg.normalized, outSeg.normalized), -1f, 1f);
+                    float theta = Mathf.Acos(dot);
+                    float radius = theta > 1e-3f ? arcStep[i] / theta : float.MaxValue;
+                    curveCap[i] = 0.8f * radius;
+                }
+                else
+                {
+                    curveCap[i] = float.MaxValue;
+                }
             }
 
             // Hydraulics per cross-section.
@@ -4331,16 +4954,19 @@ namespace UniverseCreator.TerrainSystem
                 {
                     float u = across > 1 ? (j / (float)(across - 1)) * 2f - 1f : 0f;
 
-                    // The CARVE is the authority: its waterline sits at halfWidth[i] (the
-                    // same solvedWidths the trench was dug with), so the water surface must
-                    // meet that line, not sail past it. Extend by only a hairline seal so
-                    // the plane still bites the rising bank and leaves no gap - never the
-                    // full bank feather, which is what made the shader "surpass the carve
-                    // with much". The seal is a small fraction of the local half-width so a
-                    // wide river does not balloon either, floored so a metre-wide brook is
-                    // still sealed and capped so it can never exceed the feather.
-                    float seal = Mathf.Min(feather, Mathf.Max(0.12f, halfWidth[i] * 0.08f));
-                    float extendWidth = halfWidth[i] + seal;
+                    // Refinement #4 (P1) - the water plane stops SHORT of the bank instead of
+                    // sailing to (or past) it. The earlier Step 43 (D) seal EXTENDED the ribbon
+                    // a hairline beyond halfWidth to "meet the bank with no gap"; in practice a
+                    // full-width plane laid to the bank top read as a flat sheet floating on the
+                    // ground. Pulling the edge in by a small inset tucks the water inside its
+                    // banks so the bank shows around it and the river sits IN the channel. The
+                    // inset is the Bank Gap field, clamped to a fraction of the local half-width
+                    // so a narrow brook is never over-trimmed or inverted; the alpha feather
+                    // below still softens the trimmed edge so it is not a hard line.
+                    float inset = Mathf.Min(Mathf.Max(0f, bankGapMetres), halfWidth[i] * 0.35f);
+                    // Held under the curvature cap so a meander cannot fold the band onto
+                    // itself; inert on straight and gentle reaches (cap is effectively huge).
+                    float extendWidth = Mathf.Min(Mathf.Max(0.05f, halfWidth[i] - inset), curveCap[i]);
 
                     // Channel cross-section. exponent 2 is the parabola a natural
                     // stream cuts; 4 is a flat bed with steep banks; 1 is a shallow V.
