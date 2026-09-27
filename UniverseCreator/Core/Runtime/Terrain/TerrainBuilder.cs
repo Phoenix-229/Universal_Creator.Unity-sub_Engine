@@ -669,14 +669,19 @@ namespace UniverseCreator.TerrainSystem
                 if (want > loggedAutofillDepth)
                 {
                     loggedAutofillDepth = want;
-                    Debug.LogWarning(
+                    // Info, not a warning: this is a HEALED case - the missing slots are
+                    // dressed (from the node's per-channel descriptors when present, else a
+                    // neutral stand-in) and generation continues correctly. It once was the
+                    // SetAlphamaps throw that stalled the build, so it is worth saying once,
+                    // but it is guidance ("assign textures / lower Layer Count"), not a fault.
+                    Debug.Log(
                         "Universe Creator: a splat output addresses " + want +
                         " layer(s) but the world had " + have +
-                        " authored - auto-provisioned the missing slot(s) with a neutral " +
-                        "stand-in so generation continues (was: the SetAlphamaps throw that " +
-                        "stalled the build at " + (chunkLabel ?? "a chunk") + "). Assign " +
-                        "textures to those layers on the Universe Creator object, or lower " +
-                        "the node's Layer Count, to control them.");
+                        " authored - the missing slot(s) are dressed with the node's per-channel " +
+                        "texture/tint where set, or a neutral stand-in otherwise, so generation " +
+                        "continues (this replaces the SetAlphamaps stall once seen at " +
+                        (chunkLabel ?? "a chunk") + "). Assign textures to those layers on the " +
+                        "Universe Creator object, or lower the node's Layer Count, to control them.");
                 }
                 return splat;
             }

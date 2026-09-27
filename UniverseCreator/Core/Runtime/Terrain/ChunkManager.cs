@@ -257,6 +257,12 @@ namespace UniverseCreator.TerrainSystem
         // Cells waiting for a free worker slot, highest priority (nearest player) first.
         private readonly List<Chunk> pending = new List<Chunk>();
 
+        // The cells written this pump, so the stitch can be scoped to just their
+        // neighbourhood instead of re-welding the whole world after every apply. Reused
+        // across pumps (cleared at the top of PumpCompleted) so a steady-state world
+        // allocates nothing here. See StitchAround / the O(n^2) note in Step 41.
+        private readonly List<Chunk> appliedThisPump = new List<Chunk>();
+
         // T-VEGLAW. Cells queued for a read-only re-scatter - an inspector
         // vegetation-library edit re-applying its prototypes over the EXISTING terrain
         // with NO worker, NO graph eval and NO height/splat/hydrology change. Drained
@@ -1350,6 +1356,66 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// Local stitch (Step 41). Re-runs Unity's SetNeighbors / SyncHeightmap / Flush
+        /// for a single cell that just landed and its four cardinal neighbours, and
+        /// nothing else.
+        /// </summary>
+        /// <remarks>
+        /// This is the streaming-time replacement for calling the full <see cref="StitchGrid"/>
+        /// after every apply. That full sweep welded and re-flushed EVERY cell in the world
+        /// on each chunk - O(n) per apply, O(n^2) over a build - which is why a 900-cell
+        /// world spent hours in the finishing pass while a 25-cell world felt instant (625
+        /// stitch-ops versus ~810,000). The heights were already welded by ApplyChunk
+        /// (WeldChunkEdges + ReweldNeighbours); all that was ever needed here was to tell
+        /// Unity to recompute the shared edge for the handful of cells that actually moved.
+        ///
+        /// A resolution change is covered because SetNeighbors is re-run on BOTH the landed
+        /// cell and each of its neighbours, so the recompute happens from both sides of the
+        /// seam. A corner neighbour shares only a single sample, already resolved by the
+        /// weld, so it does not need its LOD skirt recomputed and is not visited.
+        ///
+        /// The authoritative full <see cref="StitchGrid"/> still runs once at
+        /// SettlePhaseStitch when the queue drains, so nothing is ever left unwelded - this
+        /// only removes the redundant per-apply sweep over cells that did not move.
+        /// </remarks>
+        private void StitchAround(Chunk landed)
+        {
+            if (landed == null) return;
+
+            Coord cell = landed.cell;
+            StitchOne(cell);
+            StitchOne(new Coord(cell.x - 1, cell.z));
+            StitchOne(new Coord(cell.x + 1, cell.z));
+            StitchOne(new Coord(cell.x, cell.z - 1));
+            StitchOne(new Coord(cell.x, cell.z + 1));
+        }
+
+        /// <summary>
+        /// The pass-2 body of <see cref="StitchGrid"/> for one cell: link it to its four
+        /// neighbours and flush. Uses the same <see cref="ResolveStitchNeighbour"/> helper
+        /// the full stitch uses, so a scoped stitch is byte-for-byte the behaviour the full
+        /// one would have produced for this cell.
+        /// </summary>
+        private void StitchOne(Coord cell)
+        {
+            if (!byCell.TryGetValue(cell, out Chunk chunk)) return;
+            if (chunk == null || chunk.terrain == null || chunk.terrain.terrainData == null
+                || chunk.go == null || !chunk.go.activeSelf)
+                return;
+
+            int res = chunk.terrain.terrainData.heightmapResolution;
+
+            Terrain left   = ResolveStitchNeighbour(cell, new Coord(cell.x - 1, cell.z), res);
+            Terrain right  = ResolveStitchNeighbour(cell, new Coord(cell.x + 1, cell.z), res);
+            Terrain top    = ResolveStitchNeighbour(cell, new Coord(cell.x, cell.z + 1), res);
+            Terrain bottom = ResolveStitchNeighbour(cell, new Coord(cell.x, cell.z - 1), res);
+
+            chunk.terrain.SetNeighbors(left, top, right, bottom);
+            chunk.terrain.terrainData.SyncHeightmap();
+            chunk.terrain.Flush();
+        }
+
+        /// <summary>
         /// Resolves one neighbour for the SetNeighbors weld. Returns the neighbour terrain
         /// only when it holds a real bake at the SAME heightmap resolution; an absent,
         /// inactive, still-generating or placeholder cell simply yields null and is not
@@ -2315,6 +2381,10 @@ namespace UniverseCreator.TerrainSystem
             bool firedAfterSettle = false;
             int applies = 0;
 
+            // Scoped-stitch bookkeeping (Step 41): the cells written this pump, so the
+            // stitch touches only their neighbourhood instead of the whole world.
+            appliedThisPump.Clear();
+
             // Wall clock, not frame count. This pump is driven by Update in play mode
             // and by EditorApplication.update in edit mode, and those tick at wildly
             // different rates - a frame-based gap would mean one spacing while playing
@@ -2388,6 +2458,7 @@ namespace UniverseCreator.TerrainSystem
                 c.tile = null;
                 wrote = true;
                 applies++;
+                appliedThisPump.Add(c);
 
                 nextApplyTime = Time.realtimeSinceStartup + o.ChunkYieldDelaySeconds;
             }
@@ -2398,7 +2469,17 @@ namespace UniverseCreator.TerrainSystem
             // stitched against, and Unity only recomputes edge normals and the LOD skirt
             // when SetNeighbors is called again. Re-stitching only when something was
             // actually written keeps this off idle pumps.
-            if (wrote) StitchGrid();
+            //
+            // Step 41: stitch ONLY the neighbourhood of what landed this pump, not the
+            // whole world. The old `if (wrote) StitchGrid()` re-welded and re-flushed
+            // every cell on every apply - O(n) per apply, O(n^2) over a build, and the
+            // reason a big world crawled while a small one flew. ApplyChunk already welded
+            // the landed cell and its neighbours; StitchAround just tells Unity to
+            // recompute the edges that moved. The authoritative full StitchGrid still runs
+            // once at SettlePhaseStitch when the queue drains, so the final weld is
+            // unchanged and nothing is left unwelded.
+            for (int i = 0; i < appliedThisPump.Count; i++)
+                StitchAround(appliedThisPump[i]);
 
             // The map traces the surface, so it is stale until the last chunk lands.
             // Refreshing once the queue drains costs one line mesh per settle instead

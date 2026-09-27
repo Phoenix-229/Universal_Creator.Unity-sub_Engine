@@ -327,6 +327,16 @@ namespace UniverseCreator.Editor.Windows
                 : "Applied to " + terrain.name));
         }
 
+        // Remembers the terrain we last announced an auto-resolve for, so the
+        // "using terrain X" notice fires once when the guess first lands (or when
+        // it lands on a DIFFERENT terrain), not on every Apply. Without this the
+        // same line prints on each evaluation and the console stops being read.
+        // A REFERENCE, not GetInstanceID(): that getter is CS0619-obsolete in
+        // Unity 6 (warnings are errors here), and reference identity is exactly
+        // what we want - a destroyed-and-recreated terrain becomes a different
+        // reference (the old one compares as fake-null), so it re-announces.
+        [System.NonSerialized] private static UnityEngine.Terrain s_lastAutoResolved;
+
         /// <summary>
         /// The terrain to write to: the field if set, otherwise the first chunk of
         /// the first world in the scene, written back into the field.
@@ -364,8 +374,14 @@ namespace UniverseCreator.Editor.Windows
             {
                 targetTerrain = found;
                 if (terrainField != null) terrainField.SetValueWithoutNotify(found);
-                Debug.Log("Universe Creator: texture graph applied to '" + found.name +
-                          "'. Assign a different terrain in the Texture Graph toolbar to override.");
+
+                if (!ReferenceEquals(found, s_lastAutoResolved))
+                {
+                    s_lastAutoResolved = found;
+                    Debug.Log("Universe Creator: no terrain was set in the Texture Graph " +
+                              "toolbar, so it resolved to '" + found.name +
+                              "'. Assign a different terrain in the toolbar to override.");
+                }
             }
 
             return found;

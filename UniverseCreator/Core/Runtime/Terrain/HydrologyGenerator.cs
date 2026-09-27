@@ -8,6 +8,16 @@ namespace UniverseCreator.TerrainSystem
 {
     public static class HydrologyGenerator
     {
+        // The "nothing to build - targets already met" line is genuine the first time
+        // it explains why a Generate produced no water, but the edit-mode chunk driver
+        // pumps GenerateFromNode on a loop, so left ungated it reprints on every pump
+        // and floods the console. Remember the last thing said for each node and only
+        // speak when it changes, so the explanation appears once per distinct state
+        // and not once per frame.
+        [System.NonSerialized]
+        private static readonly Dictionary<string, string> s_lastNothingToBuild =
+            new Dictionary<string, string>();
+
         // onComplete is the CONTINUATION the editor's settle path passes so the lake
         // spawn can be spread ONE basin per pump (spec §15: one body at a time, no
         // synchronous all-at-once flood that spikes RAM/CPU and freezes the editor).
@@ -174,11 +184,18 @@ namespace UniverseCreator.TerrainSystem
             // the two it was.
             if (lakesToSpawn <= 0 && !oceanToSpawn)
             {
-                Debug.Log($"[UC Hydrology] node {node.id}: nothing to build - the scene already "
+                string msg = $"[UC Hydrology] node {node.id}: nothing to build - the scene already "
                           + $"holds {currentLakes} lake(s) and {proceduralOceans.Count} ocean(s) "
                           + $"against targets {desiredLakes} lake(s)/"
                           + (wantOcean ? "1" : "0") + " ocean. Rivers are placed by hand. Raise a "
-                          + "target, or clear the WaterSystem child to rebuild from scratch.");
+                          + "target, or clear the WaterSystem child to rebuild from scratch.";
+                string key = node.id ?? "";
+                string prev;
+                if (!s_lastNothingToBuild.TryGetValue(key, out prev) || prev != msg)
+                {
+                    s_lastNothingToBuild[key] = msg;
+                    Debug.Log(msg);
+                }
                 if (onComplete != null) onComplete();
                 return;
             }

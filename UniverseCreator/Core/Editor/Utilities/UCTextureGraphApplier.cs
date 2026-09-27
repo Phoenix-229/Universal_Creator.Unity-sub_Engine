@@ -286,9 +286,19 @@ namespace UniverseCreator.Editor.Utilities
                 // layer keeps channel i meaning channel i.
                 if (src == null)
                 {
-                    result[i] = (existing != null && i < existing.Length && existing[i] != null)
+                    TerrainLayer gap = (existing != null && i < existing.Length && existing[i] != null)
                         ? existing[i]
                         : ResolveLayerAsset(folder, i, "Layer " + i);
+                    // A freshly minted gap layer has no diffuse, which Unity draws as its
+                    // grey CHECKERBOARD. Dress it with the damp-earth stand-in so a
+                    // positional gap reads as ground, not as a failed material.
+                    if (gap.diffuseTexture == null)
+                    {
+                        gap.diffuseTexture = FlatStandInAlbedo(DampEarth);
+                        EditorUtility.SetDirty(gap);
+                    }
+                    SyncLayerNameToFile(gap);
+                    result[i] = gap;
                     continue;
                 }
 
@@ -298,6 +308,7 @@ namespace UniverseCreator.Editor.Utilities
                     : ResolveLayerAsset(folder, i, src.name);
 
                 WriteLayer(layer, src, surface);
+                SyncLayerNameToFile(layer);
                 EditorUtility.SetDirty(layer);
                 result[i] = layer;
             }
@@ -334,26 +345,67 @@ namespace UniverseCreator.Editor.Utilities
             if (layer != null) return layer;
 
             layer = new TerrainLayer();
-            layer.name = string.IsNullOrEmpty(displayName) ? ("Layer " + index) : displayName;
+            // Name after the file stem, NOT the display name: Unity logs "Main Object Name
+            // X does not match filename Y" whenever a saved asset's object name differs
+            // from its file, and this file is keyed by channel index for a stable identity
+            // (the control map is painted against it). SyncLayerNameToFile keeps the two
+            // equal on every reuse; displayName is kept only for call-site readability.
+            layer.name = "UC" + LayerSuffix + index;
             AssetDatabase.CreateAsset(layer, path);
             return layer;
         }
 
-        // A neutral stand-in albedo for a layer whose graph produced no texture.
-        // Without it, assigning layer.diffuseTexture = null makes Unity draw its grey
-        // "no texture assigned" CHECKERBOARD - the exact "box on the snow" reported -
-        // because the author's colour rides on diffuseRemapMax, which multiplies a
-        // diffuse that is not there. This is the WriteLayer twin of
-        // TerrainBuilder.EnsureFallbackLayer: a tiny bilinear/Repeat texture kept
-        // NEUTRAL (~0.9 grey) so the layer's own tint remap colours it exactly once -
-        // snow reads white, grass green - with a coprime value walk so it never
-        // resolves as a grid. Cached: one texture shared by every healed layer, minted
-        // lazily because a HideAndDontSave asset dies on a domain reload.
-        [System.NonSerialized] private static Texture2D s_flatStandIn;
-
-        private static Texture2D FlatStandInAlbedo()
+        // Unity logs "Main Object Name X does not match filename Y" for any saved asset
+        // whose object name differs from its file. The layer file is keyed by channel
+        // index for a stable identity (see ResolveLayerAsset), so the fix is to make the
+        // OBJECT name track the FILE stem rather than the graph's renamable display name -
+        // silencing the warning without renaming the asset the control map is painted on.
+        private static void SyncLayerNameToFile(TerrainLayer layer)
         {
-            if (s_flatStandIn != null) return s_flatStandIn;
+            if (layer == null) return;
+            string path = AssetDatabase.GetAssetPath(layer);
+            if (string.IsNullOrEmpty(path)) return; // in-memory autofill/stand-in: no file, no warning
+            string stem = System.IO.Path.GetFileNameWithoutExtension(path);
+            if (!string.IsNullOrEmpty(stem) && layer.name != stem)
+            {
+                layer.name = stem;
+                EditorUtility.SetDirty(layer);
+            }
+        }
+
+        // Damp earth for a layer the graph left un-textured AND un-tinted. White is the
+        // one colour that reads as a failed material against water and snow (the exact
+        // shoreline "whitish" bug), so an undressed channel paints soil, matching the
+        // biome path's TerrainBuilder.AutofillLayer. See TintIsAuthored below.
+        private static readonly Color DampEarth = new Color(0.40f, 0.33f, 0.25f, 1f);
+
+        // Flat single-colour stand-in albedos, keyed by quantised colour so one 4x4 is
+        // shared by every layer and chunk that needs that colour. The colour is BAKED IN
+        // (the caller then leaves the diffuse remap neutral, or it would be squared); a
+        // coprime value walk over the 16 cells keeps it from resolving as a grid
+        // underfoot. HideAndDontSave, so a domain reload drops them and the null check
+        // rebuilds. This is the applier twin of TerrainBuilder.FlatTintTexture: without
+        // it, layer.diffuseTexture = null makes Unity draw its grey CHECKERBOARD.
+        [System.NonSerialized] private static Dictionary<int, Texture2D> s_flatStandIns;
+
+        /// <summary>True when a tint is a real choice, not the AlbedoLayerNode default
+        /// (Color.white) or an undefined black - either of which means "channel not
+        /// dressed yet" and must read as ground, never as glaring white.</summary>
+        private static bool TintIsAuthored(Color c)
+        {
+            bool nearWhite = c.r > 0.96f && c.g > 0.96f && c.b > 0.96f;
+            bool nearBlack = c.r < 0.02f && c.g < 0.02f && c.b < 0.02f;
+            return !nearWhite && !nearBlack;
+        }
+
+        private static Texture2D FlatStandInAlbedo(Color colour)
+        {
+            colour.a = 1f;
+            if (s_flatStandIns == null) s_flatStandIns = new Dictionary<int, Texture2D>();
+
+            int key = QuantiseStandIn(colour);
+            Texture2D cached;
+            if (s_flatStandIns.TryGetValue(key, out cached) && cached != null) return cached;
 
             const int size = 4;
             Texture2D tex = new Texture2D(size, size); // default: sRGB, RGBA32, mip chain
@@ -366,15 +418,23 @@ namespace UniverseCreator.Editor.Utilities
             for (int i = 0; i < px.Length; i++)
             {
                 // Two coprime strides over the 16 cells so value never lines up into a
-                // row or a checker; centred near white so diffuseRemapMax lands the tint.
-                float v = 0.90f + 0.03f * (i % 3) + 0.02f * (i % 5);
-                px[i] = new Color(v, v, v, 1f);
+                // row or a checker; the walk rides on top of the baked colour.
+                float v = 0.92f + 0.05f * (i % 3) + 0.03f * (i % 5);
+                px[i] = new Color(colour.r * v, colour.g * v, colour.b * v, 1f);
             }
             tex.SetPixels(px);
             tex.Apply();
 
-            s_flatStandIn = tex;
-            return s_flatStandIn;
+            s_flatStandIns[key] = tex;
+            return tex;
+        }
+
+        private static int QuantiseStandIn(Color c)
+        {
+            int r = Mathf.Clamp(Mathf.RoundToInt(c.r * 31f), 0, 31);
+            int g = Mathf.Clamp(Mathf.RoundToInt(c.g * 31f), 0, 31);
+            int b = Mathf.Clamp(Mathf.RoundToInt(c.b * 31f), 0, 31);
+            return (r << 10) | (g << 5) | b;
         }
 
         /// <summary>
@@ -389,21 +449,35 @@ namespace UniverseCreator.Editor.Utilities
         /// </summary>
         private static void WriteLayer(TerrainLayer layer, LayerProduct src, SurfaceProduct surface)
         {
-            if (!string.IsNullOrEmpty(src.name) && layer.name != src.name) layer.name = src.name;
+            // The object name is synced to the asset's file stem by SyncLayerNameToFile
+            // after this call (Unity warns when they differ), so it is not set from
+            // src.name here.
 
-            Texture2D albedo = src.albedo != null ? src.albedo.texture : null;
-            if (albedo == null)
+            Texture2D srcAlbedo = src.albedo != null ? src.albedo.texture : null;
+            bool bakedStandIn = srcAlbedo == null;
+            Texture2D diffuse;
+            if (bakedStandIn)
             {
-                // A null diffuse would draw Unity's grey checkerboard, not the flat
-                // colour this notice promises; a neutral stand-in that the tint remap
-                // colours makes the promise true and kills the "box on the snow" for
-                // any layer whose graph produced no albedo texture.
-                albedo = FlatStandInAlbedo();
-                surface.Notice("Layer '" + src.name + "' has no albedo texture; painting as flat colour.");
+                // No albedo. Bake a flat stand-in of the authored tint - but a DEFAULT
+                // white tint (AlbedoLayerNode.tint = Color.white) or an undefined black
+                // is not a colour choice, it is "this channel is not dressed yet", and
+                // white is the one colour that reads as a failed material against water
+                // and snow (the reported "whitish" band). So an unauthored channel paints
+                // damp earth, matching the biome path's autofill; a real tint paints that
+                // colour. The colour is baked in here, so the diffuse remap below stays at
+                // identity or it would be squared.
+                Color flat = TintIsAuthored(src.tint) ? (Color)src.tint : DampEarth;
+                diffuse = FlatStandInAlbedo(flat);
+                surface.Notice("Layer '" + src.name + "' has no albedo texture; painting as flat " +
+                               (TintIsAuthored(src.tint) ? "colour." : "damp-earth ground (no tint set)."));
             }
-            if (layer.diffuseTexture != albedo)
+            else
             {
-                layer.diffuseTexture = albedo;
+                diffuse = srcAlbedo;
+            }
+            if (layer.diffuseTexture != diffuse)
+            {
+                layer.diffuseTexture = diffuse;
                 if (src.albedo != null) src.albedo.Apply();
             }
 
@@ -427,14 +501,16 @@ namespace UniverseCreator.Editor.Utilities
             Vector2 offset = src.uv != null ? src.uv.offset : Vector2.zero;
             if (layer.tileOffset != offset) layer.tileOffset = offset;
 
-            if (layer.diffuseRemapMax != (Vector4)src.tint)
+            Vector4 wantRemapMax = bakedStandIn ? Vector4.one : (Vector4)src.tint;
+            if (layer.diffuseRemapMax != wantRemapMax)
             {
-                // Tint rides on the diffuse remap rather than on a separate
-                // property, because that is the only per-layer colour multiplier
-                // the terrain engine itself understands - and it therefore keeps
-                // working in the basemap and in the stock paint preview.
+                // With a real albedo the tint rides on the diffuse remap - the only
+                // per-layer colour multiplier the terrain engine itself understands, so
+                // it keeps working in the basemap and the stock paint preview. With a
+                // baked stand-in the colour is already in the texture, so the remap is
+                // left at identity to avoid squaring it.
                 layer.diffuseRemapMin = Vector4.zero;
-                layer.diffuseRemapMax = src.tint;
+                layer.diffuseRemapMax = wantRemapMax;
             }
 
             float ns = Mathf.Clamp(src.normalStrength, 0f, 4f);
@@ -666,8 +742,10 @@ namespace UniverseCreator.Editor.Utilities
         /// One message and not one per notice, because a graph with a quality
         /// budget applied can easily produce six, and six separate console
         /// warnings for one evaluation trains the user to ignore the console.
-        /// Warning and not Error: every notice describes a request that was
-        /// honoured differently, not a failure.
+        /// Info (Debug.Log) and not a warning: every notice describes a request
+        /// that was honoured differently, not a failure - nothing here needs the
+        /// user to act, so it must not wear the yellow warning icon that reads as
+        /// "something broke".
         /// </summary>
         private static void ReportNotices(SurfaceProduct surface)
         {
@@ -678,7 +756,7 @@ namespace UniverseCreator.Editor.Utilities
             for (int i = 0; i < surface.notices.Count; i++)
                 sb.Append("\n  - ").Append(surface.notices[i]);
 
-            Debug.LogWarning(sb.ToString());
+            Debug.Log(sb.ToString());
         }
     }
 }

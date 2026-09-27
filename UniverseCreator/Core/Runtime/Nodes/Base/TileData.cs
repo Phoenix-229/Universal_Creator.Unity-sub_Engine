@@ -242,6 +242,11 @@ namespace UniverseCreator.Nodes
         /// <summary>Splat channel (terrain layer index) these textures dress.</summary>
         public int layer;
 
+        /// <summary>Display-only name for the slot (e.g. "Grass", "Rock"). Guides the
+        /// user to the right channel; it is NOT compared when caching a minted layer
+        /// and never keys any behaviour - the <see cref="layer"/> index is the contract.</summary>
+        public string label;
+
         /// <summary>Base colour map, or null for a flat <see cref="tint"/> layer.</summary>
         public Texture2D albedo;
 

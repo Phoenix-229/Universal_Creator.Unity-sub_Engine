@@ -194,11 +194,14 @@ namespace UniverseCreator.Nodes.Outputs
         public int overrideLayer = 5;
 
         [Header("Layer textures (optional)")]
-        [Tooltip("Textures for any splat channel this node reserves but the world has " +
-                 "not authored a layer for - road, grass, forest floor, or a re-textured " +
-                 "ground. Snow has its own fields above. Each entry dresses one layer " +
-                 "INDEX; nothing keys off a name, so retargeting a rule can never break " +
-                 "which texture lands where. Empty entries paint a flat tinted layer.")]
+        [Tooltip("Textures for each splat channel this node reserves. THIS is where the " +
+                 "ground layers are dressed - the 4-channel Texture Graph cannot reach " +
+                 "channels 4-7, so grass/forest/snow must be textured here. Each entry " +
+                 "dresses one channel INDEX; nothing keys off a name. Canonical legend: " +
+                 "0 Rock, 1 Cliff Rock, 2 Mud/Silt, 3 Sand, 4 Snow (use the Snow fields " +
+                 "above), 5 Road, 6 Grass, 7 Forest Floor. Empty albedo paints the slot's " +
+                 "flat tint, never Unity's grey. Slots are seeded labeled the first time; " +
+                 "drop a texture into the one you want.")]
         public List<SplatLayerTexture> layerTextures = new List<SplatLayerTexture>();
 
         // Baked once per Generate so the inner loop does a lookup instead of a
@@ -225,7 +228,43 @@ namespace UniverseCreator.Nodes.Outputs
             rules.Add(Rule(BiomeType.TropicalRainforest, 7, 1, 0.78f, 0.94f));
             rules.Add(Rule(BiomeType.Ice, 4, 1, 0.30f, 0.50f));
 
+            EnsureLayerTextureSlots();
             MarkDirty();
+        }
+
+        /// <summary>
+        /// Seeds one labeled, empty-but-tinted slot per reserved ground channel, so the
+        /// user sees named slots (Grass, Rock, ...) to drop textures into instead of
+        /// guessing an index, and an unfilled channel paints its plausible flat colour
+        /// rather than the brown autofill stand-in. Snow (4) keeps its dedicated fields.
+        /// Only runs when the list is empty, so it never clobbers user entries. No path,
+        /// filename, or format is assumed - albedo stays null until the buyer assigns one.
+        /// </summary>
+        public void EnsureLayerTextureSlots()
+        {
+            if (layerTextures == null) layerTextures = new List<SplatLayerTexture>();
+            if (layerTextures.Count > 0) return;
+
+            layerTextures.Add(Slot(0, "Rock",         new Color(0.46f, 0.45f, 0.43f), 0.30f));
+            layerTextures.Add(Slot(1, "Cliff Rock",   new Color(0.38f, 0.37f, 0.36f), 0.35f));
+            layerTextures.Add(Slot(2, "Mud / Silt",   new Color(0.34f, 0.27f, 0.20f), 0.20f));
+            layerTextures.Add(Slot(3, "Sand",         new Color(0.72f, 0.65f, 0.48f), 0.26f));
+            layerTextures.Add(Slot(5, "Road",         new Color(0.28f, 0.28f, 0.29f), 0.35f));
+            layerTextures.Add(Slot(6, "Grass",        new Color(0.32f, 0.44f, 0.20f), 0.30f));
+            layerTextures.Add(Slot(7, "Forest Floor", new Color(0.22f, 0.28f, 0.16f), 0.25f));
+        }
+
+        private static SplatLayerTexture Slot(int layer, string label, Color tint, float smoothness)
+        {
+            return new SplatLayerTexture
+            {
+                layer = layer,
+                label = label,
+                tint = tint,
+                tileSizeMetres = new Vector2(8f, 8f),
+                smoothness = smoothness,
+                normalScale = 1f
+            };
         }
 
         private static BiomeSplatRule Rule(BiomeType b, int ground, int slope, float hs, float he)
@@ -247,6 +286,11 @@ namespace UniverseCreator.Nodes.Outputs
 
         protected override void WriteOutput(Matrix src, TileData tile, StopToken stop)
         {
+            // A node authored before the labeled slots existed still gets them, so the
+            // ground channels the Texture Graph cannot reach (grass 6, forest 7, ...)
+            // paint their tint instead of the brown autofill. No-op once seeded/edited.
+            EnsureLayerTextureSlots();
+
             Matrix biome = GetInputMatrix(tile, 1, stop);
             Matrix wetness = GetInputMatrix(tile, 2, stop);
             Matrix overrideMask = GetInputMatrix(tile, 3, stop);
