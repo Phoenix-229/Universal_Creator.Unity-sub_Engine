@@ -4964,6 +4964,14 @@ namespace UniverseCreator.TerrainSystem
                     // so a narrow brook is never over-trimmed or inverted; the alpha feather
                     // below still softens the trimmed edge so it is not a hard line.
                     float inset = Mathf.Min(Mathf.Max(0f, bankGapMetres), halfWidth[i] * 0.35f);
+                    // REFINEMENT #6 A1: cancel the bank-gap inset AT A JOINED END so the ribbon
+                    // reaches its full width there and OVERLAPS the body it meets, closing the
+                    // visible strip of terrain between the two water sheets (imgs #26/#27).
+                    // seamWeight is 1 at a joined end and eases to 0 a blend-length up the
+                    // course, so away from the join the inset is unchanged and the banks still
+                    // show along the river (R#4 P1). BlendJunction already welded the two to a
+                    // SHARED level; this closes the GEOMETRY gap the alpha seamWeight could not.
+                    inset *= (1f - seamWeight[i]);
                     // Held under the curvature cap so a meander cannot fold the band onto
                     // itself; inert on straight and gentle reaches (cap is effectively huge).
                     float extendWidth = Mathf.Min(Mathf.Max(0.05f, halfWidth[i] - inset), curveCap[i]);
@@ -5109,7 +5117,42 @@ namespace UniverseCreator.TerrainSystem
             // uniform flow. Everything else follows its own vertex stream.
             material.SetFloat(UCWaterProps.UseVertexFlow, kind == WaterBodyKind.Ocean ? 0f : 1f);
 
+            // Spectral richness by body kind, keyed off the kind like the flow above and
+            // mirrored into the physics surface in AttachVolume so a boat sits on the same
+            // swell it is drawn on. An open ocean carries a broad set of wave trains, a
+            // lake a simpler pair, a decorative pool barely a ripple. A river advects that
+            // swell downstream (the only kind that does); still water keeps _WaveFlowAdvect
+            // at 0 so it stays a line-for-line match for the CPU buoyancy mirror.
+            material.SetFloat(UCWaterProps.WaveOctaves, WaveOctavesFor(kind));
+            material.SetFloat(UCWaterProps.WaveFlowAdvect, kind == WaterBodyKind.River ? 1f : 0f);
+
+            // Calm to begin with; the weather layer raises it in a storm (UCWaterWeatherCoupling).
+            material.SetFloat(UCWaterProps.WaveStormAmp, 1f);
+
             return material;
+        }
+
+        /// <summary>
+        /// How many ambient wave trains a body of this kind runs, 1..4. An open ocean
+        /// carries the broadest swell spectrum, a lake a calmer pair, a pool a single
+        /// ripple; a river reads like a moving lake. Feeds both the material
+        /// (_WaveOctaves) and the physics surface (WaterSurfaceParams.octaves), which
+        /// must agree - see UC_WaterInput.hlsl / UCWaterSurface.WaveOffset.
+        ///
+        /// Public and static so the quality-tier driver (W8) can recompute a body's
+        /// AUTHORED octave count straight from its kind and cap it per tier, without
+        /// reading the possibly-already-capped live value - that is what lets a lowered
+        /// tier be raised again and restore the full spectrum.
+        /// </summary>
+        public static float WaveOctavesFor(WaterBodyKind k)
+        {
+            switch (k)
+            {
+                case WaterBodyKind.Ocean: return 4f;
+                case WaterBodyKind.Lake:  return 2f;
+                case WaterBodyKind.River: return 2f;
+                default:                  return 1f;   // Pool and anything decorative
+            }
         }
 
         private void AttachVolume(WaterBodyData body)
@@ -5145,6 +5188,10 @@ namespace UniverseCreator.TerrainSystem
             volume.surface.waveHeight = water.waveHeightMetres;
             volume.surface.waveLength = water.waveLengthMetres;
             volume.surface.waveSpeed = water.waveSpeed;
+            // Mirror the material's per-kind octave count and calm-start storm scale, so
+            // buoyancy reads the exact swell the shader draws (see ConfigureMaterial).
+            volume.surface.octaves = WaveOctavesFor(kind);
+            volume.surface.stormAmp = 1f;
             volume.surface.flow = body.meanFlow != Vector2.zero
                 ? body.meanFlow
                 : water.flowMetresPerSecond;

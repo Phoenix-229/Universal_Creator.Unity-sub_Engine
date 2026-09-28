@@ -64,7 +64,7 @@ namespace UniverseCreator.TerrainSystem
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Water System Manager")]
     [DisallowMultipleComponent]
-    public class UCWaterSystemManager : MonoBehaviour
+    public partial class UCWaterSystemManager : MonoBehaviour
     {
         // =====================================================================
         //  SOURCE
@@ -163,6 +163,36 @@ namespace UniverseCreator.TerrainSystem
         public bool defaultEmitRipples = true;
 
         // =====================================================================
+        //  INTERACTIVE DYNAMICS (play-mode activator)
+        //
+        //  The per-body settings above (Emit Ripples, Underwater View, Flow
+        //  Force) are copied onto each body's UCWaterVolume at build. But two of
+        //  the dynamics need a SCENE-LEVEL object to be visible, and nothing was
+        //  creating it in a real play session - only the self-test did. So a
+        //  world could have Emit Ripples ticked on every body and still show
+        //  nothing, because the ripple simulation those bodies feed did not
+        //  exist (UCWaterRippleSim.Active was null, and every emitter early-outs
+        //  on that). These opt-in toggles are that missing activator: on Play the
+        //  manager ensures the one ripple sim exists, and can put the underwater
+        //  post effect on the active camera. Buyer-object components (buoyancy,
+        //  swimming character) are still added by the developer to THEIR objects
+        //  - those cannot be auto-attached to objects that do not exist yet.
+        // =====================================================================
+
+        [Header("Interactive Dynamics (Play Mode)")]
+
+        [Tooltip("On Play, ensure the single scene-wide ripple simulation exists " +
+                 "so that bodies with Emit Ripples actually show interaction " +
+                 "ripples. Without it that tick does nothing at runtime.")]
+        public bool spawnRippleSim = true;
+
+        [Tooltip("On Play, add the underwater view post effect to the main camera " +
+                 "so bodies with Underwater View tint and fog the screen when the " +
+                 "camera goes below the surface. Leave off if you drive the " +
+                 "camera effect yourself.")]
+        public bool underwaterOnMainCamera = false;
+
+        // =====================================================================
         //  SHARED MATERIAL DESCRIPTION
         // =====================================================================
 
@@ -259,6 +289,24 @@ namespace UniverseCreator.TerrainSystem
         {
             SyncWorldLayer();
             ApplySourceToBodies();
+
+            // Edit mode is event-driven, never a per-frame ExecuteAlways loop: push the
+            // current weather to the water once here so the scene view shows a stormed or
+            // frozen surface after a change, without keeping the editor hot. Play mode
+            // drives it per frame from the driver's Update instead. (Weather drive)
+            ApplyWeatherEvent();
+
+            // Same event-driven reasoning: resolve the quality tier and push its water
+            // budget once here (ripple tier, wave-train ceiling, underwater extras) so the
+            // scene view already reflects the chosen tier. Play mode re-applies on a tier
+            // change from the driver's Update. (Quality drive)
+            ApplyQualityEvent();
+
+            // Interactive dynamics activator. Only in play: the ripple sim allocates
+            // GPU state and the underwater effect drives a live camera, neither of
+            // which belongs in an idle editor scene. This is what makes the per-body
+            // Emit Ripples / Underwater View toggles actually do something at runtime.
+            if (Application.isPlaying) EnsureInteractiveDynamics();
         }
 
         private void OnValidate()
@@ -269,12 +317,43 @@ namespace UniverseCreator.TerrainSystem
             {
                 SyncWorldLayer();
                 ApplySourceToBodies();
+                ApplyWeatherEvent();
+                ApplyQualityEvent();
             }
         }
 
         // =====================================================================
         //  ACTIONS
         // =====================================================================
+
+        /// <summary>
+        /// Creates the scene-level dynamics objects the per-body toggles depend on.
+        /// Idempotent and play-mode only. The ripple sim is a singleton
+        /// (<see cref="UCWaterRippleSim.Active"/>): if the scene already has one it is
+        /// left alone, otherwise one is added to this manager so that any body with
+        /// Emit Ripples has a sim to feed - without it every emitter early-outs on a
+        /// null Active and the tick looks broken. The underwater view is a camera post
+        /// effect; when asked, it is added to the main camera (its
+        /// <c>RequireComponent(Camera)</c> makes that the correct host) so a body with
+        /// Underwater View tints the screen below the surface. Nothing here touches
+        /// buoyancy or the swimming character - those attach to the developer's own
+        /// floating and swimming objects, which do not exist at world-build time.
+        /// </summary>
+        public void EnsureInteractiveDynamics()
+        {
+            if (spawnRippleSim && UCWaterRippleSim.Active == null)
+            {
+                if (GetComponent<UCWaterRippleSim>() == null)
+                    gameObject.AddComponent<UCWaterRippleSim>();
+            }
+
+            if (underwaterOnMainCamera)
+            {
+                Camera cam = Camera.main;
+                if (cam != null && cam.GetComponent<UCUnderwaterView>() == null)
+                    cam.gameObject.AddComponent<UCUnderwaterView>();
+            }
+        }
 
         /// <summary>
         /// Enables or disables bodies to match the source setting.
@@ -862,13 +941,14 @@ namespace UniverseCreator.TerrainSystem
                 native.lakeOutletChunkPercentage = 0f;
             }
 
-            // Adopted BEFORE the river count is derived, because the trunk spacing that
-            // count comes from is itself measured in channel-head areas.
+            // The synthesized spawner shares the reached trace's (or lake fill's)
+            // drainage lattice, so the lake solve runs on the same grid the author's
+            // water nodes did. The old channel-head/max-channel copy went with the
+            // spawner's River Mask - the spawner no longer emits one, and the channel
+            // network is decided on the River Network Trace itself.
             if (trace != null)
             {
                 native.drainageResolution = trace.drainageResolution;
-                native.channelHeadArea = trace.channelHeadArea;
-                native.maxChannels = trace.maxChannels;
             }
             else if (lakeFill != null)
             {

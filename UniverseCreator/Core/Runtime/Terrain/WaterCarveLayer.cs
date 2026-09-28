@@ -848,16 +848,26 @@ namespace UniverseCreator.TerrainSystem
             // Deepening only. A bed is a hole, and lifting the ground to meet a
             // shallow bed would fill a valley the river happens to cross.
             //
-            // REFINEMENT #5 C1: a BANKED (read-only) station must carve NOTHING - the
-            // authored trench already IS the channel, so imposing this parabola on top of
-            // it reshapes ("flattens") the trench the user cut by hand. localRead is 1 on
-            // such stations, so the channel cut eases fully back to the existing ground and
-            // the trench is read, not re-dug. It stays exactly Min(existingY, bed) on a
-            // DIG reach (localRead 0), where there is no authored trench to preserve. The
-            // valley/floodplain (ValleySag) sits OUTSIDE this INSIDE branch and is
-            // untouched, so an opt-in valley still grades beside a read trench.
-            float bedCut = Mathf.Min(existingY, bed);
-            return Mathf.Lerp(bedCut, existingY, localRead);
+            // REFINEMENT #6 B1 (supersedes R#5 C1's absolute read no-op): INSIDE the
+            // waterline the ground can NEVER stand above the water surface - anything that
+            // does is procedural-noise BURIAL, not a bank (a bank is signed>0, OUTSIDE the
+            // waterline, and is handled by the bevel + CorridorCap above). So on a read reach
+            // we still do NOT impose the parabola bed (that was the R#4 "flattens the trench"
+            // fault), but we DO cut a gorge: clamp to just-submerged (surfaceY - minDepth).
+            //
+            //   authored trench, floor BELOW readFloor  -> Min keeps existingY: the trench is
+            //                                               READ, not reshaped (R#4 preserved).
+            //   noise dune, ground ABOVE readFloor       -> Min cuts it to the waterline: the
+            //                                               river is UN-BURIED (R#6 Defect B).
+            //
+            // readFloor tracks the monotonically-descending surface (EnforceDownhill), so the
+            // exposed channel top always falls source->mouth - the bed no longer climbs with
+            // the noise. Sea-safe: surfaceY >= sea (EnforceDownhill + ApplyCoastalTaper), so
+            // this never gouges below sea level; and the tapered coastal mouth is a DIG reach
+            // (localRead 0), which keeps its own bed. DIG reach is unchanged: Min(existingY,bed).
+            float readFloor = localSurfaceY - Mathf.Max(0.01f, minDepthMetres);
+            float floorTarget = Mathf.Lerp(bed, readFloor, localRead);
+            return Mathf.Min(existingY, floorTarget);
         }
 
         /// <summary>

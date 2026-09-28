@@ -563,7 +563,7 @@ namespace UniverseCreator.TerrainSystem
         /// big river is 40-80 m; this is its top, and every smaller river scales below it
         /// by catchment.</summary>
         /// <remarks>
-        /// Internal rather than private because the Hydrology Spawner's River Mask port
+        /// Internal rather than private because the River Network Trace's River Mask
         /// has to stamp the channel at the width the river object will actually be. A
         /// mask narrower than its river leaves water standing over an uncarved bank; a
         /// mask wider leaves a dry trench beside the water. One constant, both users.
@@ -576,7 +576,7 @@ namespace UniverseCreator.TerrainSystem
         private const float TrunkMinWidthMetres = 40f;
 
         /// <summary>Nothing narrower than this gets built as a river OBJECT (a whole
-        /// course, mask and body). Shared with the spawner's River Mask - see
+        /// course, mask and body). Shared with the River Network Trace's River Mask - see
         /// BigRiverWidthMetres - so it governs whether a course exists at all.</summary>
         internal const float MinRiverWidthMetres = 4f;
 
@@ -603,7 +603,7 @@ namespace UniverseCreator.TerrainSystem
         /// at about the square root of discharge, and Hack's law puts discharge at about
         /// the 0.8 power of drainage area - so width goes as area^0.4.
         ///
-        /// Internal because the Hydrology Spawner's River Mask has to stamp the channel
+        /// Internal because the River Network Trace's River Mask has to stamp the channel
         /// at the width the river object will actually be built at. Two copies of this
         /// exponent would widen the mask and the body at different rates, and the
         /// mismatch shows up as water standing over an uncarved bank near the mouth.

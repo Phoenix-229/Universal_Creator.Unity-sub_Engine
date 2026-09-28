@@ -3,18 +3,19 @@
 //  File:    HydrologyNode.cs
 //  Purpose: The Hydrology Spawner. Two jobs, one node:
 //
-//           1. It SETTLES THE COUNTS. How many big rivers and how many lakes the
-//              world gets is read off this node by HydrologyGenerator, which then
-//              places the actual UCWaterBody objects on the main thread.
+//           1. It SETTLES THE COUNTS. How many lakes the world gets, and whether
+//              it has an ocean, is read off this node by HydrologyGenerator, which
+//              then places the actual UCWaterBody objects on the main thread.
 //
-//           2. It EMITS THE MATCHING MASKS. Lake Mask and River Mask say where
-//              that water will stand, at chunk resolution, so the height chain
-//              can carve a bed for it before it arrives.
+//           2. It EMITS THE LAKE MASK. The Lake Mask says where that standing
+//              water will sit, at chunk resolution, so the height chain can carve
+//              a basin for it before it arrives.
 //
-//           Those two have to describe the SAME water. They do, because both are
-//           read from one drainage solve of the world using the same constants:
-//           the mask is stamped at HydrologyGenerator's own river widths, and the
-//           basins it floods are the basins the lakes are placed in.
+//           The count and the mask describe the SAME water: both are read from one
+//           lake-surface solve of the world, so the basins the mask floods are the
+//           basins the lakes are placed in. Rivers are NOT settled here - they are
+//           hand-authored with the River Network Trace / River Fill selectors, and
+//           this node no longer emits a river mask of its own.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
@@ -24,18 +25,21 @@ using UniverseCreator.TerrainSystem;
 namespace UniverseCreator.Nodes.Creators
 {
     /// <summary>
-    /// Spawns the world's rivers and lakes, and emits the masks that describe them.
+    /// Spawns the world's lakes and ocean, and emits the Lake Mask that describes
+    /// the standing water. Rivers are hand-authored elsewhere.
     /// </summary>
     /// <remarks>
     /// WHY THIS DERIVES FROM Generator AND NOT CreatorNode
-    /// CreatorNode.Generate ignores outputIndex - it calls Create once and hands the
-    /// same matrix to every port. A node with two DIFFERENT outputs cannot be built
-    /// on it: Lake Mask and River Mask would come back identical. Ecology and the
-    /// Hydrology selectors made the same call for the same reason. The node still
-    /// reports NodeCategory.Creator, so it stays where users look for it.
+    /// CreatorNode.Create builds from nothing - it ignores its inputs. This node
+    /// must read the Height it is given to know where the world's basins are, so it
+    /// derives from the general Generator base instead. It still reports
+    /// NodeCategory.Creator, so it stays where users look for it. (It once had a
+    /// second, differing output - a River Mask - which was another reason it could
+    /// not sit on CreatorNode; that port is gone with procedural river placement,
+    /// but the Height input keeps the base-class choice the same.)
     ///
     /// WHY IT TAKES A HEIGHT INPUT
-    /// It used to take none and fill both ports with zeros, which left it with
+    /// It used to take none and fill its port with zeros, which left it with
     /// nothing to say and nothing to say it about. Worse, wiring a zero-filled
     /// creator into the height chain flattened the world, so the node could only be
     /// left dangling - and a dangling node reaches no Output, which is what
@@ -52,18 +56,18 @@ namespace UniverseCreator.Nodes.Creators
 
         public override string Tooltip
         {
-            get { return "Spawns River, Lake and Ocean bodies, and outputs the masks that describe them."; }
+            get { return "Spawns Lake and Ocean bodies and outputs the Lake Mask that describes them. Rivers are hand-authored."; }
         }
 
-        // NO RIVER COUNT LIVES HERE ANY MORE
+        // NO RIVER CONTROLS LIVE HERE ANY MORE
         // Rivers are placed by the author, not by a number typed into a spawner.
         // targetRiverCount, minTributaries, enableDistributaries and maxDistributaries
         // were all write-only: the resolver filled them in and nothing downstream ever
-        // read one, so the Inspector offered four river controls that changed nothing.
-        // What actually decides the channel network is the drainage solve below -
-        // Channel Head Area sets where a channel begins, Max Channels caps how many are
-        // traced, and the width of each one comes from its own catchment. Those are the
-        // real controls and they are the only ones shown.
+        // read one, so the Inspector offered river controls that changed nothing. The
+        // channel-network fields (Channel Head Area, Max Channels) went the same way
+        // when the spawner stopped emitting a river mask - the drainage network is now
+        // decided entirely on the River Network Trace selector that authors it. What
+        // this node still owns is the standing water: the lakes and the ocean.
 
         [Header("Hydrology Counts")]
         // AN EXPLICIT COUNT IS AN INSTRUCTION, NOT A CEILING
@@ -105,10 +109,10 @@ namespace UniverseCreator.Nodes.Creators
         // ------------------------------------------------------------------
         //  Mask solve
         //
-        //  These describe the water the counts above will produce. They carry the
-        //  same names, defaults and meanings as the Lake Fill and River Network
-        //  Trace selectors on purpose: a graph that runs the spawner beside those
-        //  nodes must not get two different answers about where the water is.
+        //  These describe the standing water the counts above will produce. They
+        //  carry the same names, defaults and meanings as the Lake Fill selector on
+        //  purpose: a graph that runs the spawner beside that node must not get two
+        //  different answers about where the water is.
         // ------------------------------------------------------------------
 
         /// <summary>
@@ -118,9 +122,8 @@ namespace UniverseCreator.Nodes.Creators
         [Header("Mask Solve")]
         [Tooltip("Cells per side of the world drainage solve. Coarse on purpose. The settle-time solve runs "
                + "this grid on the main thread, so a high value is what freezes the editor for tens of "
-               + "seconds after a build (the 'busy for 48s' dialog). 160 keeps the network faithful while "
-               + "cutting that solve to roughly a third. Both the River Mask and the river OBJECTS read this "
-               + "one field, so they always share a lattice and the water lands in its own trench.")]
+               + "seconds after a build (the 'busy for 48s' dialog). 160 keeps the basins faithful while "
+               + "cutting that solve to roughly a third.")]
         public int drainageResolution = 160;
 
         /// <summary>
@@ -141,35 +144,6 @@ namespace UniverseCreator.Nodes.Creators
         [Tooltip("Sea level as a fraction of world height. Rivers end here; lakes do not form below it.")]
         public float seaLevel = 0.35f;
 
-        /// <summary>
-        /// Land a channel must drain before it counts as a river, in square metres.
-        /// Below roughly a quarter of a square kilometre of temperate hillside the
-        /// runoff is sheet flow and gullies that only run after rain, not a permanent
-        /// watercourse, which is why the real-world figure is the default.
-        /// </summary>
-        /// <remarks>
-        /// THIS NO LONGER HAS TO BE LOWERED BY HAND ON A SMALL WORLD
-        /// RiverNetworkPlanner.ResolveChannelHeadArea measures the threshold against
-        /// the world it is actually given. The value authored here stands wherever the
-        /// terrain holds a catchment large enough to afford it; on a world too small it
-        /// drops to that world's own largest drainage divided by the trunk multiple,
-        /// floored at one lattice cell so a threshold finer than the grid cannot paint
-        /// the whole world wet. Drainage networks are scale-invariant, so the rescaled
-        /// figure describes the same channel hierarchy at a smaller size rather than
-        /// approximating it.
-        ///
-        /// Before that existed, a world under about 2 km square left at the real-world
-        /// figure found no qualifying mouth, planned no course, and left the graph
-        /// carving trenches with no river object in them.
-        /// </remarks>
-        [Header("River Mask")]
-        [Tooltip("Catchment a channel must drain to count as a river, in square metres. Auto-rescaled on small worlds.")]
-        public float channelHeadArea = 250000f;
-
-        /// <summary>Most courses stamped. Guards pathological heightfields.</summary>
-        [Tooltip("Upper bound on traced courses. A guard, not a river count.")]
-        public int maxChannels = 512;
-
         /// <summary>Basins shallower than this are ignored, 0..1 of world height.</summary>
         [Header("Lake Mask")]
         [Tooltip("Basins shallower than this are not lakes. Fraction of world height.")]
@@ -188,13 +162,6 @@ namespace UniverseCreator.Nodes.Creators
         //  Ports
         // ------------------------------------------------------------------
 
-        /// <summary>
-        /// Port index of the River Mask. Named rather than written as a bare 1 because
-        /// Generate switches on it and a silent swap would put lakes in the river
-        /// chain - which still compiles and still produces a mask.
-        /// </summary>
-        private const int RiverPort = 1;
-
         private static readonly Port[] Ins =
         {
             new Port("Height", PortType.Matrix, PortDirection.Input)
@@ -202,8 +169,7 @@ namespace UniverseCreator.Nodes.Creators
 
         private static readonly Port[] Outs =
         {
-            new Port("Lake Mask", PortType.Matrix, PortDirection.Output, true),
-            new Port("River Mask", PortType.Matrix, PortDirection.Output, true)
+            new Port("Lake Mask", PortType.Matrix, PortDirection.Output, true)
         };
 
         public override Port[] GetInputs() { return Ins; }
@@ -211,7 +177,7 @@ namespace UniverseCreator.Nodes.Creators
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
-            return outputIndex == RiverPort ? RiverMask(tile, stop) : LakeMask(tile, stop);
+            return LakeMask(tile, stop);
         }
 
         /// <summary>
@@ -268,40 +234,6 @@ namespace UniverseCreator.Nodes.Creators
             }
 
             return dst;
-        }
-
-        /// <summary>
-        /// Where flowing water ends up: the drainage network, stamped at the width each
-        /// reach will actually be built at.
-        /// </summary>
-        /// <remarks>
-        /// The trace and the stamp are River Network Trace's, called rather than copied,
-        /// for the same reason the lake flood is Lake Fill's. The widths, though, are
-        /// HydrologyGenerator's - a channel starts at MinRiverWidthMetres where it first
-        /// forms and grows as area^0.4 up to BigRiverWidthMetres - so the trench the
-        /// height chain carves is the width of the river that will sit in it.
-        /// </remarks>
-        private object RiverMask(TileData tile, StopToken stop)
-        {
-            Matrix src = GetInputMatrix(tile, 0, stop);
-            if (src == null) return tile.CreateMatrix();   // Height not connected: no water
-            if (stop != null && stop.StopRequested) return null;
-
-            Matrix dst = src.Blank();
-
-            // A hair of gradient through filled ground, and flow is required: a levelled
-            // reach has to keep draining to its outlet rather than standing as a pond.
-            WorldDrainage solve = WorldDrainage.Solve(this, 0, tile, drainageResolution, 1e-6f, true, stop);
-            if (stop != null && stop.StopRequested) return null;
-            if (solve == null) return dst;
-
-            bool done = RiverNetworkTraceNode.StampNetwork(dst, solve, channelHeadArea,
-                                                           HydrologyGenerator.MinRiverWidthMetres,
-                                                           HydrologyGenerator.WidthAreaExponent,
-                                                           HydrologyGenerator.BigRiverWidthMetres,
-                                                           Mathf.Clamp01(seaLevel), maxChannels, stop);
-
-            return done ? dst : null;
         }
     }
 }

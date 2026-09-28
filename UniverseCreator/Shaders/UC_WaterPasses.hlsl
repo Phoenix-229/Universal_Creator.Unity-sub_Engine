@@ -100,7 +100,7 @@ UCWaterVaryings UCWaterVert(UCWaterAttributes input)
     float4 flow = UCDecodeWaterVertex(input.color);
 
     float3 positionWS = vp.positionWS;
-    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, flow.w);
+    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, flow.xyz, flow.w);
 
     output.positionWS = positionWS;
     output.positionCS = TransformWorldToHClip(positionWS);
@@ -467,9 +467,12 @@ UCWaterDepthVaryings UCWaterDepthVert(UCWaterDepthAttributes input)
     float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
 
     // Displaced by exactly what the forward pass displaces by. A depth pass that
-    // used the flat plane would z-fight the shaded surface by up to _WaveHeight.
-    float weight = dot(input.color, 1.0) > 0.0001 ? input.color.a : 1.0;
-    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, weight);
+    // used the flat plane would z-fight the shaded surface by up to _WaveHeight -
+    // and since a river advects its swell by the same flow the forward pass decodes,
+    // this decodes the full flow too rather than the weight alone, or the two passes
+    // would disagree wherever _WaveFlowAdvect is non-zero.
+    float4 flow = UCDecodeWaterVertex(input.color);
+    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, flow.xyz, flow.w);
 
     output.positionCS = TransformWorldToHClip(positionWS);
     return output;

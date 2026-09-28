@@ -67,6 +67,13 @@ namespace UniverseCreator.Nodes
         public const string WaveLength = "_WaveLength";
         public const string WaveSpeed = "_WaveSpeed";
 
+        /// <summary>Active wave-train count 1..4 - spectral richness, set per body kind.</summary>
+        public const string WaveOctaves = "_WaveOctaves";
+        /// <summary>Storm swell multiplier, 1 calm; the weather layer drives it.</summary>
+        public const string WaveStormAmp = "_WaveStormAmp";
+        /// <summary>Downstream advection of the swell, rivers only (0 on still water).</summary>
+        public const string WaveFlowAdvect = "_WaveFlowAdvect";
+
         // -- shore -----------------------------------------------------------
         public const string EdgeSoftenMetres = "_EdgeSoftenMetres";
 

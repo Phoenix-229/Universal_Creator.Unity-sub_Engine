@@ -39,6 +39,7 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool sourceFoldout = true;
         private static bool seaLevelFoldout = true;
         private static bool defaultsFoldout;
+        private static bool dynamicsFoldout;
         private static bool sharedFoldout;
         private static bool bodyListFoldout;
 
@@ -82,6 +83,10 @@ namespace UniverseCreator.Editor.Inspectors
             defaultsFoldout = Group(defaultsFoldout, "Defaults For New Bodies",
                                     UCInspectorUI.HeaderGrey);
             if (defaultsFoldout) DrawDefaults();
+
+            dynamicsFoldout = Group(dynamicsFoldout, "Interactive Dynamics",
+                                    UCInspectorUI.HeaderTeal);
+            if (dynamicsFoldout) DrawInteractiveDynamics();
 
             sharedFoldout = Group(sharedFoldout, "Shared Water Description",
                                   UCInspectorUI.HeaderTeal);
@@ -293,6 +298,23 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.LabelField(
                 "These apply to bodies created from here. Existing bodies keep what they " +
                 "have - use Apply Physics To All below to change them too.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            EditorGUI.indentLevel--;
+        }
+
+        private void DrawInteractiveDynamics()
+        {
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("spawnRippleSim"));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("underwaterOnMainCamera"));
+
+            EditorGUILayout.LabelField(
+                "On Play the manager creates the scene-wide ripple simulation (so a " +
+                "body's Emit Ripples is visible) and, if asked, adds the underwater " +
+                "view to the main camera. Buoyancy and the swimming character attach " +
+                "to your own floating/swimming objects.",
                 EditorStyles.wordWrappedMiniLabel);
 
             EditorGUI.indentLevel--;

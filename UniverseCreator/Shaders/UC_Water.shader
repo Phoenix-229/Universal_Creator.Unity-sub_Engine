@@ -81,6 +81,11 @@ Shader "UniverseCreator/Water"
         _WaveHeight         ("Vertex Wave Height (m)", Range(0.0, 4.0)) = 0.12
         _WaveLength         ("Vertex Wave Length (m)", Range(0.5, 200.0)) = 26.0
         _WaveSpeed          ("Vertex Wave Speed", Range(0.0, 4.0)) = 0.6
+        // Active wave-train count and weather scale. Set per body kind / by the weather
+        // layer, not hand-tuned; defaults reproduce the original three-octave calm swell.
+        _WaveOctaves        ("Wave Octaves", Range(1.0, 4.0)) = 3.0
+        _WaveStormAmp       ("Storm Swell x", Range(1.0, 4.0)) = 1.0
+        _WaveFlowAdvect     ("Swell Flow Advection", Range(0.0, 2.0)) = 0.0
 
         [Header(Shore)]
         _EdgeSoftenMetres   ("Shoreline Soften (m)", Range(0.0, 8.0)) = 0.6

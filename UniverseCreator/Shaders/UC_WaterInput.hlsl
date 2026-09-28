@@ -67,6 +67,14 @@ CBUFFER_START(UnityPerMaterial)
     float  _WaveLength;
     float  _WaveSpeed;
 
+    // Spectral richness and weather, all scalar so the SRP-batched block stays
+    // array-free (see the header): _WaveOctaves fades wave trains in and out for a
+    // lake-vs-ocean look, _WaveStormAmp is the weather layer's swell multiplier, and
+    // _WaveFlowAdvect drifts the whole swell downstream on a river.
+    float  _WaveOctaves;
+    float  _WaveStormAmp;
+    float  _WaveFlowAdvect;
+
     float  _EdgeSoftenMetres;
 
     float  _RippleStrength;
@@ -248,41 +256,75 @@ float2 UCWindChopSlope(float2 worldXZ, float t, float strength)
 // the water surface is already clipped against the ground - the horizontal push
 // is what makes a lake edge visibly crawl in and out of the bank.
 //
-// Three octaves at incommensurate directions. Two beat visibly at their sum
-// frequency; three do not resolve inside the distance the camera can see.
+// Up to four octaves at incommensurate directions. Two beat visibly at their sum
+// frequency; three do not resolve inside the distance the camera can see; the
+// fourth broadens an open ocean's spectrum. How many are ACTIVE is set per body
+// by _WaveOctaves (1..4): a pond runs one train, a lake two, an open ocean four,
+// and the count fades an octave in fractionally so switching tier blends rather
+// than pops. An octave whose gate is zero costs its sine and nothing else - there
+// is no shader variant and no array, so the SRP-batched CBUFFER is untouched.
+//
+// _WaveStormAmp is the weather layer's storm multiplier: 1 on a calm day (the
+// surface is then exactly what _WaveHeight authored), rising into a gale. It scales
+// the swell as a whole rather than any one octave, because a storm raises the sea,
+// it does not retune it.
 //
 // The amplitude is scaled by the vertex's own water weight (vertex alpha), so a
 // river ribbon one metre from its bank is not lifted clear of the ground it is
 // supposed to be sitting in.
 // MIRRORED IN C# by UCWaterSurface.WaveOffset, which is what buoyancy samples.
-// Same octaves, same directions, same weights, same frequency ratios. Change one
-// and you must change the other, or a boat floats above the crest it is supposed
-// to be sitting on and the bug is invisible in a still frame.
+// Same octaves, same directions, same weights, same frequency ratios, same octave
+// gate and same storm scale. Change one and you must change the other, or a boat
+// floats above the crest it is supposed to be sitting on and the bug is invisible
+// in a still frame.
 float UCAmbientWaveOffset(float2 worldXZ, float t, float weight)
 {
     if (_WaveHeight <= 0.0001) return 0.0;
 
     float k = 6.28318530718 / max(0.5, _WaveLength);
 
+    // Fractional octave gates. Octave i is fully on once the count passes i+1 and
+    // fades in over the count before it, so _WaveOctaves = 1.5 is one full train and
+    // half of a second - a continuous dial, not four discrete steps that click.
+    float o0 = saturate(_WaveOctaves);
+    float o1 = saturate(_WaveOctaves - 1.0);
+    float o2 = saturate(_WaveOctaves - 2.0);
+    float o3 = saturate(_WaveOctaves - 3.0);
+
     float a = sin((worldXZ.x *  0.86 + worldXZ.y *  0.51) * k        + t * _WaveSpeed);
     float b = sin((worldXZ.x * -0.39 + worldXZ.y *  0.92) * k * 1.71 + t * _WaveSpeed * 1.43);
     float c = sin((worldXZ.x *  0.62 + worldXZ.y * -0.78) * k * 2.63 + t * _WaveSpeed * 0.79);
+    float d = sin((worldXZ.x * -0.81 + worldXZ.y * -0.34) * k * 3.55 + t * _WaveSpeed * 1.17);
 
-    return (a * 0.55 + b * 0.30 + c * 0.15) * _WaveHeight * weight;
+    float h = a * 0.55 * o0 + b * 0.30 * o1 + c * 0.15 * o2 + d * 0.07 * o3;
+
+    return h * _WaveHeight * _WaveStormAmp * weight;
 }
 
 // Ambient swell plus whatever the interactive simulation has going on at this
 // point. The two ADD rather than one replacing the other: a splash in a choppy
 // sea rides on the chop, it does not flatten it.
 //
-// Physics only mirrors the ambient term. The simulation's contribution is left
-// out of buoyancy on purpose - a ripple is centimetres of displacement over
-// centimetres of wavelength, far below what a floating body integrates over, and
-// reading it back from the GPU would cost a pipeline stall per frame to move an
-// object by less than its own skin depth.
-float UCWaveOffset(float2 worldXZ, float t, float weight)
+// `flow` is xy = surface direction (unit), z = speed in m/s - the same value the
+// fragment shades with. It drives the river-only swell advection below and nothing
+// on a lake or ocean, where _WaveFlowAdvect is 0.
+//
+// Physics only mirrors the ambient term. The simulation's contribution, the wind
+// chop, AND the flow advection are all left out of buoyancy on purpose - a ripple
+// or a chop is centimetres of displacement over centimetres of wavelength, far
+// below what a floating body integrates over, and the advection only slides the
+// same swell along the current by less than a hull's length per second. Reading any
+// of them back would cost a pipeline stall per frame to move an object by less than
+// its own skin depth. Ambient swell is what physics needs and physics has it.
+float UCWaveOffset(float2 worldXZ, float t, float3 flow, float weight)
 {
-    float h = UCAmbientWaveOffset(worldXZ, t, weight);
+    // River swell rides the current: advect the whole ambient pattern downstream so
+    // its crests travel with the water instead of standing still in the world. Gated
+    // by _WaveFlowAdvect, which is 0 on still water - so an ocean or a lake feeds the
+    // ambient term the raw world position and stays a line-for-line match for the C#
+    // buoyancy mirror. GPU-only, for the reason in this function's header.
+    float2 sampleXZ = worldXZ - flow.xy * flow.z * t * _WaveFlowAdvect;
+    float h = UCAmbientWaveOffset(sampleXZ, t, weight);
 
     if (_RippleStrength > 0.0001)
         h += UCSampleRipple(worldXZ).z * _RippleStrength * weight;

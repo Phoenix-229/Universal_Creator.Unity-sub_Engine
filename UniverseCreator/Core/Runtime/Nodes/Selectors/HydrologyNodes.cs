@@ -149,9 +149,20 @@ namespace UniverseCreator.Nodes.Selectors
             float sea = Mathf.Clamp01(seaLevel);
             float bw = Mathf.Max(0.5f, baseWidth);
 
-            // Scratch list reused across every course; the delegate is called once per
-            // course by StampNetwork, in-between the trace and the stamp.
+            // Scratch lists reused across every course; the delegate is called once per
+            // course by StampNetwork, in-between the trace and the stamp. `descended` and
+            // `newWidths` hold the output of the global descent walk (below), which re-spaces
+            // the polyline and so needs its own storage rather than mutating `course` in place.
             List<Vector3> course = new List<Vector3>();
+            List<Vector3> descended = new List<Vector3>();
+            List<float> newWidths = new List<float>();
+
+            // The solve's own cell size (metres) sets the descent walk's step, and a small
+            // fraction of the world's vertical extent sets the climb tolerance: below it a
+            // step reads as flat (numerical noise on a coarse cell), above it as a real climb
+            // to be steered around. Both are fixed for the life of the delegate.
+            float cellMetres = Mathf.Max(1f, Mathf.Sqrt(Mathf.Max(1e-4f, solve.cellArea)));
+            float climbTol = Mathf.Max(0.25f, solve.height.worldHeight * 0.001f);
 
             return delegate (List<Vector2> pts, List<float> widths)
             {
@@ -192,11 +203,117 @@ namespace UniverseCreator.Nodes.Selectors
                     UniverseCreator.TerrainSystem.RiverCourseSolver.Meander(
                         course, ground, widths, meanderC, grade, bw);
 
-                // Write the fitted planform back; the stamp reads XZ only.
+                // GLOBAL MONOTONIC DESCENT - the un-orphaned descent walk.
+                //
+                // SnapToValley and Relax above only move a point ACROSS the flow: they seat
+                // the course on the lowest line of its own cross-section, but nothing so far
+                // stops it CLIMBING along the flow. The D8 thread was traced on the
+                // depression-FILLED surface (WorldDrainage fills sinks before it finds flow),
+                // so it runs flat across a filled basin and then over the basin's spill lip;
+                // on the RAW ground the course is fitted to (solve.height) that lip is a real
+                // hill. The course therefore descends, climbs to the col, then descends into
+                // the next basin. River Carve rebuilds its bed from a LOCAL along-flow window
+                // capped at one channel depth, so it cannot breach a col taller than that -
+                // the bed tracks the crest and the carved trench climbs the hill. That is the
+                // long-standing "river runs uphill".
+                //
+                // WalkDownhill forbids the climb by construction: it re-routes the planform
+                // head->mouth on the raw ground, refusing any step that rises beyond the climb
+                // tolerance and fanning sideways to steer AROUND a rise into a descending
+                // corridor. Its only caller was removed with the mouth-autojoin change, so
+                // between the trace and the carve nothing enforced descent. Re-wire it here, on
+                // the already valley-seated course, so the mask the carve reads never crosses a
+                // col in the first place and the carve's local cap is never asked to breach one.
+                //
+                // WalkDownhill re-spaces the polyline (its own step, not the input points), so
+                // unlike Snap/Relax/Meander it does NOT preserve the point count - the widths,
+                // a running-max profile that grows downstream, are re-derived onto the new
+                // points by arc-length fraction (head 0, mouth 1) rather than by index, which
+                // keeps a headwater thin and a trunk wide however the walk re-spaced the line.
+                // A basin with no descending exit (NoWayDown) simply ends the course early with
+                // the points found so far: that is the honest result, because such a hollow is
+                // a lake the procedural basin fill owns, not a river that climbs out of it.
+                // ReTessellateCourse in StampNetwork then resamples the result to mask spacing,
+                // smoothing the walk's steps, exactly as it does for the meandered course.
+                descended.Clear();
+                UniverseCreator.TerrainSystem.RiverCourseSolver.WalkDownhill(
+                    course, descended, ground, cellMetres, 60f, climbTol, null, 0f);
+
+                if (descended.Count >= 2)
+                {
+                    ResampleWidthsByArcLength(course, widths, descended, newWidths);
+
+                    pts.Clear();
+                    widths.Clear();
+                    for (int i = 0; i < descended.Count; i++)
+                    {
+                        pts.Add(new Vector2(descended[i].x, descended[i].z));
+                        widths.Add(newWidths[i]);
+                    }
+                    return;
+                }
+
+                // Degenerate walk (fewer than two points): leave the valley-seated planform
+                // as it was, writing XZ back at the original count. The stamp reads XZ only.
                 int n = Mathf.Min(pts.Count, course.Count);
                 for (int i = 0; i < n; i++)
                     pts[i] = new Vector2(course[i].x, course[i].z);
             };
+        }
+
+        /// <summary>
+        /// Re-derives a running-max width profile onto a re-spaced polyline. The descent walk
+        /// re-samples the course at its own step, so the old per-point widths no longer line up
+        /// with the new points by index. Both courses run head-&gt;mouth, so each new point is
+        /// matched to the old profile by its fractional distance ALONG the course (cumulative
+        /// arc length normalised to 0 at the head and 1 at the mouth) and the width interpolated
+        /// there. Because the source widths are a non-decreasing running maximum, the linear
+        /// interpolation is monotonic too, so a headwater stays thin and a trunk stays wide no
+        /// matter how the walk re-spaced the line. <paramref name="dstW"/> is cleared and filled
+        /// to <paramref name="dstPts"/>'s count.
+        /// </summary>
+        private static void ResampleWidthsByArcLength(List<Vector3> srcPts, List<float> srcW,
+                                                      List<Vector3> dstPts, List<float> dstW)
+        {
+            dstW.Clear();
+            int sn = Mathf.Min(srcPts.Count, srcW.Count);
+            int dn = dstPts.Count;
+            if (sn < 1 || dn < 1) { for (int i = 0; i < dn; i++) dstW.Add(0f); return; }
+            if (sn == 1) { for (int i = 0; i < dn; i++) dstW.Add(srcW[0]); return; }
+
+            // Cumulative arc length of the source course (XZ), and its total.
+            float[] srcArc = new float[sn];
+            srcArc[0] = 0f;
+            for (int i = 1; i < sn; i++)
+                srcArc[i] = srcArc[i - 1]
+                    + new Vector2(srcPts[i].x - srcPts[i - 1].x, srcPts[i].z - srcPts[i - 1].z).magnitude;
+            float srcTotal = srcArc[sn - 1];
+            if (srcTotal <= 1e-5f) { for (int i = 0; i < dn; i++) dstW.Add(srcW[sn - 1]); return; }
+
+            // Cumulative arc length of the destination course, so a new point deep into a
+            // re-routed detour still maps to the right fraction of the source profile.
+            float dstTotal = 0f;
+            float[] dstArc = new float[dn];
+            dstArc[0] = 0f;
+            for (int i = 1; i < dn; i++)
+            {
+                dstTotal += new Vector2(dstPts[i].x - dstPts[i - 1].x, dstPts[i].z - dstPts[i - 1].z).magnitude;
+                dstArc[i] = dstTotal;
+            }
+            float dstScale = dstTotal > 1e-5f ? 1f / dstTotal : 0f;
+
+            int seg = 1;
+            for (int i = 0; i < dn; i++)
+            {
+                float frac = dstArc[i] * dstScale;          // 0 at head, 1 at mouth
+                float want = frac * srcTotal;               // matching distance along the source
+                while (seg < sn - 1 && srcArc[seg] < want) seg++;
+
+                float a = srcArc[seg - 1];
+                float b = srcArc[seg];
+                float t = b - a > 1e-5f ? Mathf.Clamp01((want - a) / (b - a)) : 0f;
+                dstW.Add(Mathf.Lerp(srcW[seg - 1], srcW[seg], t));
+            }
         }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
@@ -232,11 +349,12 @@ namespace UniverseCreator.Nodes.Selectors
         /// solve was cancelled.
         /// </summary>
         /// <remarks>
-        /// Shared with the Hydrology Spawner, whose River Mask port has to be the SAME
-        /// network this node emits. Traced twice from two copies of this loop, the
-        /// spawned river OBJECTS would sit somewhere other than the channel the graph
-        /// carved - water beside its own trench, which is the one failure the whole
-        /// water chain exists to avoid. One tracing, two callers.
+        /// Shared between the River Network Trace selectors that emit the River Mask and
+        /// HydrologyGenerator, which builds the river OBJECTS from the SAME network.
+        /// Traced twice from two copies of this loop, the spawned river objects would sit
+        /// somewhere other than the channel the graph carved - water beside its own
+        /// trench, which is the one failure the whole water chain exists to avoid. One
+        /// tracing, both callers.
         /// </remarks>
         internal static bool StampNetwork(Matrix mask, WorldDrainage solve, float channelHeadArea,
                                           float baseWidth, float widthExponent, float maxWidth,

@@ -286,10 +286,12 @@ namespace UniverseCreator.Editor.Diagnostics
                 // A fingerprint, not a plausible default. ResolveHydrology copies this
                 // across ONLY from a trace the walk actually reached, so finding it on
                 // the far side is proof of reachability and not of a shared default.
-                // It used to be targetRiverCount that carried that proof; that field is
-                // gone with procedural river placement, so the settings the spawner
-                // really does inherit carry it instead.
-                trace.maxChannels = 321;
+                // It used to be targetRiverCount that carried that proof, then
+                // maxChannels; both are gone from the spawner now - the river count with
+                // procedural placement, the channel cap with the spawner's River Mask -
+                // so the drainage resolution, which the spawner really does still inherit
+                // from a reached trace, carries it instead.
+                trace.drainageResolution = 321;
                 WeatherOutputNode weather = new WeatherOutputNode();
 
                 reached.nodes.Add(trace);
@@ -304,7 +306,7 @@ namespace UniverseCreator.Editor.Diagnostics
 
                 HydrologyNode native = UCWaterSystemManager.ResolveHydrology(reached, null);
 
-                Check(native != null && native.maxChannels == 321,
+                Check(native != null && native.drainageResolution == 321,
                       "a River Network Trace wired into a Weather Output - which implements "
                       + "IOutputNode without deriving from OutputNode, exactly as the evaluator's "
                       + "own seed allows - resolved to "

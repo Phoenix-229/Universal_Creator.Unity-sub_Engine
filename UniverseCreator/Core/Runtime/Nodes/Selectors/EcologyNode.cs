@@ -169,6 +169,11 @@ namespace UniverseCreator.Nodes.Selectors
             // is recoverable; failing toward an empty world looks like a broken build.
             if (ctx == null) return null;
 
+            // W1. Resolve the whole-world hydrology field before binding, so this
+            // preview reads the same real shore distance, submersion and salt the
+            // scatter pass does rather than the empty water probes. Cached per bake.
+            ctx.EnsureHydrology(this, tile, stop);
+
             ctx.EnsureBound(height);
             if (ctx.sampler == null) return null;
 

@@ -98,14 +98,19 @@ namespace UniverseCreator.Editor.Diagnostics
             TestTextureNodesWriteRealProperties();
             TestWaterShaderPropertyRegistry();
             TestWaterAppliersAgree();
+            TestWaterSurfaceWaves();
             TestShorelineConformer();
             TestShorelineSplatMutation();
+            TestUnderwaterSplatMutation();
             TestHeightGuardRejectsNonFinite();
             TestHeightGuardKillsNeedlesAndKeepsCliffs();
             TestGraphReachesTheHeightmap();
             TestWeatherOutputNodeCapturesBiases();
             TestLightingOutputNodeCapturesBiases();
             TestCarveOnlyLowersGround();
+            TestReadReachUnburiesButKeepsTrench();
+            TestSeaFloorLiftsDryGroundKeepsOceanDepth();
+            TestCoastalShelfGradesGentleKeepsCliffAndOcean();
             TestRefitFromSnapshotIsStable();
             TestGroundProbeMatching();
             TestWindowExtremeMatchesBruteForce();
@@ -153,6 +158,8 @@ namespace UniverseCreator.Editor.Diagnostics
             TestVegetationResolveIsCachedAndInvalidated();
             TestFoliagePigmentContract();
             TestSamplerReadsClimateFromBag();
+            TestHydroFieldWaterAwareness();
+            TestHydroExclusion();
 
             // Module 3, in UCSelfTest.Weather.cs.
             TestClockStateStaysCheap();
@@ -313,6 +320,12 @@ namespace UniverseCreator.Editor.Diagnostics
             TestOverlayNormalBlend();
             TestMicroReliefScatterBias();
             TestOverlayRingAdoption();
+
+            // Module 3, Refinement #7 (water/weather/quality), in UCSelfTest.WaterWeather.cs.
+            TestWaterQualityTierTable();
+            TestWaterOctaveCap();
+            TestWaterWeatherCouplingMath();
+            TestRippleWorkingResolution();
 
             return failures.Count == 0;
         }
@@ -1022,6 +1035,89 @@ namespace UniverseCreator.Editor.Diagnostics
         }
 
         /// <summary>
+        /// The CPU wave mirror - UCWaterSurface.WaveOffset, the exact height a floating
+        /// body reads for buoyancy and the line-for-line twin of UCAmbientWaveOffset in
+        /// UC_WaterInput.hlsl. Pure math, no scene, so it runs headless.
+        ///
+        /// This is the one guard that the octave/storm rework (W4) kept the surface a
+        /// boat and its reflection agree on: a drift here is invisible in a screenshot
+        /// and obvious the moment a hull moves. It pins the four things that can drift -
+        /// determinism, the legacy three-octave swell (a saved world must look as it
+        /// did), storm scaling, and octave gating - without ever asking the GPU where
+        /// the water is.
+        /// </summary>
+        private static void TestWaterSurfaceWaves()
+        {
+            WaterSurfaceParams p = WaterSurfaceParams.Default(0f);
+            p.waveHeight = 0.5f;
+            p.waveLength = 20f;
+            p.waveSpeed = 0.7f;
+
+            Vector2 xz = new Vector2(12.3f, -7.1f);
+            float t = 3.4f;
+
+            // 1. Same inputs, same height. Buoyancy integrates over frames; a
+            //    non-deterministic height jitters a hull in place.
+            float h1 = UCWaterSurface.WaveOffset(xz, t, p);
+            float h2 = UCWaterSurface.WaveOffset(xz, t, p);
+            CheckClose(h1, h2, "water waves: WaveOffset is not deterministic");
+
+            // 2. No amplitude, flat sheet (a frozen pond, a still pool).
+            WaterSurfaceParams flat = p; flat.waveHeight = 0f;
+            CheckClose(UCWaterSurface.WaveOffset(xz, t, flat), 0f,
+                       "water waves: zero waveHeight is not flat");
+
+            // 3. Weight scales linearly - a river ribbon tapered to nothing at its bank
+            //    must lift the surface by nothing there, or the water climbs the shore.
+            float full = UCWaterSurface.WaveOffset(xz, t, p, 1f);
+            float half = UCWaterSurface.WaveOffset(xz, t, p, 0.5f);
+            CheckClose(half, full * 0.5f, "water waves: weight does not scale linearly");
+
+            // 4. Storm scales the whole swell linearly. The weather layer raises this and
+            //    _WaveStormAmp together (W7), so a hull heaves as much as the sea visibly does.
+            WaterSurfaceParams storm = p; storm.stormAmp = 2f;
+            CheckClose(UCWaterSurface.WaveOffset(xz, t, storm), full * 2f,
+                       "water waves: storm amplitude does not scale the swell");
+
+            // 5. octaves = 3, storm = 1 reproduces the original three-octave swell to the
+            //    bit - the pre-W4 look and physics of every already-authored world.
+            WaterSurfaceParams three = p; three.octaves = 3f; three.stormAmp = 1f;
+            float k = 6.28318530718f / Mathf.Max(0.5f, three.waveLength);
+            float a = Mathf.Sin((xz.x *  0.86f + xz.y *  0.51f) * k        + t * three.waveSpeed);
+            float b = Mathf.Sin((xz.x * -0.39f + xz.y *  0.92f) * k * 1.71f + t * three.waveSpeed * 1.43f);
+            float c = Mathf.Sin((xz.x *  0.62f + xz.y * -0.78f) * k * 2.63f + t * three.waveSpeed * 0.79f);
+            float legacy = (a * 0.55f + b * 0.30f + c * 0.15f) * three.waveHeight;
+            CheckClose(UCWaterSurface.WaveOffset(xz, t, three), legacy,
+                       "water waves: octaves=3 does not reproduce the legacy three-octave swell");
+
+            // 6. Octave count actually changes the surface - a one-train pond is not a
+            //    four-train ocean at the same point and time.
+            WaterSurfaceParams pond = p; pond.octaves = 1f;
+            WaterSurfaceParams ocean = p; ocean.octaves = 4f;
+            Check(Mathf.Abs(UCWaterSurface.WaveOffset(xz, t, pond)
+                          - UCWaterSurface.WaveOffset(xz, t, ocean)) > 1e-4f,
+                  "water waves: octave count does not change the surface");
+
+            // 7. octaves = 1 keeps only the first train (weight 0.55). The higher trains
+            //    are gated off, not merely small, so the height cannot exceed that share.
+            float onlyFirst = UCWaterSurface.WaveOffset(xz, t, pond);
+            Check(Mathf.Abs(onlyFirst) <= pond.waveHeight * 0.55f + 1e-4f,
+                  "water waves: octaves=1 leaks higher trains");
+
+            // 8. Bounded by the sum of active weights times amplitude - a wave is never
+            //    taller than its parts, so a boat is never flung off the sea.
+            float bound = ocean.waveHeight * (0.55f + 0.30f + 0.15f + 0.07f) + 1e-4f;
+            Check(Mathf.Abs(UCWaterSurface.WaveOffset(xz, t, ocean)) <= bound,
+                  "water waves: four-octave swell exceeds its amplitude bound");
+
+            // 9. The surface normal is a unit vector that never tips past vertical - a
+            //    swell rolls a hull, it does not capsize it, and a broken normal shades black.
+            Vector3 n = UCWaterSurface.SurfaceNormal(new Vector3(xz.x, 0f, xz.y), t, ocean);
+            CheckClose(n.magnitude, 1f, "water waves: surface normal is not unit length");
+            Check(n.y > 0f, "water waves: surface normal points below the water");
+        }
+
+        /// <summary>
         /// Checks the shore skirt and the depth cap - the two rules that decide where
         /// a water surface sits relative to the ground it meets.
         ///
@@ -1192,6 +1288,115 @@ namespace UniverseCreator.Editor.Diagnostics
             for (int l = 0; l < Layers; l++)
                 if (alpha[y, x, l] != baseAlpha[y, x, l]) identical = false;
             Check(identical, "Shoreline: erase restores the painted map bit-for-bit");
+        }
+
+        /// <summary>
+        /// The W2 underwater bed mutation: the depth/flow split of the three bed
+        /// materials, and the same sum-to-one / restore-exact block contract the two
+        /// peer mutations carry, generalised to a set of band layers.
+        /// </summary>
+        private static void TestUnderwaterSplatMutation()
+        {
+            const float Tol = 1e-4f;
+            UnderwaterBedProfile p = UnderwaterBedProfile.Default;
+
+            // Above the waterline nothing is wet, so no bed material is placed.
+            float sand, silt, rock;
+            UnderwaterSplatMutation.BedCovers(0f, 0f, in p, out sand, out silt, out rock);
+            CheckWithin(sand + silt + rock, 0f, Tol, "Underwater: dry ground carries no bed");
+
+            // Well below the edge band the three materials tile the cell completely.
+            UnderwaterSplatMutation.BedCovers(5f, 0f, in p, out sand, out silt, out rock);
+            CheckWithin(sand + silt + rock, 1f, Tol, "Underwater: a submerged cell is fully bed");
+
+            // Shallow still water sorts to sand; deep still water sorts to silt.
+            float shallowSand, shallowSilt, shallowRock;
+            UnderwaterSplatMutation.BedCovers(1f, 0f, in p, out shallowSand, out shallowSilt, out shallowRock);
+            float deepSand, deepSilt, deepRock;
+            UnderwaterSplatMutation.BedCovers(12f, 0f, in p, out deepSand, out deepSilt, out deepRock);
+            Check(shallowSand > shallowSilt, "Underwater: the still shallows are sand, not silt");
+            Check(deepSilt > deepSand, "Underwater: the still deep is silt, not sand");
+            Check(deepSilt > shallowSilt, "Underwater: silt share climbs with depth in still water");
+
+            // Fast water scours the bed to rock regardless of how deep it is.
+            float fastSand, fastSilt, fastRock;
+            UnderwaterSplatMutation.BedCovers(12f, 2f, in p, out fastSand, out fastSilt, out fastRock);
+            Check(fastRock > fastSilt && fastRock > fastSand,
+                  "Underwater: a strong current sweeps the deep bed to rock");
+            Check(fastRock > deepRock, "Underwater: rock share climbs with flow speed");
+
+            // Layer-enable guard: -1 is a legitimately empty (buyer-unfilled) slot.
+            Check(!UnderwaterSplatMutation.IsEnabled(-1, 4), "Underwater: an empty slot (-1) is disabled");
+            Check(!UnderwaterSplatMutation.IsEnabled(4, 4), "Underwater: an out-of-range slot is disabled");
+            Check(UnderwaterSplatMutation.IsEnabled(2, 4), "Underwater: an in-range slot is enabled");
+
+            // Block write: three bed layers carry their covers, the ground shares the
+            // rest, and every cell still sums to one. Layer 0 is left as the author's
+            // ground; layers 1/2/3 are sand/silt/rock. A disabled slot (-1) is skipped.
+            const int Layers = 5;
+            const int Size = 4;
+            int[] bandLayers = { 1, 2, 3 };
+
+            float[,,] baseAlpha = new float[Size, Size, Layers];
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                baseAlpha[y, x, 0] = 0.6f;
+                baseAlpha[y, x, 4] = 0.4f;   // a second ground layer, to prove the share splits by proportion
+            }
+
+            float[][,] covers = new float[3][,];
+            for (int b = 0; b < 3; b++) covers[b] = new float[Size, Size];
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                // A submerged cell that is 60% sand, 20% silt, 10% rock -> 0.9 wet,
+                // 0.1 left for the ground; deterministic so the sum is checkable.
+                covers[0][y, x] = 0.6f;
+                covers[1][y, x] = 0.2f;
+                covers[2][y, x] = 0.1f;
+            }
+
+            float[,,] alpha = (float[,,])baseAlpha.Clone();
+            UnderwaterSplatMutation.WriteBed(alpha, baseAlpha, bandLayers, covers);
+
+            bool sumOne = true, bandsCarry = true, groundSplit = true;
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                float s = 0f;
+                for (int l = 0; l < Layers; l++) s += alpha[y, x, l];
+                if (Mathf.Abs(s - 1f) > Tol) sumOne = false;
+
+                if (Mathf.Abs(alpha[y, x, 1] - 0.6f) > Tol ||
+                    Mathf.Abs(alpha[y, x, 2] - 0.2f) > Tol ||
+                    Mathf.Abs(alpha[y, x, 3] - 0.1f) > Tol) bandsCarry = false;
+
+                // 0.1 of ground, split 0.6:0.4 -> 0.06 and 0.04.
+                if (Mathf.Abs(alpha[y, x, 0] - 0.06f) > Tol ||
+                    Mathf.Abs(alpha[y, x, 4] - 0.04f) > Tol) groundSplit = false;
+            }
+            Check(sumOne, "Underwater: every cell's weights still sum to one after the bed");
+            Check(bandsCarry, "Underwater: each bed layer carries exactly its cover fraction");
+            Check(groundSplit, "Underwater: the ground layers share the remainder by proportion");
+
+            // Covers that oversubscribe the cell are scaled to fit, not left summing past one.
+            float[] over = { 0.7f, 0.6f, 0.5f };   // sums to 1.8
+            float[] w = new float[Layers];
+            float[] bw = { 0.6f, 0f, 0f, 0f, 0.4f };
+            UnderwaterSplatMutation.BlendCell(w, bw, bandLayers, over);
+            float ws = 0f; for (int l = 0; l < Layers; l++) ws += w[l];
+            CheckWithin(ws, 1f, Tol, "Underwater: oversubscribed covers are rescaled to sum one");
+            Check(w[0] <= Tol && w[4] <= Tol, "Underwater: a fully covered cell leaves nothing for the ground");
+
+            // Lifting the bed copies the cached base back bit-for-bit.
+            UnderwaterSplatMutation.Restore(alpha, baseAlpha);
+            bool identical = true;
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            for (int l = 0; l < Layers; l++)
+                if (alpha[y, x, l] != baseAlpha[y, x, l]) identical = false;
+            Check(identical, "Underwater: lifting the bed restores the painted map bit-for-bit");
         }
 
         // ---------------------------------------------------------------------
@@ -2782,6 +2987,245 @@ namespace UniverseCreator.Editor.Diagnostics
             Check(cutMetres > 1f,
                   "the river cut only " + cutMetres.ToString("F2") + " m - too shallow to be a channel");
         }
+
+        /// <summary>
+        /// REFINEMENT #6 B1: on a READ reach (courseRead 1 - the river reads a hand-cut
+        /// trench instead of digging its own) the INSIDE branch must cut a min() gorge to
+        /// just-submerged, so it (a) UN-BURIES the channel when procedural noise has piled a
+        /// dune over it above the water, and (b) still PRESERVES a genuine authored trench
+        /// whose floor is already below the waterline. This is the property that fixes
+        /// Defect B (river buried under the terrain, img #29) without re-breaking R#4
+        /// (a read reach must not reshape the trench the user cut).
+        /// </summary>
+        private static void TestReadReachUnburiesButKeepsTrench()
+        {
+            const int res = 129;
+            const float maxHeight = 600f;
+            const float mps = 800f / (res - 1);
+
+            float surfaceY = 0.5f * maxHeight;          // 300 m water surface
+            float minDepth = 2f;
+            float readFloorY = surfaceY - minDepth;     // ground can't stand above this inside
+
+            Bounds chunk = new Bounds(new Vector3(400f, maxHeight * 0.5f, 400f),
+                                      new Vector3(800f, maxHeight, 800f));
+
+            // A read reach: every station is flagged read-only (courseRead 1).
+            WaterCarveLayer ReadLayer()
+            {
+                WaterCarveLayer layer = MakeRiverLayer(surfaceY, 12f);
+                layer.minDepthMetres = minDepth;
+                for (int i = 0; i < layer.coursePoints.Count; i++) layer.courseRead.Add(1f);
+                layer.RecomputeBounds();
+                return layer;
+            }
+
+            // --- Case DUNE: procedural noise piled a 40 m hill OVER the whole reach, well
+            // above the water. The read gorge must cut the CHANNEL down to the waterline; the
+            // river must no longer be buried.
+            float duneNorm = (surfaceY + 40f) / maxHeight;
+            float[,] dune = FlatField(res, duneNorm);
+            ReadLayer().ApplyTo(dune, chunk, mps, maxHeight);
+
+            float channelTopY = LowestSample(dune) * maxHeight;
+            Check(channelTopY < surfaceY - 1e-3f,
+                  "R#6 B1: a read reach left the channel BURIED at " + channelTopY.ToString("F2")
+                  + " m, above the " + surfaceY.ToString("F2") + " m water surface");
+            Check(Mathf.Abs(channelTopY - readFloorY) < 0.5f,
+                  "R#6 B1: the un-buried channel top settled at " + channelTopY.ToString("F2")
+                  + " m, not the expected ~" + readFloorY.ToString("F2") + " m waterline gorge");
+
+            // --- Case TRENCH: the ground already carries a hand-cut trench 30 m below the
+            // water surface (below readFloor). The read reach must READ it, not fill it up to
+            // the shallow gorge - Min keeps the deeper floor.
+            float trenchY = surfaceY - 30f;
+            float trenchNorm = trenchY / maxHeight;
+            float[,] trench = FlatField(res, trenchNorm);
+            ReadLayer().ApplyTo(trench, chunk, mps, maxHeight);
+
+            float keptFloorY = LowestSample(trench) * maxHeight;
+            Check(Mathf.Abs(keptFloorY - trenchY) < 0.25f,
+                  "R#6 B1: a read reach RESHAPED the authored trench - floor moved from "
+                  + trenchY.ToString("F2") + " m to " + keptFloorY.ToString("F2")
+                  + " m (a deeper authored trench must be read, not filled to the gorge)");
+
+            // And it stays lower-only even on a read reach.
+            bool anyRaised = false;
+            for (int z = 0; z < res; z++)
+                for (int x = 0; x < res; x++)
+                    if (trench[z, x] > trenchNorm + 1e-6f) anyRaised = true;
+            Check(!anyRaised, "R#6 B1: a read reach RAISED ground - the carve must only lower");
+        }
+
+
+        /// <summary>
+        /// REFINEMENT #6 SL1: the global sea-level floor (SeaLevelFloor.Apply, baked into
+        /// HeightOutputNode so it runs on the COMPOSED heightmap of every noise creator and
+        /// combiner) must lift DRY GROUND that has fallen below sea level to STRICTLY ABOVE
+        /// the waterline (>= sea + freeboard), while leaving genuine ocean (edge-reachable
+        /// sub-sea) and closed lake basins at their own depth. This pins the user's rule
+        /// "the continent is never below OR at sea level" AND that the sea's own depth is
+        /// not destroyed - the two halves of the dry-ground-above-sea guarantee.
+        /// </summary>
+        private static void TestSeaFloorLiftsDryGroundKeepsOceanDepth()
+        {
+            const int res = 8;
+            const float sea = 0.35f;
+            // 20 m of clearance at the test's 600 m world height, matching the HeightOutputNode
+            // guard (seaFreeboardMetres / heightScale). A lifted dry-land dip must clear the sea
+            // by ~20 m so no plain is ever left sitting AT the waterline - the user's safety rule.
+            const float worldHeightM = 600f;
+            const float freeboardMetres = 20f;
+            const float freeboard = freeboardMetres / worldHeightM;   // 0.0333 normalised
+            const float coastGrade = 0.03f;
+            const float basinDepth = 0.01f;
+
+            const float land   = 0.60f;   // dry land, above sea
+            const float dipH   = 0.33f;   // dry-land dip: below sea, enclosed, shallow pool
+            const float oceanH = 0.20f;   // genuine ocean: below sea, on the world edge
+            const float basinH = 0.15f;   // closed basin: below sea, enclosed, deep pool
+
+            // World-scale coarse height the drainage solve carries. The left column is open
+            // ocean (every cell is a border cell below sea, so it seeds the flood); the dip
+            // and the basin are interior, walled off from the edge by land, so the ocean
+            // flood can never reach them and they are NOT classified as ocean.
+            Matrix height = new Matrix(new CoordRect(0, 0, res, res));
+            height.worldPos  = Vector3.zero;
+            height.worldSize = new Vector3(700f, 600f, 700f);
+            for (int i = 0; i < height.arr.Length; i++) height.arr[i] = land;
+
+            for (int z = 0; z < res; z++) height.arr[z * res + 0] = oceanH;   // left edge = sea
+            height.arr[3 * res + 3] = dipH;                                    // dry-land dip
+            height.arr[5 * res + 5] = basinH;                                  // closed deep basin
+
+            // Filled surface: the dip pools nothing (its own height => a dry dip, raised);
+            // the basin fills to the surrounding land rim (deep pool >> basinDepth => a real
+            // basin, exempt so a lake can fill it later).
+            float[] filled = (float[])height.arr.Clone();
+            filled[5 * res + 5] = land;
+
+            WorldDrainage wd = WorldDrainage.CreateForTests(height, filled);
+            Check(wd != null, "SL1: could not build a test WorldDrainage");
+            if (wd == null) return;
+
+            // The chunk the floor is applied to: identical lattice + world placement as the
+            // solve (so the coarse permission field reads onto it 1:1), on a buffer we can
+            // mutate and diff against its own start values.
+            Matrix src = new Matrix(new CoordRect(0, 0, res, res));
+            src.worldPos  = height.worldPos;
+            src.worldSize = height.worldSize;
+            float[] before = (float[])height.arr.Clone();
+            Array.Copy(before, src.arr, before.Length);
+
+            SeaLevelFloor.Apply(wd, src, sea, coastGrade, basinDepth, freeboard, 1f, new StopToken());
+
+            // 1) The dry-land dip is lifted STRICTLY above the waterline, to ~sea + freeboard.
+            float dipAfter = src.arr[3 * res + 3];
+            Check(dipAfter > sea + 1e-4f,
+                  "SL1: a dry-land dip was left at/below sea (" + dipAfter.ToString("F4") + " <= "
+                  + sea.ToString("F4") + ") - the continent must never sit at or below sea level");
+            Check(dipAfter >= sea + freeboard - 1e-3f,
+                  "SL1: the dry-land dip rose to " + dipAfter.ToString("F4") + ", not the expected "
+                  + (sea + freeboard).ToString("F4") + " floor (sea + freeboard)");
+
+            // 2) Genuine ocean keeps its depth - never raised.
+            float oceanAfter = src.arr[4 * res + 0];
+            Check(Mathf.Abs(oceanAfter - oceanH) < 1e-4f,
+                  "SL1: genuine ocean was raised from " + oceanH.ToString("F4") + " to "
+                  + oceanAfter.ToString("F4") + " - the sea's own depth must be preserved");
+
+            // 3) A closed deep basin (a future lake bed) keeps its depth too.
+            float basinAfter = src.arr[5 * res + 5];
+            Check(Mathf.Abs(basinAfter - basinH) < 1e-4f,
+                  "SL1: a closed basin was raised from " + basinH.ToString("F4") + " to "
+                  + basinAfter.ToString("F4") + " - a lake basin must be left for the lake to fill");
+
+            // 4) Raise-only everywhere: the floor never lowers ground.
+            bool anyLowered = false;
+            for (int i = 0; i < src.arr.Length; i++)
+                if (src.arr[i] < before[i] - 1e-6f) anyLowered = true;
+            Check(!anyLowered, "SL1: the sea-level floor LOWERED ground somewhere - it must be raise-only");
+        }
+
+
+        /// <summary>
+        /// The coastal shelf grades a GENTLE shore down onto its beach ramp, leaves a
+        /// STEEP shore standing as a cliff, and never touches genuine ocean depth - the
+        /// three things that make the coast VARIED instead of one uniform beach wall.
+        /// </summary>
+        /// <remarks>
+        /// Variety is set to 0 for the test so the regional character field drops out and
+        /// the grade is a pure function of distance-to-water and slope, which is what makes
+        /// the numbers here reproducible. The gentle cell and the cliff cell sit at the
+        /// SAME distance from the ocean (both one cell in), so the only variable between
+        /// "graded" and "left alone" is how far the land stands above the ramp - exactly
+        /// the slope gate the shelf is built on.
+        /// </remarks>
+        private static void TestCoastalShelfGradesGentleKeepsCliffAndOcean()
+        {
+            const int res = 8;
+            const float sea = 0.35f;
+
+            const float land   = 0.60f;   // ordinary inland land, above sea (far above the rim -> a cliff)
+            const float oceanH = 0.20f;   // genuine ocean along the whole left edge
+            const float gentle = 0.40f;   // gentle shore: just above the flat plain rim, within the cliff gate
+            const float cliff  = 0.80f;   // steep shore: a sea-cliff, far above the ramp
+
+            Matrix height = new Matrix(new CoordRect(0, 0, res, res));
+            height.worldPos  = Vector3.zero;
+            height.worldSize = new Vector3(700f, 600f, 700f);   // 100 m per coarse cell
+            for (int i = 0; i < height.arr.Length; i++) height.arr[i] = land;
+
+            for (int z = 0; z < res; z++) height.arr[z * res + 0] = oceanH;  // left edge = open sea
+            height.arr[2 * res + 1] = gentle;   // gentle shore, one cell in from the water
+            height.arr[5 * res + 1] = cliff;    // steep shore, same distance from the water
+
+            WorldDrainage wd = WorldDrainage.CreateForTests(height, null);
+            Check(wd != null, "C-TEST: could not build a test WorldDrainage");
+            if (wd == null) return;
+
+            Matrix src = new Matrix(new CoordRect(0, 0, res, res));
+            src.worldPos  = height.worldPos;
+            src.worldSize = height.worldSize;
+            float[] before = (float[])height.arr.Clone();
+            Array.Copy(before, src.arr, before.Length);
+
+            // variety = 0: character drops out, so the result is a pure distance+slope grade.
+            // Bands match the real defaults: 10 m wet beach, 40 m flat plain rim, 500 m ascent.
+            CoastalShelf.Apply(wd, src, sea, /*range*/ 500f, /*beachFlat*/ 10f, /*plain*/ 40f,
+                               /*rise*/ 0.03f, /*cliffThreshold*/ 0.05f, /*variety*/ 0f,
+                               /*strength*/ 1f, new StopToken());
+
+            // 1) The gentle shore is graded DOWN toward the beach ramp (a beach forms).
+            float gentleAfter = src.arr[2 * res + 1];
+            Check(gentleAfter < gentle - 1e-3f,
+                  "C-TEST: a gentle shore was not graded (" + gentleAfter.ToString("F4")
+                  + " >= " + gentle.ToString("F4") + ") - gentle coasts must ease into beach/plain");
+
+            // 2) ...but never pulled to or below the waterline: dry ground stays above sea.
+            Check(gentleAfter > sea + 1e-4f,
+                  "C-TEST: the graded shore fell to/below sea (" + gentleAfter.ToString("F4")
+                  + ") - the grade must stay strictly above the waterline");
+
+            // 3) The steep shore is left standing as a cliff (slope gate closes the grade).
+            float cliffAfter = src.arr[5 * res + 1];
+            Check(Mathf.Abs(cliffAfter - cliff) < 1e-4f,
+                  "C-TEST: a sea-cliff was flattened from " + cliff.ToString("F4") + " to "
+                  + cliffAfter.ToString("F4") + " - steep coasts must survive as cliffs");
+
+            // 4) Genuine ocean is never touched - the sea keeps its own depth.
+            float oceanAfter = src.arr[4 * res + 0];
+            Check(Mathf.Abs(oceanAfter - oceanH) < 1e-4f,
+                  "C-TEST: genuine ocean was moved from " + oceanH.ToString("F4") + " to "
+                  + oceanAfter.ToString("F4") + " - the coastal shelf is a land-side pass only");
+
+            // 5) Lower-only everywhere: the shelf can pull a gentle rise down, never up.
+            bool anyRaised = false;
+            for (int i = 0; i < src.arr.Length; i++)
+                if (src.arr[i] > before[i] + 1e-6f) anyRaised = true;
+            Check(!anyRaised, "C-TEST: the coastal shelf RAISED ground somewhere - it must be lower-only");
+        }
+
 
         /// <summary>
         /// Re-deriving a dig from the pristine snapshot gives the same surface every

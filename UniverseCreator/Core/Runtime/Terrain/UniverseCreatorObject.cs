@@ -701,6 +701,11 @@ namespace UniverseCreator.TerrainSystem
                 return false;
             }
 
+            // Build-currency guard: prints which compiled assembly is actually
+            // running this regeneration, so a stale editor compile is visible at
+            // a glance instead of being mistaken for a code change that "did nothing".
+            UCBuildStamp.LogOnce();
+
             // Supersede any run already in flight. The old worker sees the flag on
             // its next ThrowIfStopRequested and unwinds.
             if (currentStopToken != null) currentStopToken.RequestStop();

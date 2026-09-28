@@ -113,26 +113,51 @@ namespace UniverseCreator.Editor.Diagnostics
 
                 int hashBefore = HashHeights(td);
 
-                // Walk the centre a full patch at a time along +X and re-address into a local array,
-                // mirroring what MicroReliefOverlay.UpdateRing does to its slot Transforms.
+                // Walk the centre a full patch at a time along +X, re-addressing every step exactly as
+                // MicroReliefOverlay.UpdateRing addresses its slot Transforms, and PROVE the addressing:
+                //  (1) the gridN slots map onto exactly the contiguous window [centre-half, centre+half],
+                //  (2) each slot keeps a fixed residue class mod gridN (only the wrapping edge re-addresses),
+                //  (3) no TerrainData is touched by the pure-int address path (C-04).
                 const int gridN = 7;
+                const int half = gridN / 2;
                 const float size = 8f;
                 var cells = new int[gridN];
+                var slotResidue = new int[gridN];
+                for (int i = 0; i < gridN; i++) slotResidue[i] = -1;
                 int prevCentre = PatchRing.CentreCell(0f, size);
                 int boundariesCrossed = 0;
                 float camX = 0f;
+                bool addressingContiguous = true;
+                bool residuesStable = true;
                 while (boundariesCrossed < 9)
                 {
                     camX += size;
                     int c = PatchRing.CentreCell(camX, size);
                     if (c != prevCentre) boundariesCrossed++;
-                    for (int sx = 0; sx < gridN; sx++) cells[sx] = PatchRing.WorldCell(sx, c, gridN);
+                    int lo = c - half, hi = c + half;
+                    var seen = new bool[gridN];
+                    for (int sx = 0; sx < gridN; sx++)
+                    {
+                        int cell = PatchRing.WorldCell(sx, c, gridN);
+                        cells[sx] = cell;
+                        if (cell < lo || cell > hi) addressingContiguous = false;   // inside the window
+                        else if (seen[cell - lo]) addressingContiguous = false;      // and each cell exactly once
+                        else seen[cell - lo] = true;
+                        int r = ((cell % gridN) + gridN) % gridN;
+                        if (slotResidue[sx] < 0) slotResidue[sx] = r;
+                        else if (slotResidue[sx] != r) residuesStable = false;
+                    }
                     prevCentre = c;
                 }
 
                 int hashAfter = HashHeights(td);
                 Check(boundariesCrossed == 9, "Overlay walk did not cross nine patch boundaries");
-                Check(hashBefore == hashAfter, "Overlay re-address changed the terrain heightmap hash (C-04 violated)");
+                Check(addressingContiguous,
+                    "PatchRing.WorldCell must map the gridN slots onto exactly the contiguous window [centre-half, centre+half], each cell once.");
+                Check(residuesStable,
+                    "Each overlay slot must keep a fixed residue class mod gridN as the centre moves — only the wrapping edge re-addresses.");
+                Check(hashBefore == hashAfter,
+                    "Overlay re-address touched no TerrainData: the address path is pure integer math, so the world never becomes a function of camera history (C-04).");
             }
             finally
             {

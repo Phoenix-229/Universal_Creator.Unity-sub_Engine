@@ -1762,12 +1762,22 @@ namespace UniverseCreator.Editor.Inspectors
 
             Transform t = body.transform;
 
+            // Hit-test against the SAME world point the node post is drawn at, or Delete
+            // targets a different screen position than the marker the user is aiming at.
+            // For a course that is the water surface (NodeSurfacePoint), matching
+            // DrawPointHandles; for a polygon outline it is the stored point. Using the
+            // stored Y here for a course put the test a few metres below the visible post,
+            // so at a shallow camera angle the Y gap projected past the pick radius and
+            // Delete removed a neighbour or nothing.
+            bool isCourse = line == body.course;
+
             int best = -1;
             float bestDistance = PickPixels * 2f;
 
             for (int i = 0; i < line.Count; i++)
             {
-                Vector2 gui = HandleUtility.WorldToGUIPoint(t.TransformPoint(line.points[i]));
+                Vector3 wp = isCourse ? body.NodeSurfacePoint(i) : t.TransformPoint(line.points[i]);
+                Vector2 gui = HandleUtility.WorldToGUIPoint(wp);
                 float distance = Vector2.Distance(gui, e.mousePosition);
                 if (distance >= bestDistance) continue;
 

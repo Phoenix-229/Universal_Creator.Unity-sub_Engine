@@ -287,8 +287,24 @@ namespace UniverseCreator.Editor.GraphUI
             Graph = graph;
             views.Clear();
             groupViews.Clear();
-            contentViewContainer.Clear();
+
+            // Tear the old canvas down through RemoveElement, NOT
+            // contentViewContainer.Clear(). GraphView keeps its nodes and edges in
+            // internal "layer" containers nested inside contentViewContainer and
+            // caches those layers in a private map. Clearing the container outright
+            // removes the layer elements from the hierarchy but leaves that cache
+            // pointing at them, so every AddElement below re-uses a layer that is no
+            // longer parented to anything - the node is added to a detached element
+            // and nothing draws until the window is reopened with a fresh GraphView.
+            // That is the "paste / duplicate / connect-to-portal blanks the whole
+            // graph until I close and reopen it" bug, on both the node graph and the
+            // texture graph (they share this view). RemoveElement goes through the
+            // same layer bookkeeping AddElement uses, so the cache stays honest.
+            List<GraphElement> stale = graphElements.ToList();
+            for (int i = 0; i < stale.Count; i++) RemoveElement(stale[i]);
+
             if (graph == null) return;
+
 
             restoring = true;
             try

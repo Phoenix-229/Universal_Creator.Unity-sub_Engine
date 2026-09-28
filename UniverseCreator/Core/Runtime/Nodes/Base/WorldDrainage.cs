@@ -165,6 +165,35 @@ namespace UniverseCreator.Nodes
         }
 
         /// <summary>
+        /// Test-only seam: wrap an already-known height + filled-surface pair in a
+        /// WorldDrainage so <see cref="SeaLevelFloor"/> and the coastal pass can be
+        /// unit-tested against a hand-authored world, without standing up a full
+        /// graph to drive <see cref="Solve"/>. <paramref name="filled"/> may be null,
+        /// in which case the height is treated as its own filled surface (no pooling).
+        /// Internal, so it never becomes part of the shipped public API.
+        /// </summary>
+        internal static WorldDrainage CreateForTests(Matrix height, float[] filled)
+        {
+            if (height == null || height.arr == null) return null;
+            float[] fill = filled != null ? filled : (float[])height.arr.Clone();
+            return new WorldDrainage(height, fill, null, null);
+        }
+
+        /// <summary>
+        /// Test-only seam that also carries a flow-accumulation field, so the flow /
+        /// bed-scour reading derived from it (HydroField.BedFlow01) can be exercised on
+        /// a hand-authored channel without standing up the full <see cref="Solve"/>
+        /// flow pass. <paramref name="accum"/> may be null (no flow known), which is
+        /// exactly what the two-argument seam produces. Internal, never shipped.
+        /// </summary>
+        internal static WorldDrainage CreateForTests(Matrix height, float[] filled, float[] accum)
+        {
+            if (height == null || height.arr == null) return null;
+            float[] fill = filled != null ? filled : (float[])height.arr.Clone();
+            return new WorldDrainage(height, fill, null, accum);
+        }
+
+        /// <summary>
         /// Pulls <paramref name="consumer"/>'s input at world scale and solves its
         /// drainage. Returns null if the input is not connected or the build was
         /// cancelled - both of which the caller must treat as "no water".

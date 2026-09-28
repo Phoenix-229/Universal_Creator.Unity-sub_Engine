@@ -47,6 +47,10 @@ namespace UniverseCreator.TerrainSystem
         private static readonly int OnId = Shader.PropertyToID("_UCUnderwaterOn");
         private static readonly int ColorId = Shader.PropertyToID("_UCUnderwaterColor");
         private static readonly int ParamsId = Shader.PropertyToID("_UCUnderwaterParams");
+        private static readonly int CausticsId = Shader.PropertyToID("_UCUnderwaterCaustics");
+        private static readonly int GodRaysId = Shader.PropertyToID("_UCUnderwaterGodRays");
+        private static readonly int CausticParamsId = Shader.PropertyToID("_UCUnderwaterCausticParams");
+        private static readonly int SunId = Shader.PropertyToID("_UCUnderwaterSun");
 
         [Header("Transition")]
         [Tooltip("Depth in metres over which the effect fades in as the camera crosses " +
@@ -79,6 +83,57 @@ namespace UniverseCreator.TerrainSystem
                  "for silt, storms or night, driven from a weather system without " +
                  "touching the bodies themselves.")]
         [Range(0.05f, 4f)] public float visibilityScale = 1f;
+
+        // Weather-driven murk, set once per frame by UCWaterWeatherCoupling.DriveMurk
+        // and read by every view in the scene. 1 is clear water; a storm stirs up
+        // sediment and drops it toward the murk floor. Kept SEPARATE from the authored
+        // visibilityScale above rather than overwriting it, so the weather layers ON
+        // TOP of the user's own silt dial instead of erasing it every frame - and a
+        // scene with no weather driver leaves it at 1, so the view behaves exactly as
+        // before. Static because murk is a property of the sky over the whole world,
+        // not of one camera.
+        public static float WeatherVisibilityScale = 1f;
+
+        // Quality-tier gate for the high-tier extras (caustics + god-rays), set by the
+        // water quality driver (W8) and read by every view in the scene. 1 runs the
+        // authored intensities; 0 switches both off on the low and mid tiers, where the
+        // depth-darkening carries the underwater look without the extra per-pixel maths.
+        // Kept SEPARATE from the authored causticsIntensity/godRayIntensity fields (which
+        // hold the HIGH-tier values) rather than overwriting them, so dropping to a lower
+        // tier and back does not erase what the author set - exactly as WeatherVisibilityScale
+        // layers on the silt dial above. Default 1 means a scene with no quality driver
+        // behaves exactly as before. Static because the tier is a property of the device,
+        // not of one camera.
+        public static float QualityEffectScale = 1f;
+
+        [Header("Caustics and god-rays (high tier)")]
+        [Tooltip("Brightness of the dancing caustic light the surface focuses onto the " +
+                 "bed and rocks below.\n\n" +
+                 "Analytic - no texture, so nothing to author and nothing to load. Costs " +
+                 "a handful of maths ops per submerged pixel. Zero disables it entirely, " +
+                 "and the quality-tier system sets it to zero on the low and mid tiers so " +
+                 "those devices keep the depth-darkening without the extra work. This is " +
+                 "the high-tier value.")]
+        [Range(0f, 2f)] public float causticsIntensity = 0.3f;
+
+        [Tooltip("Brightness of the god-ray shafts seen when looking toward the sun " +
+                 "through the water.\n\n" +
+                 "Also analytic and also zeroed on the low and mid tiers. This is the " +
+                 "high-tier value.")]
+        [Range(0f, 2f)] public float godRayIntensity = 0.2f;
+
+        [Tooltip("Caustic cell size in metres - the spacing of the bright light cells " +
+                 "on the ground.")]
+        [Range(0.5f, 30f)] public float causticTileMetres = 6f;
+
+        [Tooltip("How fast the caustic pattern drifts. Slow is calm water; fast reads " +
+                 "as a choppy surface overhead.")]
+        [Range(0f, 1f)] public float causticScrollSpeed = 0.08f;
+
+        [Tooltip("The light that casts the god-rays and caustics. Leave empty to use the " +
+                 "scene's designated Sun (Lighting window); a directional light is what " +
+                 "makes shafts, so a scene with none simply drops them straight down.")]
+        public Light sunLight;
 
         [Header("Read-only")]
         [Tooltip("Whether the camera is currently under water.")]
@@ -181,7 +236,11 @@ namespace UniverseCreator.TerrainSystem
             // Clamped rather than trusted. A visibility of zero divides by zero in
             // the absorption term and paints the screen a flat colour; 0.5 m is
             // already thick soup and is a floor the user cannot break the view with.
-            visibility = Mathf.Max(0.5f, visibility * Mathf.Max(0.05f, visibilityScale));
+            // WeatherVisibilityScale layers the weather's murk on top of the authored
+            // dial; it is clamped to at most 1 so weather only ever THICKENS the water,
+            // never makes a silty river read clearer than the author set it to.
+            float weatherMurk = Mathf.Clamp(WeatherVisibilityScale, 0.05f, 1f);
+            visibility = Mathf.Max(0.5f, visibility * Mathf.Max(0.05f, visibilityScale) * weatherMurk);
 
             Color c = v.underwaterColor * Mathf.Max(0f, v.underwaterBrightness);
             c.a = 1f;
@@ -197,6 +256,27 @@ namespace UniverseCreator.TerrainSystem
                 1f / visibility,
                 surfaceY,
                 Mathf.Max(1f, v.maxDepth)));
+
+            // High-tier extras. The shader gates each on its own intensity, so setting
+            // them here even when they are zero is free at draw time - the compare in
+            // the include skips the block. The quality tier drives these to zero on the
+            // low and mid tiers (W8) through QualityEffectScale, which multiplies the
+            // authored high-tier values here rather than overwriting the fields.
+            float fx = Mathf.Clamp01(QualityEffectScale);
+            Shader.SetGlobalFloat(CausticsId, Mathf.Max(0f, causticsIntensity) * fx);
+            Shader.SetGlobalFloat(GodRaysId, Mathf.Max(0f, godRayIntensity) * fx);
+            Shader.SetGlobalVector(CausticParamsId, new Vector4(
+                Mathf.Max(0.5f, causticTileMetres),
+                Mathf.Max(0f, causticScrollSpeed),
+                0f, 0f));
+
+            // Direction TO the sun. A light's forward runs ALONG its rays (downward for
+            // a sun), so the direction back to it is the negated forward. With no sun in
+            // the scene the shafts fall straight down, which is where sunlight in still
+            // water comes from anyway.
+            Light sun = sunLight != null ? sunLight : RenderSettings.sun;
+            Vector3 toSun = sun != null ? -sun.transform.forward : Vector3.up;
+            Shader.SetGlobalVector(SunId, new Vector4(toSun.x, toSun.y, toSun.z, 0f));
         }
 
         private void Clear()

@@ -832,9 +832,11 @@ namespace UniverseCreator.Editor.Diagnostics
             Check(c1 > 0 && Mathf.Abs(c2 - 2 * c1) <= 2, "Stem count must scale with stand area.");
 
             // THE done-when: vary every render knob and the count does not move, while the switch distances do.
+            // StemCountForStand takes no tier parameter at all, so first pin that it is deterministic (no hidden
+            // per-call state), then prove tier-independence below by moving the real LOD/impostor knobs.
             int countUltra = SelfThinningDensity.StemCountForStand(1f, 25f, k);
-            int countLow = SelfThinningDensity.StemCountForStand(1f, 25f, k); // same ecology inputs, "different tier"
-            Check(countUltra == countLow, "Stem count must be identical across tiers — LOD never changes the number of stems.");
+            int countRepeat = SelfThinningDensity.StemCountForStand(1f, 25f, k);
+            Check(countUltra == countRepeat, "StemCountForStand must be deterministic — identical ecology inputs yield an identical count.");
 
             float[] thresholds = { 0.5f, 0.2f, 0.05f };
             int lodUltra = MeshLODController.SelectLod(1f, 30f, 60f, thresholds, 2.0f);  // Ultra bias
@@ -1717,6 +1719,11 @@ namespace UniverseCreator.Editor.Diagnostics
                 bool stepped = ladder.TryStepDown(out DegradeStep applied);
                 Check(stepped && applied == expected[i], "The ladder must descend in the exact published order.");
                 Check(!DegradationLadder.AffectsStemCount(applied), "No degradation step may change the stem count.");
+                // Apply the step's real contract to the count: production says none of these steps touch the
+                // stem count, so if any step ever mis-reported AffectsStemCount==true this would mutate it and
+                // the invariant below would fail. This binds stemCountAfter to production, not to a literal.
+                if (DegradationLadder.AffectsStemCount(applied))
+                    stemCountAfter = SelfThinningDensity.DegradedStemCount(stemCountAfter, 0.5f);
                 logLines++;   // one log line per step
             }
             Check(logLines == 7 && stemCountAfter == stemCount,
@@ -1767,7 +1774,7 @@ namespace UniverseCreator.Editor.Diagnostics
             var ladder = new DegradationLadder();
             ladder.TryStepDown(out _); ladder.TryStepDown(out _);   // two-step transient breach
             var rc4 = new RecoveryController(5f, 0.8f);
-            float t = 0f, lastStep = -100f; int stepDowns = 0;
+            float t = 0f, lastStep = -100f; int upSteps = 0;
             while (!ladder.AtTop && t < 15f)
             {
                 t += 1f;
@@ -1775,11 +1782,14 @@ namespace UniverseCreator.Editor.Diagnostics
                 // Load is under the margin throughout, so the ladder is never pushed down during recovery.
                 if (ok && DegradationLadder.IntervalElapsed(lastStep, t, 1f))
                 {
-                    if (ladder.TryStepUp(out _)) lastStep = t;
+                    if (ladder.TryStepUp(out _)) { lastStep = t; upSteps++; }
                 }
             }
-            Check(ladder.AtTop && t <= 15f && stepDowns == 0,
-                "A transient breach must recover fully within fifteen seconds with no oscillation.");
+            // upSteps is driven by production (TryStepUp's return); pinning it to exactly 2 proves the two-step
+            // breach recovered fully and no further — a step past the top (over-recovery / oscillation) would
+            // push the count above 2, and TryStepUp refuses at the top so it cannot.
+            Check(ladder.AtTop && t <= 15f && upSteps == 2,
+                "A transient breach must recover fully within fifteen seconds, taking exactly the two up-steps it caused (no oscillation).");
         }
 
         private static void TestThermalGovernor()

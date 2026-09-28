@@ -68,10 +68,16 @@ namespace UniverseCreator.Nodes
         /// is exempt (a lake will fill it). Below this it is treated as a dry-land dip
         /// and raised.
         /// </param>
+        /// <param name="freeboard">
+        /// Normalised height a lifted dry-land dip is raised ABOVE sea, so dry ground is
+        /// never left sitting exactly at the waterline. 0 restores the old "floor to
+        /// exactly sea" behaviour. Only the dry-land-dip class is affected; genuine ocean
+        /// and closed lake basins are never touched, so the sea's own depth is preserved.
+        /// </param>
         /// <param name="strength">0..1 blend of the lift, 1 = full.</param>
         public static void Apply(WorldDrainage wd, Matrix src, float seaLevel,
-                                 float coastGrade, float basinDepth, float strength,
-                                 StopToken stop)
+                                 float coastGrade, float basinDepth, float freeboard,
+                                 float strength, StopToken stop)
         {
             if (wd == null || src == null || strength <= 1e-5f) return;
             if (wd.height == null || wd.filled == null) return;
@@ -79,6 +85,13 @@ namespace UniverseCreator.Nodes
             float sea  = Mathf.Clamp01(seaLevel);
             float band = Mathf.Max(1e-5f, coastGrade);
             float amt  = Mathf.Clamp01(strength);
+
+            // Dry-land dips floor to sea + freeboard, never to exactly sea, so raised dry
+            // ground always stands STRICTLY above the waterline (the user's rule: continent
+            // is never below OR at sea level). Clamped to 1 so it can never exceed the map.
+            // Classification still keys on `sea`, so genuine ocean and closed basins are
+            // exempt exactly as before - only the lifted dry class rises to this floor.
+            float dryFloor = Mathf.Min(1f, sea + Mathf.Max(0f, freeboard));
 
             int count = wd.resX * wd.resZ;
             if (count <= 0 || wd.height.arr.Length < count) return;
@@ -118,7 +131,7 @@ namespace UniverseCreator.Nodes
                 float h = src.arr[i];
                 float t = Mathf.Clamp01((h - sea) / band);
                 float s = t * t * (3f - 2f * t);                    // SmoothStep(t)
-                float floored = Mathf.Lerp(sea, h, s);
+                float floored = Mathf.Lerp(dryFloor, h, s);         // dry ground floors ABOVE sea
                 float lifted  = h > floored ? h : floored;          // raise only
                 src.arr[i] = h + (lifted - h) * w * amt;
             }
@@ -127,9 +140,10 @@ namespace UniverseCreator.Nodes
         /// <summary>
         /// Marks every below-sea cell reachable from a world edge through other
         /// below-sea cells: the open ocean. Four-neighbour flood from the border,
-        /// managed stack, O(cells).
+        /// managed stack, O(cells). Internal so the coastal-shelf pass can reuse the
+        /// exact same ocean classification instead of maintaining a second one.
         /// </summary>
-        private static bool[] FloodOceanFromEdges(float[] h, int resX, int resZ, float sea)
+        internal static bool[] FloodOceanFromEdges(float[] h, int resX, int resZ, float sea)
         {
             int count = resX * resZ;
             bool[] ocean = new bool[count];

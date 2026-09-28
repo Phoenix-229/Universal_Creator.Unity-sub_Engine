@@ -1074,6 +1074,235 @@ namespace UniverseCreator.Editor.Diagnostics
                   "A recycled OutputBag must not keep the last chunk's climate normal");
         }
 
+        /// <summary>
+        /// W1. HydroField is ecology's first real water awareness: before it, ctx.water
+        /// was never filled by any builder, so every site read "no water in range". This
+        /// asserts, on a hand-authored coarse world and WITHOUT standing up a bake, that
+        /// the field tells ocean from lake from dry ground, keeps the ocean flat at the
+        /// sea plane while a lake pools at its own spill level, measures fresh water as
+        /// nearer than salt where a lake sits inland of the coast - and that the sampler
+        /// reads all of that through its hydro branch, where the empty probe path could
+        /// only ever report nothing.
+        /// </summary>
+        private static void TestHydroFieldWaterAwareness()
+        {
+            const int res = 8;
+            const float mppSide = 700f;      // 100 m per coarse cell across 7 gaps
+            const float sea = 0.35f;         // ecology sea plane (worldHeight = 1)
+            const float land = 0.6f;         // dry plateau, above the waterline
+            const float oceanH = 0.1f;       // edge-connected trench, below sea -> ocean
+            const float lakeGround = 0.5f;   // a pit floor, still above sea -> not ocean
+            const float lakeSurface = 0.55f; // pooled 0.05 above the floor -> a lake
+
+            Matrix height = new Matrix(new CoordRect(0, 0, res, res));
+            height.worldPos = Vector3.zero;
+            height.worldSize = new Vector3(mppSide, 1f, mppSide);
+            height.worldHeight = 1f;
+
+            for (int i = 0; i < height.arr.Length; i++) height.arr[i] = land;
+
+            // Two full columns of edge-connected trench flood from the border as ocean.
+            for (int z = 0; z < res; z++)
+            {
+                height.arr[z * res + 0] = oceanH;
+                height.arr[z * res + 1] = oceanH;
+            }
+
+            // One interior pit, walled off from every edge by land, pools as a fresh lake.
+            int lakeCell = 4 * res + 5;      // (x=5, z=4) -> world (500, 400)
+            height.arr[lakeCell] = lakeGround;
+
+            float[] filled = (float[])height.arr.Clone();
+            filled[lakeCell] = lakeSurface;
+
+            UniverseCreator.Nodes.WorldDrainage wd =
+                UniverseCreator.Nodes.WorldDrainage.CreateForTests(height, filled);
+            Check(wd != null, "W1: could not build a test WorldDrainage");
+            if (wd == null) return;
+
+            HydroField field = HydroField.For(wd, sea);
+            Check(field != null, "W1: HydroField.For must derive a field from a solve");
+            if (field == null) return;
+
+            Check(field.HasAnyWater, "W1: a world with an ocean and a lake must report water");
+
+            // ---- the ocean: at the water, and flat at the sea plane ----
+            Check(field.NearestKind(0f, 400f) == UniverseCreator.Nodes.WaterBodyKind.Ocean,
+                  "W1: the edge-connected trench must classify as ocean");
+            Check(field.DistanceToWaterM(0f, 400f) <= 1f,
+                  "W1: a point in the ocean must read as at the water, not distant");
+            CheckClose(field.WaterSurfaceY(0f, 400f), sea,
+                       "W1: the ocean surface must sit at the flat sea plane");
+
+            // ---- the lake: fresh, pooled at its own spill level ----
+            Check(field.NearestKind(500f, 400f) == UniverseCreator.Nodes.WaterBodyKind.Lake,
+                  "W1: the interior pit must classify as a lake, not ocean");
+            Check(field.DistanceToWaterM(500f, 400f) <= 1f,
+                  "W1: a point in the lake must read as at the water");
+            CheckClose(field.WaterSurfaceY(500f, 400f), lakeSurface,
+                       "W1: the lake surface must pool at its own level, not the sea plane");
+
+            // ---- fresh water is nearer than salt where a lake sits inland ----
+            float dAnyInland = field.DistanceToWaterM(400f, 400f);
+            float dSaltInland = field.DistanceToSaltWaterM(400f, 400f);
+            Check(dAnyInland > 0f, "W1: a dry inland point must stand at a distance from water");
+            Check(dSaltInland > dAnyInland,
+                  "W1: the nearest water inland is the fresh lake, so salt must be farther");
+
+            Check(field.DistanceToSaltWaterM(200f, 400f) < field.DistanceToSaltWaterM(700f, 400f),
+                  "W1: salt distance must grow away from the ocean");
+
+            // ---- and the sampler reads all of that through its hydro branch ----
+            EcoSampleSettings s = new EcoSampleSettings();
+            s.seaLevelY = sea;
+            s.waterSearchRadiusM = 500f;
+            s.saltSprayDecayM = EcoConstants.SaltSprayDecayMetres;   // 120 m
+            s.radiationMjPerM2Day = 20f;   // keep the thermal / PET fills finite
+            s.seaLevelMeanTempC = 15f;
+            s.diurnalTempRangeC = 10f;
+
+            EnvironmentSampler sampler = new EnvironmentSampler();
+            sampler.Bind(in s, height, null, null, null, 0, null);
+
+            // With no field attached the pre-W1 probe path is all there is, and no builder
+            // fills it, so it must honestly report no water rather than invent some.
+            EnvironmentSample beforeAttach = sampler.Sample(0f, 400f);
+            Check(!beforeAttach.hasWaterInRange,
+                  "W1: without the hydrology field the empty probe path must report no water");
+
+            sampler.AttachHydrology(field);
+
+            EnvironmentSample oceanPt = sampler.Sample(0f, 400f);
+            Check(oceanPt.hasWaterInRange,
+                  "W1: the sampler must see the ocean once the field is attached");
+            Check(oceanPt.submergedDepthM > 0f, "W1: a point in the ocean must read submerged");
+            Check(oceanPt.nearestWaterKind == UniverseCreator.Nodes.WaterBodyKind.Ocean,
+                  "W1: the submerged ocean point must read as ocean");
+            CheckClose(oceanPt.saltFraction, 1f, "W1: seawater submersion must read fully saline");
+
+            EnvironmentSample lakePt = sampler.Sample(500f, 400f);
+            Check(lakePt.submergedDepthM > 0f, "W1: a point in the lake must read submerged");
+            Check(lakePt.nearestWaterKind == UniverseCreator.Nodes.WaterBodyKind.Lake,
+                  "W1: the submerged lake point must read as a lake");
+            Check(lakePt.saltFraction < oceanPt.saltFraction,
+                  "W1: a freshwater lake must read less saline than the sea");
+
+            EnvironmentSample inlandPt = sampler.Sample(400f, 400f);
+            Check(inlandPt.hasWaterInRange,
+                  "W1: the lake is within the search radius of the inland point");
+            Check(inlandPt.submergedDepthM <= 0f, "W1: a dry inland point must not read submerged");
+            Check(inlandPt.distanceToWaterM > 0f && inlandPt.distanceToWaterM <= s.waterSearchRadiusM,
+                  "W1: the inland point must read a positive, in-range distance to water");
+
+            // ---- a world entirely above sea level with no basins holds no water ----
+            Matrix dryWorld = new Matrix(new CoordRect(0, 0, res, res));
+            dryWorld.worldPos = Vector3.zero;
+            dryWorld.worldSize = new Vector3(mppSide, 1f, mppSide);
+            dryWorld.worldHeight = 1f;
+            for (int i = 0; i < dryWorld.arr.Length; i++) dryWorld.arr[i] = land;
+
+            UniverseCreator.Nodes.WorldDrainage dryWd =
+                UniverseCreator.Nodes.WorldDrainage.CreateForTests(dryWorld, null);
+            HydroField dryField = HydroField.For(dryWd, sea);
+            Check(dryField != null && !dryField.HasAnyWater,
+                  "W1: a world with no ocean and no basins must hold no water");
+        }
+
+        /// <summary>
+        /// W3. The hydrological exclusion kernel: pure routing of a site to land,
+        /// marine soft sediment, marine hard substrate, or nothing - and the bed-flow
+        /// reading it consumes. Asserts, without a bake, that dry ground stays
+        /// terrestrial and untouched, a calm submerged bed reads soft while a
+        /// current-scoured one reads rock (raising rockiness so the existing gate turns
+        /// rooting species away), the scour fades in from the shore rather than drawing
+        /// a hard line, a slope past the limit is rejected wet or dry, and the flow
+        /// proxy is higher in a drainage channel than on a ridge yet zero when the solve
+        /// carried no flow at all.
+        /// </summary>
+        private static void TestHydroExclusion()
+        {
+            const float deep = 5f;      // well past the half-metre bed fade
+            const float maxSlope = 45f;
+
+            // ---- dry ground is terrestrial and its rockiness is never touched ----
+            Check(HydroExclusion.BedScour01(0f, 1f) == 0f,
+                  "W3: dry ground carries no bed scour even under a strong flow");
+            CheckClose(HydroExclusion.SubmergedRockiness(0.3f, 0f, 1f), 0.3f,
+                       "W3: dry ground keeps its own rockiness unchanged");
+            Check(HydroExclusion.Classify(0f, 10f, 0f, maxSlope) == HydroRoute.Terrestrial,
+                  "W3: standable dry ground routes to terrestrial slots");
+            Check(HydroExclusion.Classify(0f, 60f, 0f, maxSlope) == HydroRoute.Reject,
+                  "W3: a dry slope past the limit carries no plant");
+
+            // ---- a calm deep bed is soft sediment; rockiness stays put ----
+            Check(HydroExclusion.BedScour01(deep, 0f) == 0f,
+                  "W3: still water scours nothing, however deep");
+            CheckClose(HydroExclusion.SubmergedRockiness(0.2f, deep, 0f), 0.2f,
+                       "W3: a calm submerged bed keeps its base rockiness");
+            Check(HydroExclusion.Classify(deep, 5f, 0f, maxSlope) == HydroRoute.MarineSediment,
+                  "W3: a calm deep flat bed routes to marine soft-sediment slots");
+
+            // ---- a scoured bed reads as rock, and the reject gate then does its job ----
+            float scour = HydroExclusion.BedScour01(deep, 1f);
+            Check(scour > 0.9f, "W3: a strong current scours a deep bed almost fully to rock");
+            Check(HydroExclusion.SubmergedRockiness(0.2f, deep, 1f) > 0.9f,
+                  "W3: the scoured bed raises rockiness so the existing gate rejects rooters");
+            Check(HydroExclusion.Classify(deep, 5f, 1f, maxSlope) == HydroRoute.MarineHardSubstrate,
+                  "W3: a scoured flat bed routes to holdfast (hard-substrate) slots");
+
+            // ---- the scour fades in from the shore, and grows with flow and depth ----
+            Check(HydroExclusion.BedScour01(0.05f, 1f) < 0.1f,
+                  "W3: right at the shoreline even a full flow scours almost nothing (no hard line)");
+            Check(HydroExclusion.BedScour01(deep, 0.8f) > HydroExclusion.BedScour01(deep, 0.3f),
+                  "W3: scour grows with the flow across the bed");
+            Check(HydroExclusion.BedScour01(0.4f, 1f) > HydroExclusion.BedScour01(0.15f, 1f),
+                  "W3: scour grows with depth through the bed-fade band");
+
+            // ---- MAX, not add: an already-rocky bed is not doubly rocked by calm water ----
+            CheckClose(HydroExclusion.SubmergedRockiness(0.9f, deep, 0f), 0.9f,
+                       "W3: a calm bed that is already rocky keeps that rockiness, not more");
+
+            // ---- a submerged slope past the limit is rejected regardless of flow ----
+            Check(HydroExclusion.Classify(deep, 60f, 0f, maxSlope) == HydroRoute.Reject,
+                  "W3: a submerged cliff carries no rooted plant either");
+
+            // ---- the flow proxy: higher in a channel than on a ridge, in 0..1 ----
+            const int res = 8;
+            const float mppSide = 700f;   // 100 m per coarse cell, as the W1 test uses
+            Matrix flowH = new Matrix(new CoordRect(0, 0, res, res));
+            flowH.worldPos = Vector3.zero;
+            flowH.worldSize = new Vector3(mppSide, 1f, mppSide);
+            flowH.worldHeight = 1f;
+            for (int i = 0; i < flowH.arr.Length; i++) flowH.arr[i] = 0.5f;
+
+            // A trunk channel down column x=4 carries orders more upstream area than the
+            // ridge column x=0, exactly the spread the log transform is there to handle.
+            float[] accum = new float[res * res];
+            for (int i = 0; i < accum.Length; i++) accum[i] = 1f;
+            for (int z = 0; z < res; z++) accum[z * res + 4] = 1000f;
+
+            UniverseCreator.Nodes.WorldDrainage flowWd =
+                UniverseCreator.Nodes.WorldDrainage.CreateForTests(flowH, null, accum);
+            HydroField flowField = HydroField.For(flowWd, 0.35f);
+            Check(flowField != null, "W3: could not derive a HydroField for the flow test");
+            if (flowField != null)
+            {
+                float chan = flowField.BedFlow01(400f, 350f);  // x=4 column: the channel
+                float ridge = flowField.BedFlow01(0f, 350f);   // x=0 column: the ridge
+                Check(chan >= 0f && chan <= 1f && ridge >= 0f && ridge <= 1f,
+                      "W3: the bed-flow proxy must stay within 0..1");
+                Check(chan > ridge,
+                      "W3: bed flow must read higher in the channel than on the ridge");
+            }
+
+            // ---- and where the solve carried no flow, the bed simply reads calm ----
+            UniverseCreator.Nodes.WorldDrainage noFlowWd =
+                UniverseCreator.Nodes.WorldDrainage.CreateForTests(flowH, null);
+            HydroField noFlow = HydroField.For(noFlowWd, 0.35f);
+            Check(noFlow != null && noFlow.BedFlow01(400f, 350f) == 0f,
+                  "W3: with no flow-accumulation field the bed reads zero flow, not an error");
+        }
+
         private static bool HasShaderProperty(Shader shader, string property)
         {
             if (shader == null) return false;

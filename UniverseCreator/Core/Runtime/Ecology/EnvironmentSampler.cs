@@ -152,6 +152,14 @@ namespace UniverseCreator.Ecology
         // manager's flat authored figure.
         private UniverseCreator.Weather.ClimateNormals climate;
 
+        // The whole-world hydrology field (W1), attached rather than bound like the
+        // canopy and climate: it is derived ONCE per bake from the shared drainage
+        // solve and handed to every chunk's sampler. Null is the benign default - a
+        // graph whose ecology never resolved hydrology reads the (empty) water probes
+        // exactly as before. When present it is the FIRST real source of shore
+        // distance, submersion and salt, because no builder ever fills ctx.water.
+        private HydroField hydro;
+
         private float stepM;
         private EnvironmentChannel missing;
         private bool bound;
@@ -185,6 +193,19 @@ namespace UniverseCreator.Ecology
 
         /// <summary>The chunk climate the sampler is reading, or null when it is on the resolved settings.</summary>
         public UniverseCreator.Weather.ClimateNormals ChunkClimate { get { return climate; } }
+
+        /// <summary>
+        /// Points the sampler at the whole-world hydrology field (W1). A field that
+        /// holds any water clears the Water missing-channel bit, because shore
+        /// distance, submersion and salt now come from it rather than the empty
+        /// probes. Null, or an all-dry world, leaves the sampler exactly as it was.
+        /// </summary>
+        public void AttachHydrology(HydroField field)
+        {
+            hydro = field;
+            if (field != null && field.HasAnyWater)
+                missing &= ~EnvironmentChannel.Water;
+        }
 
         /// <summary>
         /// Points the sampler at one chunk's worth of graph products.
@@ -272,6 +293,7 @@ namespace UniverseCreator.Ecology
             derivatives = null;
             canopy = null;
             climate = null;
+            hydro = null;
             bound = false;
         }
 
@@ -299,7 +321,7 @@ namespace UniverseCreator.Ecology
             FillWater(worldX, worldZ, groundY, ref s);
             FillThermal(ref s);
             FillWaterBalance(worldX, worldZ, ref s);
-            FillSoil(ref s);
+            FillSoil(worldX, worldZ, ref s);
             FillDisturbance(ref s);
             FillBiome(worldX, worldZ, ref s);
             FillLight(worldX, worldZ, ref s);
@@ -405,6 +427,18 @@ namespace UniverseCreator.Ecology
         {
             float radius = Mathf.Max(settings.waterSearchRadiusM, 0f);
 
+            // W1: the whole-world hydrology field is the real water source, because no
+            // builder ever fills ctx.water - the probe path below is the pre-W1 fallback
+            // that always reported "no water in range". When the field is attached and
+            // the world holds any water, distance / submersion / kind / table / salt all
+            // come from it. Mirrors the derivatives branch: prefer the real source, keep
+            // the estimate as the stated default when it is absent.
+            if (hydro != null && hydro.HasAnyWater)
+            {
+                FillWaterFromHydro(worldX, worldZ, groundY, radius, ref s);
+                return;
+            }
+
             if (WaterProximity.Nearest(water, waterCount, worldX, worldZ, radius, out float d, out int index))
             {
                 s.hasWaterInRange = true;
@@ -456,6 +490,54 @@ namespace UniverseCreator.Ecology
             }
         }
 
+        /// <summary>
+        /// The water fields from the whole-world hydrology field (W1). Same physical
+        /// rules as the probe path above - in-range gated by the search radius, the
+        /// water table level with the nearest surface, salt split between body salinity
+        /// when submerged and airborne spray from the nearest ocean on dry ground - so
+        /// a rule tuned against one source reads the other identically.
+        /// </summary>
+        private void FillWaterFromHydro(float worldX, float worldZ, float groundY, float radius, ref EnvironmentSample s)
+        {
+            float dAny = hydro.DistanceToWaterM(worldX, worldZ);
+            float surfaceY = hydro.WaterSurfaceY(worldX, worldZ);
+
+            s.hasWaterInRange = dAny <= radius;
+            s.distanceToWaterM = Mathf.Min(dAny, radius);
+
+            // Kind is only meaningful where a body is actually near, so it is read only
+            // in range; out of range the least-harmful Lake stands in, exactly as the
+            // probe path does, and hasWaterInRange is what a rule must actually test.
+            s.nearestWaterKind = s.hasWaterInRange
+                ? hydro.NearestKind(worldX, worldZ)
+                : WaterBodyKind.Lake;
+
+            // Submerged only where the point sits INSIDE a body (distance collapses to
+            // zero there); the depth is then how far the surface stands above the ground.
+            // Same d<=0 gate as the probe path, so shore and interior read alike either way.
+            s.submergedDepthM = dAny <= 0f ? Mathf.Max(0f, surfaceY - groundY) : 0f;
+
+            if (s.hasWaterInRange)
+                s.waterTableDepthM = Mathf.Max(0f, groundY - surfaceY);
+            else
+                s.waterTableDepthM = EcoConstants.WaterTableUnreachableDepthMetres;
+
+            if (s.submergedDepthM > 0f)
+            {
+                s.saltFraction = EcoMath.BodySalinityFraction(s.nearestWaterKind);
+            }
+            else
+            {
+                float saltDistance = hydro.DistanceToSaltWaterM(worldX, worldZ);
+                s.saltFraction = EcoMath.SaltSprayFraction(saltDistance, settings.saltSprayDecayM);
+            }
+        }
+
+        /// <summary>
+        /// Temperature at the point: mean annual from the lapse rate and aspect, and
+        /// the warmest/coldest month from how maritime the site is, then the frost-free
+        /// window and the growing-degree total that follow from those.
+        /// </summary>
         private void FillThermal(ref EnvironmentSample s)
         {
             float aspectBias = TopographyMath.AspectWarmingC(
@@ -535,10 +617,22 @@ namespace UniverseCreator.Ecology
             }
         }
 
-        private void FillSoil(ref EnvironmentSample s)
+        private void FillSoil(float worldX, float worldZ, ref EnvironmentSample s)
         {
             s.soilDepthM = TopographyMath.SoilDepthM(s.slopeDeg, s.curvature, settings.soilDepthMaxM);
             s.rockiness = TopographyMath.Rockiness(s.slopeDeg, s.soilDepthM, settings.soilAngleOfReposeDeg);
+
+            // W3. A submerged bed swept by current is scoured to hard substrate and
+            // reads as rock for placement exactly as a dry cliff does - and slope alone
+            // cannot see it, because the bed is flat. So where a flow field is present
+            // and the point sits under water, the bed's scour (the flow reading W1
+            // deferred) raises rockiness BEFORE fertility consumes it, routing
+            // soft-sediment rooting species out through the existing rockiness gate and
+            // leaving the hard bed for holdfast species. Dry ground and the probe-only
+            // path (no hydro field) are untouched: SubmergedRockiness returns the base.
+            if (hydro != null && s.submergedDepthM > 0f)
+                s.rockiness = HydroExclusion.SubmergedRockiness(
+                    s.rockiness, s.submergedDepthM, hydro.BedFlow01(worldX, worldZ));
 
             // Fertility follows the fines and the organic matter, and both end up
             // where the slopes above shed them: deep ground is fertile, hollows

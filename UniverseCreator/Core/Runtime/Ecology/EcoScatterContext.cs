@@ -166,6 +166,16 @@ namespace UniverseCreator.Ecology
         public DispersalField dispersal;
 
         /// <summary>
+        /// The whole-world hydrology field (W1). World scope, like the dispersal lattice
+        /// and the cut list, and for the same reason: "where is the nearest water" is a
+        /// map-sized question a chunk cannot answer from its own tile. Resolved lazily by
+        /// <see cref="EnsureHydrology"/> from the shared drainage solve and memoised, so
+        /// every chunk of a bake reads one derivation. Null until then, and null on a
+        /// world with no water - both of which the sampler reads as "no hydrology field".
+        /// </summary>
+        public HydroField hydro;
+
+        /// <summary>
         /// A context for one chunk that shares this one's species tables. The tables
         /// are the same objects rather than copies - they are read-only for the whole
         /// bake - while the sampler and the per-chunk products are fresh, so binding
@@ -239,6 +249,13 @@ namespace UniverseCreator.Ecology
             // is exactly the pre-weather behaviour, so this attach is safe every bake.
             sampler.AttachClimate(climateNormal);
 
+            // W1. The whole-world hydrology field, when EnsureHydrology has resolved it
+            // (a scatter node calls that before selection). Null is benign: with no
+            // field, or an all-dry world, the sampler stays on the empty water probes,
+            // which is exactly the pre-W1 behaviour. When present it clears the Water
+            // missing bit and becomes the real source of shore distance and salt.
+            sampler.AttachHydrology(hydro);
+
             // V-17. Bound off the world seed, never off a chunk index - a grove that
             // restarted at each chunk boundary is the artefact this whole file guards
             // against.
@@ -247,6 +264,45 @@ namespace UniverseCreator.Ecology
                 dispersal = new DispersalField();
                 dispersal.Bind(settings.seed);
             }
+        }
+
+        /// <summary>
+        /// Resolves the whole-world hydrology field (W1) on first use, from the shared
+        /// drainage solve of the calling node's height branch. Lazy and guarded for the
+        /// same reason as <see cref="EnsureBound"/>: the solve is a graph product that
+        /// does not exist when the context is built, and several scatter nodes in one
+        /// chunk must not each rebuild it.
+        ///
+        /// Call from the evaluating thread, from a node that has a consumer, tile and
+        /// height (every scatter node does). The per-bake drainage cache and the
+        /// HydroField memo together make this one derivation per bake, shared across
+        /// every chunk - the field itself is world scope, so a chunk cannot see a coast
+        /// two chunks away without it.
+        /// </summary>
+        public void EnsureHydrology(UniverseCreator.Nodes.Generator consumer,
+                                    UniverseCreator.Nodes.TileData tile,
+                                    UniverseCreator.Nodes.StopToken stop)
+        {
+            if (hydro != null) return;
+            if (consumer == null || tile == null) return;
+
+            // The SAME whole-world drainage solve the terrain post-pass runs (the one
+            // SeaLevelFloor and CoastalShelf grade on), at the same resolution, so
+            // ecology and terrain can never drift about where the water is. needFlow is
+            // false: HydroField reads only the ocean mask, the filled surface and the
+            // height field - not flow direction or accumulation.
+            UniverseCreator.Nodes.WorldDrainage wd = UniverseCreator.Nodes.WorldDrainage.Solve(
+                consumer, 0, tile,
+                UniverseCreator.Nodes.SeaLevelFloor.DefaultResolution, 0f, false, stop);
+            if (wd == null) return;
+
+            hydro = HydroField.For(wd, settings.seaLevelY);
+
+            // If the sampler already bound before hydrology was resolved, attach now so
+            // this chunk still reads real water rather than the empty-probe fallback.
+            // When it binds afterwards, EnsureBound does the attach instead.
+            if (hydro != null && sampler != null && sampler.IsBound)
+                sampler.AttachHydrology(hydro);
         }
 
         /// <summary>

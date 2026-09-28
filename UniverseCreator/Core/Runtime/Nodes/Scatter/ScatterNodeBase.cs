@@ -133,6 +133,14 @@ namespace UniverseCreator.Nodes.Scatter
                 return null;
             }
 
+            // W1. With ecology active for this tile, resolve the whole-world hydrology
+            // field before any species is scored, so the environment sampler reads real
+            // shore distance, submersion and salt instead of the empty water probes that
+            // no builder ever fills. Cheap after the first chunk - both the drainage
+            // solve and the derived field are cached and shared across the bake.
+            if (tile.ecology != null)
+                tile.ecology.EnsureHydrology(this, tile, stop);
+
             List<ScatterCandidate> candidates = SolvePlacement(height, mask, tile, stop);
 
             if (stop != null && stop.StopRequested) return null;
