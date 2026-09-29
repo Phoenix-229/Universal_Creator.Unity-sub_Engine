@@ -33,10 +33,7 @@ namespace UniverseCreator.Editor.Inspectors
     public class UCWaterBodyInspector : UnityEditor.Editor
     {
         private static bool levelFoldout = true;
-        private static bool riverFoldout = true;
         private static bool digFoldout = true;
-        private static bool routingFoldout = true;
-        private static bool nodesFoldout;
         private static bool bedFoldout = true;
         private static bool meshFoldout;
         private static bool hydraulicsFoldout;
@@ -92,33 +89,8 @@ namespace UniverseCreator.Editor.Inspectors
             serializedObject.ApplyModifiedProperties();
             serializedObject.Update();
 
-            if (body.shape != UCWaterBody.ShapeMode.RiverSpline)
-            {
-                levelFoldout = Group(levelFoldout, "Level Body", UCInspectorUI.HeaderBlue);
-                if (levelFoldout) DrawLevel(body);
-            }
-            else
-            {
-                riverFoldout = Group(riverFoldout, "River Channel", UCInspectorUI.HeaderBlue);
-                if (riverFoldout) DrawRiver(body);
-
-                // REFINEMENT #5 C4: the "Routing and Junctions" tab and the separate
-                // "Connections" tab are gone. Junctions are now made in the SCENE, at the
-                // node - a tick box appears on an end node the moment it touches another
-                // body's node (see DrawNodeConnectTicks in OnSceneGUI). What remains here is
-                // just the bank behaviour, so the foldout is renamed to match.
-                routingFoldout = Group(routingFoldout, "Banks", UCInspectorUI.HeaderAmber);
-                if (routingFoldout) DrawRouting(body);
-            }
-
-            // Waterfalls (§12): placed by hand on a river. The author drops a crest
-            // where the channel crosses a scarp; the fall's height is measured from
-            // the solved surface, never typed. Rivers only.
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline)
-            {
-                waterfallFoldout = Group(waterfallFoldout, "Waterfalls", UCInspectorUI.HeaderTeal);
-                if (waterfallFoldout) DrawWaterfalls(body);
-            }
+            levelFoldout = Group(levelFoldout, "Level Body", UCInspectorUI.HeaderBlue);
+            if (levelFoldout) DrawLevel(body);
 
             digFoldout = Group(digFoldout, "Dig  (carves the terrain)", UCInspectorUI.HeaderGreen);
             if (digFoldout) DrawDig(body);
@@ -262,371 +234,6 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         private int selectedNodeIndex = -1;
-        private bool isPlacingWaterfall = false;
-        private static bool waterfallFoldout = true;
-
-        private void DrawRiver(UCWaterBody body)
-        {
-            EditorGUI.indentLevel++;
-
-            PolylineSummary(body.course, "Course",
-                "Centre line, upstream point first. Hold CTRL + Click on the terrain in the scene view to draw the river point by point. SHIFT + Click on a segment to insert a node.");
-
-            EditorGUILayout.BeginHorizontal();
-            if (ActionButton("Snap to Ground", UCInspectorUI.ButtonAmber))
-                RunAuthoringAction(body, "Snap river course", body.SnapCourseToGround);
-            if (ActionButton("Clear Course", UCInspectorUI.ButtonRed))
-                RunAuthoringAction(body, "Clear river course", () => { 
-                    body.course.Clear();
-                    if (body.nodeWidthMetres != null) body.nodeWidthMetres.Clear();
-                    if (body.nodeDepthMetres != null) body.nodeDepthMetres.Clear();
-                    if (body.nodeFloodplainMetres != null) body.nodeFloodplainMetres.Clear();
-                    selectedNodeIndex = -1;
-                });
-            EditorGUILayout.EndHorizontal();
-
-            if (body.course == null || !body.course.IsValid)
-                EditorGUILayout.HelpBox(
-                    "Hold CTRL + Click in the Scene view to start drawing your river.", MessageType.Warning);
-            else if (body.CourseDropMetres() < 0f)
-                EditorGUILayout.HelpBox(
-                    "The course was drawn uphill: the last point is higher than the " +
-                    "first. Reverse the points, or leave Enforce Downhill on and the " +
-                    "river will pond instead of climbing.", MessageType.Warning);
-
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("widthMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("readTrenchWidth"));
-            if (body.readTrenchWidth)
-                EditorGUILayout.HelpBox(
-                    "The river reads the trench already in the terrain: its width AND depth " +
-                    "are measured from the channel cross-section, and the water fills that " +
-                    "channel up to the bank so it never hangs. Nothing is dug and no carve " +
-                    "math runs - the Width and Channel Depth fields above are ignored, and " +
-                    "the terrain is left exactly as the graph made it.", MessageType.None);
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("widthSegments"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("pointSpacingMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("channelDepthMetres"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("bankProfile"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("enforceDownhill"));
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("profileSmoothing"));
-
-            // Selected Node Menu
-            if (body.course != null && selectedNodeIndex >= 0 && selectedNodeIndex < body.course.Count)
-                DrawSelectedNode(body);
-
-            EditorGUI.indentLevel--;
-        }
-
-        /// <summary>
-        /// The one node the designer clicked, and nothing about the other thirty-nine.
-        /// </summary>
-        /// <remarks>
-        /// Elevation is the reading that has to be handled carefully, because the honest
-        /// answer differs by mode and the box used to pretend it did not. It edited the
-        /// course point's local Y, which the solve discards in every mode except
-        /// flat-floor: a river's elevation is set by the ground it crosses, so typing a
-        /// number here moved nothing and matched nothing on screen.
-        ///
-        /// So the box now shows UCWaterBody.NodeSurfaceY - where the water actually is at
-        /// that node - and is editable only in the mode where an authored Y is what the
-        /// river is built from. Elsewhere it is a live readout with the reason next to it.
-        /// A control that does nothing is worse than one that is greyed out, because the
-        /// greyed one tells you why.
-        ///
-        /// Grade is the figure a road node carries and the one a course is actually
-        /// steered with. "This reach is at 9%" is a rapid; "0.2%" is a pond. It is what
-        /// tells you which single node is wrong on a river that looks wrong.
-        /// </remarks>
-        private void DrawSelectedNode(UCWaterBody body)
-        {
-            int i = selectedNodeIndex;
-            int last = body.course.Count - 1;
-
-            EditorGUILayout.Space(8);
-            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-
-            string title = "Selected Node [" + i + "]";
-            if (i == 0) title += "   Head";
-            else if (i == last) title += "   Mouth";
-
-            EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
-
-            bool authoredY = body.bedSource == UCWaterBody.BedSource.FlatFloor;
-
-            // Kept in step with the course here as well as in OnValidate: a node can be
-            // appended in the scene view and clicked in the same frame, before anything
-            // has validated, and an index past the end of these lists throws.
-            while (body.nodeDepthMetres.Count < body.course.Count) body.nodeDepthMetres.Add(0f);
-            while (body.nodeWidthMetres.Count < body.course.Count) body.nodeWidthMetres.Add(0f);
-            while (body.nodeFloodplainMetres.Count < body.course.Count) body.nodeFloodplainMetres.Add(0f);
-
-            EditorGUI.BeginChangeCheck();
-
-            float shownY = body.NodeSurfaceY(i);
-            float newElevation;
-
-            using (new EditorGUI.DisabledScope(!authoredY))
-                newElevation = EditorGUILayout.FloatField(
-                    new GUIContent(authoredY ? "Elevation (m)" : "Elevation (m, from ground)",
-                                   authoredY
-                                       ? "The water surface at this node. Flat Floor builds "
-                                       + "the river from the line as drawn, so this is yours "
-                                       + "to set."
-                                       : "Where the water is at this node, read off the "
-                                       + "ground. Switch Bed Source to Flat Floor to set "
-                                       + "elevations by hand."),
-                    shownY);
-
-            // Depth and width are AUTHORED in dig mode and READ in read mode, and the box
-            // has to tell the truth about which. In read mode the node's typed values are
-            // ignored by the solve, so showing them as editable is the "control that does
-            // nothing" this inspector is at pains to avoid; instead we display what the last
-            // solve MEASURED from the trench (item D). In dig mode they are the per-node
-            // values that carry forward until the next node sets one (item E).
-            float newDepth = body.nodeDepthMetres[i];
-            float newWidth = body.nodeWidthMetres[i];
-
-            if (body.readTrenchWidth)
-            {
-                float readDepth, readWidth;
-                bool haveRead = body.TryGetReadProfileAt(body.NodeWorldPoint(i), out readDepth, out readWidth);
-
-                using (new EditorGUI.DisabledScope(true))
-                {
-                    if (haveRead)
-                    {
-                        EditorGUILayout.FloatField(
-                            new GUIContent("Read depth (m)",
-                                           "The channel depth MEASURED from the terrain at this "
-                                           + "node. Read mode fills the trench the graph already "
-                                           + "cut - this is what it found, not a value you set."),
-                            readDepth);
-                        EditorGUILayout.FloatField(
-                            new GUIContent("Read width (m)",
-                                           "The channel width MEASURED from the terrain at this "
-                                           + "node, bank to bank."),
-                            readWidth);
-                    }
-                    else
-                    {
-                        EditorGUILayout.LabelField("Read depth / width (m)", "— rebuild to read —");
-                    }
-                }
-
-                if (!haveRead)
-                    EditorGUILayout.HelpBox(
-                        "Read depth and width are measured from the terrain when the river "
-                        + "builds. Rebuild the river to read the trench it follows.",
-                        MessageType.None);
-            }
-            else
-            {
-                newDepth = EditorGUILayout.FloatField(
-                    new GUIContent("Depth (0 to inherit)",
-                                   "Channel depth at this node in metres. 0 carries the depth "
-                                   + "of the last node that set one, easing between them."),
-                    body.nodeDepthMetres[i]);
-
-                newWidth = EditorGUILayout.FloatField(
-                    new GUIContent("Width (0 to inherit)",
-                                   "Channel width at this node in metres. 0 carries the width "
-                                   + "of the last node that set one."),
-                    body.nodeWidthMetres[i]);
-            }
-
-            // REFINEMENT #5 C5: the floodplain is a TICK plus a size, opt-in on THIS node
-            // (not every node, not the whole river). Ticked, it carves a natural valley
-            // beside the channel scaled by the size; unticked stores 0 so the reach is a
-            // plain trench. The valley never touches the bank, never reshapes the trench and
-            // never flattens the ground to a level plane - see WaterCarveLayer.ValleySag.
-            bool fpOn = body.nodeFloodplainMetres[i] > 0.01f;
-            bool newFpOn = EditorGUILayout.ToggleLeft(
-                new GUIContent("Floodplain valley",
-                               "Tick to ease a gentle NATURAL valley into the terrain either "
-                               + "side of the river at THIS node. Opt-in per node, not the "
-                               + "whole river. It never touches the bank or the trench and "
-                               + "never flattens the ground to a level plane - it grades a "
-                               + "scoop beside the channel, scaled by the size below."),
-                fpOn);
-
-            float newFloodplain = 0f;
-            if (newFpOn)
-            {
-                float shownSize = fpOn ? body.nodeFloodplainMetres[i] : Mathf.Max(8f, body.widthMetres);
-                newFloodplain = EditorGUILayout.FloatField(
-                    new GUIContent("Valley size (m)",
-                                   "How far to each side the natural valley reaches, in metres. "
-                                   + "Larger opens a broader, gentler valley; the depression is "
-                                   + "deepest mid-way and fades to nothing at the bank and at the "
-                                   + "untouched hillside."),
-                    shownSize);
-            }
-
-            if (EditorGUI.EndChangeCheck())
-            {
-                Undo.RecordObject(body, "Edit River Node");
-
-                if (authoredY && !Mathf.Approximately(newElevation, shownY))
-                {
-                    // The box holds the SURFACE, the point holds the line the surface is
-                    // measured down from, so the offsets come back off before it is stored.
-                    Vector3 w = body.NodeWorldPoint(i);
-                    w.y = newElevation - body.surfaceOffsetMetres + body.flatFloorDepthMetres;
-                    body.SetNodeWorldPoint(i, w);
-                }
-
-                body.nodeDepthMetres[i] = newDepth;
-                body.nodeWidthMetres[i] = newWidth;
-                body.nodeFloodplainMetres[i] = newFpOn ? Mathf.Max(0.5f, newFloodplain) : 0f;
-
-                EditorUtility.SetDirty(body);
-                // Per-node typing fires EndChangeCheck on EVERY keystroke. Do NOT rebuild here;
-                // arm the commit gate so the rebuild runs once the edit is committed
-                // (focus-out / Enter / slider release), never per character.
-                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) pendingRebuild = true;
-            }
-
-            // Grade either side, the way a road node reports it.
-            if (body.course.Count >= 2)
-            {
-                string grades = "";
-                if (i > 0) grades += "from " + body.NodeGradePercentFromPrev(i).ToString("0.##") + "%";
-                if (i > 0 && i < last) grades += "    ";
-                if (i < last) grades += "to " + body.NodeGradePercentToNext(i).ToString("0.##") + "%";
-
-                EditorGUILayout.LabelField("Grade", grades);
-
-                bool climbs = (i > 0 && body.NodeGradePercentFromPrev(i) > 0.01f)
-                           || (i < last && body.NodeGradePercentToNext(i) < -0.01f);
-
-                if (climbs)
-                    EditorGUILayout.HelpBox(
-                        "This node is uphill of its neighbour. The solve will flatten the "
-                        + "reach rather than let water climb, so the river will pond here. "
-                        + "Move the node downhill to fix it.", MessageType.Warning);
-            }
-
-            EditorGUILayout.Space(4);
-
-            // REFINEMENT #5 C4: connection is a TICK BOX under the node - no "Connect"
-            // button, no scene-pick mode, no target dropdown. The tick appears the moment
-            // this END node touches another river or lake (the same tick is drawn in the
-            // Scene at the node by DrawNodeConnectTicks). Ticking wires the join node-to-node
-            // where they meet; the ocean connects on its own and is never listed.
-            if (body.IsEndNode(i))
-            {
-                UCWaterBody joined = body.JunctionAt(i);
-                UCWaterBody touch = NodeConnectCandidate(body, i);
-
-                if (joined != null)
-                {
-                    bool keep = EditorGUILayout.ToggleLeft(
-                        new GUIContent("Connected to " + joined.name + "  (" + joined.kind + ")",
-                            "This node is joined to another body where they touch. Untick to "
-                            + "drop the junction."),
-                        true);
-
-                    if (!keep) WireNodeJoin(body, joined, false);
-                }
-                else if (touch != null)
-                {
-                    bool now = EditorGUILayout.ToggleLeft(
-                        new GUIContent("Connect to " + touch.name + "  (" + touch.kind + ")",
-                            "This end node is touching another body. Tick to connect them "
-                            + "node-to-node, where they meet - the surfaces weld and the "
-                            + "connection keeps the trench width."),
-                        false);
-
-                    if (now) WireNodeJoin(body, touch, true);
-                }
-                else
-                {
-                    EditorGUILayout.HelpBox(
-                        "Move this end node onto another river or lake's edge to connect them. "
-                        + "A tick box appears here and in the Scene at the node the moment they "
-                        + "touch. A river mouth meeting the ocean connects on its own.",
-                        MessageType.None);
-                }
-            }
-
-            // Item C: a discoverable delete for the selected control point, next to the
-            // scene gestures that add and insert. A button reaches a node the position
-            // handle is drawn on top of, which the Delete key - hit-tested by cursor - can
-            // miss. The gestures are spelled out too, so add / insert / delete are all
-            // findable from the inspector and not only by knowing the shortcut.
-            EditorGUILayout.Space(4);
-            Polyline courseLine = body.course;
-            bool canDelete = courseLine != null && courseLine.Count > 2;
-            using (new EditorGUI.DisabledScope(!canDelete))
-            {
-                if (GUILayout.Button(new GUIContent("Delete this node",
-                        "Removes this control point and rebuilds. Disabled at two points, the "
-                        + "fewest a river course can have.")))
-                {
-                    RemoveNodeAt(body, courseLine, i);
-                    GUIUtility.ExitGUI();   // the node is gone; stop drawing its now-stale panel
-                }
-            }
-
-            EditorGUILayout.HelpBox(
-                "Edit the course in the Scene view: Ctrl+Click adds a node at the end, "
-                + "Shift+Click on the line inserts one where you click, and Delete (or the "
-                + "button above) removes the node under the cursor.", MessageType.None);
-
-            EditorGUILayout.EndVertical();
-        }
-        /// or null. Used by both the node inspector tick and the Scene tick so the two agree
-        /// on when a connection is offered and to whom. Tight radius (the node must be ON the
-        /// other body's edge, not merely within Auto Connect metres) so the tick means "these
-        /// two nodes meet here."
-        /// </summary>
-        private UCWaterBody NodeConnectCandidate(UCWaterBody body, int i)
-        {
-            if (body == null || !body.IsEndNode(i)) return null;
-
-            List<UCWaterBody> touching = body.TouchingJoinables();
-            if (touching == null || touching.Count == 0) return null;
-
-            Vector3 p = body.NodeWorldPoint(i);
-            float radius = Mathf.Max(5f, body.widthMetres);
-
-            UCWaterBody best = null;
-            float bestGap = float.MaxValue;
-            foreach (UCWaterBody other in touching)
-            {
-                if (other == null) continue;
-                Vector3 edge;
-                float sY, dJ;
-                if (!other.NearestEdgePoint(p, body.joinBlendMetres, out edge, out sY, out dJ)) continue;
-                float gap = new Vector2(edge.x - p.x, edge.z - p.z).magnitude;
-                if (gap <= radius && gap < bestGap) { bestGap = gap; best = other; }
-            }
-            return best;
-        }
-
-        /// <summary>
-        /// REFINEMENT #5 C4 - wire or clear a node-to-node join and rebuild both sides. A
-        /// lake ticked against a river stores the join on the RIVER (SetJoinTicked handles
-        /// which side carries it), so both objects are recorded for Undo and rebuilt.
-        /// </summary>
-        private void WireNodeJoin(UCWaterBody body, UCWaterBody other, bool on)
-        {
-            if (body == null || other == null) return;
-
-            UCWaterBody wired = (body.shape != UCWaterBody.ShapeMode.RiverSpline &&
-                                 other.shape == UCWaterBody.ShapeMode.RiverSpline)
-                                ? other : body;
-
-            Undo.RecordObject(body, on ? "Connect Water Bodies" : "Disconnect Water Bodies");
-            Undo.RecordObject(wired, on ? "Connect Water Bodies" : "Disconnect Water Bodies");
-
-            body.SetJoinTicked(other, on);
-
-            EditorUtility.SetDirty(body);
-            EditorUtility.SetDirty(wired);
-            if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-            if (wired != body && wired.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(wired);
-        }
 
         // =====================================================================
         //  THE DIG
@@ -646,7 +253,6 @@ namespace UniverseCreator.Editor.Inspectors
             using (new EditorGUI.DisabledScope(!body.digTerrain))
             {
                 bool ocean = body.kind == WaterBodyKind.Ocean;
-                bool river = body.shape == UCWaterBody.ShapeMode.RiverSpline;
 
                 if (ocean)
                 {
@@ -660,16 +266,8 @@ namespace UniverseCreator.Editor.Inspectors
                 {
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("bedProfile"));
 
-                    if (river)
-                    {
-                        EditorGUILayout.LabelField(" ", "Depth comes from Channel Depth above",
-                                                   EditorStyles.miniLabel);
-                    }
-                    else
-                    {
-                        EditorGUILayout.PropertyField(serializedObject.FindProperty("digDepthMetres"));
-                        EditorGUILayout.PropertyField(serializedObject.FindProperty("shoreRunMetres"));
-                    }
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("digDepthMetres"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("shoreRunMetres"));
 
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("shelfFraction"));
                 }
@@ -689,16 +287,11 @@ namespace UniverseCreator.Editor.Inspectors
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("ruggednessCalmMetres"));
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("ruggednessSeed"));
 
-                    // Basin shape is a lake and pool idea. A river's cross-section
-                    // really is close to symmetric, and the irregularity is skipped for
-                    // it in the dig, so offering the dials here would be a lie.
-                    if (!river)
-                    {
-                        EditorGUILayout.Space(2);
-                        EditorGUILayout.LabelField("Basin shape", EditorStyles.miniBoldLabel);
-                        EditorGUILayout.PropertyField(serializedObject.FindProperty("basinIrregularity"));
-                        EditorGUILayout.PropertyField(serializedObject.FindProperty("basinFeatureMetres"));
-                    }
+                    // Basin shape is a lake and pool idea.
+                    EditorGUILayout.Space(2);
+                    EditorGUILayout.LabelField("Basin shape", EditorStyles.miniBoldLabel);
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("basinIrregularity"));
+                    EditorGUILayout.PropertyField(serializedObject.FindProperty("basinFeatureMetres"));
                 }
 
                 EditorGUILayout.Space(4);
@@ -708,25 +301,6 @@ namespace UniverseCreator.Editor.Inspectors
                 if (!ocean)
                 {
                     EditorGUILayout.PropertyField(serializedObject.FindProperty("corridorMetres"));
-
-                    // The valley. Only a river has one - a lake's shore is its bevel -
-                    // and it was reachable from nothing until this row existed, so every
-                    // river silently took the derived default with no way to tune it.
-                    if (river)
-                    {
-                        EditorGUILayout.PropertyField(
-                            serializedObject.FindProperty("valleyWidthMultiple"));
-
-                        // The metres the dig will actually use, read from the body rather
-                        // than recomputed here, so this row cannot disagree with the cut.
-                        float valley = body.ValleyCorridorMetres;
-                        EditorGUILayout.LabelField(" ",
-                            valley > 0f
-                                ? "Valley " + valley.ToString("0.#") + " m beyond the bank"
-                                  + (body.corridorMetres > 0f ? "  (typed)" : "  (from width)")
-                                : "No valley - the dig cuts what it finds",
-                            EditorStyles.miniLabel);
-                    }
 
                     // Greyed on the corridor the dig uses, not on the typed field: with
                     // metres left at 0 a river still gets a derived valley, and strength
@@ -837,105 +411,6 @@ namespace UniverseCreator.Editor.Inspectors
                         ? "Connected to another body:  " + body.ConnectionSummary
                         : "Not connected to another body",
                     body.IsConnected);
-        }
-
-        // =====================================================================
-        //  BANKS
-        // =====================================================================
-
-        private void DrawRouting(UCWaterBody body)
-        {
-            EditorGUI.indentLevel++;
-
-            // §38: Fit-to-Valley, the "Reroute to Pass Through Valley" button and
-            // Route-Around-High-Ground (and their parameters) are removed. A hand-placed
-            // river runs on the line you drew; the ground no longer moves it sideways.
-
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("confineBanks"));
-            if (body.confineBanks)
-                EditorGUILayout.HelpBox(
-                    "Where the river crosses a steep slope and its low bank sits below the " +
-                    "water, a confining wall is raised to hold it - a real gorge. Off by " +
-                    "default, so the river raises no ground unless you ask; on gentle ground " +
-                    "it does nothing.", MessageType.None);
-
-            // REFINEMENT #5 C4: junction fields (Auto Connect, Join Downstream/Upstream,
-            // Join Blend) and the whole "Connections" list are removed from the inspector.
-            // A river joins another body by ticking the box that appears on its END NODE in
-            // the SCENE when that node touches the other body - node to node, where they
-            // actually meet. See DrawNodeConnectTicks / DrawSelectedNode.
-
-            EditorGUI.indentLevel--;
-        }
-
-        private void DrawWaterfalls(UCWaterBody body)
-        {
-            EditorGUI.indentLevel++;
-
-            EditorGUILayout.PropertyField(serializedObject.FindProperty("autoDetectWaterfalls"));
-            serializedObject.ApplyModifiedProperties();
-
-            if (body.autoDetectWaterfalls)
-            {
-                EditorGUILayout.HelpBox(
-                    "The solver is finding falls on its own, wherever the surface plunges " +
-                    "steeply. Turn Auto Detect off to place them by hand instead.",
-                    MessageType.None);
-                EditorGUI.indentLevel--;
-                return;
-            }
-
-            if (body.waterfallCrests == null)
-                body.waterfallCrests = new List<Vector3>();
-
-            EditorGUILayout.HelpBox(
-                "Click 'Place a crest', then click the river in the scene where it crosses " +
-                "a scarp. The fall grows downstream for as far as the ground actually drops, " +
-                "so its height comes from the terrain, not a typed number. A crest on flat " +
-                "water grows no fall.", MessageType.None);
-
-            Color tint = isPlacingWaterfall
-                ? new Color(0.95f, 0.55f, 0.20f)
-                : UCInspectorUI.HeaderTeal;
-            if (ActionButton(isPlacingWaterfall ? "Click the river...  (Esc to cancel)" : "Place a crest", tint))
-            {
-                isPlacingWaterfall = !isPlacingWaterfall;
-                SceneView.RepaintAll();
-            }
-
-            int count = body.waterfallCrests.Count;
-            if (count == 0)
-            {
-                EditorGUILayout.LabelField("No waterfalls placed.", EditorStyles.miniLabel);
-                EditorGUI.indentLevel--;
-                return;
-            }
-
-            EditorGUILayout.Space(2);
-            EditorGUILayout.LabelField(count + (count == 1 ? " crest" : " crests"), EditorStyles.miniBoldLabel);
-
-            int removeAt = -1;
-            for (int i = 0; i < count; i++)
-            {
-                Vector3 c = body.waterfallCrests[i];
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(
-                    string.Format("#{0}   ({1:0}, {2:0}, {3:0})", i + 1, c.x, c.y, c.z),
-                    EditorStyles.miniLabel);
-                if (GUILayout.Button("Remove", EditorStyles.miniButton, GUILayout.Width(64f)))
-                    removeAt = i;
-                EditorGUILayout.EndHorizontal();
-            }
-
-            if (removeAt >= 0)
-            {
-                Undo.RecordObject(body, "Remove Waterfall");
-                body.waterfallCrests.RemoveAt(removeAt);
-                EditorUtility.SetDirty(body);
-                if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-            }
-
-            EditorGUI.indentLevel--;
         }
 
 
@@ -1151,19 +626,6 @@ namespace UniverseCreator.Editor.Inspectors
                 Readout("Flow scale", built.maxFlowSpeed.ToString("0.00") + " m/s");
             }
 
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline)
-            {
-                EditorGUILayout.Space(2);
-                Readout("Course length", body.CourseLengthMetres().ToString("0.0") + " m");
-
-                float drop = body.CourseDropMetres();
-                Readout("Course drop", drop.ToString("0.0") + " m" + (drop < 0f ? "  (uphill)" : ""));
-
-                float length = body.CourseLengthMetres();
-                if (length > 1f)
-                    Readout("Mean gradient", (100f * Mathf.Max(0f, drop) / length).ToString("0.00") + " %");
-            }
-
             EditorGUILayout.EndVertical();
         }
 
@@ -1207,9 +669,6 @@ namespace UniverseCreator.Editor.Inspectors
         {
             if (body == null) return "";
 
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline &&
-                (body.course == null || !body.course.IsValid)) return "no course";
-
             if (body.shape == UCWaterBody.ShapeMode.Polygon &&
                 (body.outline == null || !body.outline.IsValid)) return "no outline";
 
@@ -1222,149 +681,15 @@ namespace UniverseCreator.Editor.Inspectors
         //  SCENE VIEW
         // =====================================================================
 
-        /// <summary>
-        /// REFINEMENT #5 C4 - the scene tick box at the node. For each END node of a river
-        /// that is either already joined or touching another body's node, draws a small
-        /// GUI.Toggle floating at the node in the scene. Ticking it connects the two
-        /// node-to-node where they meet; unticking drops the join. No button, no pick mode,
-        /// no dropdown - the tick simply appears when the nodes touch and wires the same
-        /// join the inspector node panel does. The ocean is never offered here: a river mouth
-        /// meeting the sea connects on its own. Rivers own the junction, so ticks are drawn
-        /// on river end nodes (a lake ticked from the river side is wired by SetJoinTicked).
-        /// </summary>
-        private void DrawNodeConnectTicks(UCWaterBody body)
-        {
-            if (body == null || body.shape != UCWaterBody.ShapeMode.RiverSpline) return;
-            if (body.course == null || body.course.Count < 2) return;
-
-            int last = body.course.Count - 1;
-            int[] ends = { 0, last };
-
-            Handles.BeginGUI();
-            for (int k = 0; k < ends.Length; k++)
-            {
-                int i = ends[k];
-
-                UCWaterBody joined = body.JunctionAt(i);
-                UCWaterBody touch = joined == null ? NodeConnectCandidate(body, i) : joined;
-                if (touch == null) continue;   // nothing in reach and nothing joined - no tick
-
-                Vector3 worldPos = body.NodeSurfacePoint(i);
-                Vector2 gui = HandleUtility.WorldToGUIPoint(worldPos);
-
-                // A node behind the camera projects to a bogus point; skip it.
-                if (float.IsNaN(gui.x) || float.IsInfinity(gui.x)) continue;
-
-                bool joinedNow = joined != null;
-                string label = joinedNow
-                    ? "✓ " + touch.name
-                    : "Connect " + touch.name;
-
-                // Sized to the label so the box does not clip the name, offset up-right of
-                // the node so it does not sit under the node's own handle.
-                GUIContent gc = new GUIContent(label,
-                    joinedNow
-                        ? "Connected here. Untick to drop this node-to-node junction."
-                        : "This node touches " + touch.name + ". Tick to connect them where "
-                        + "they meet.");
-                Vector2 size = EditorStyles.miniButton.CalcSize(gc);
-                float w = Mathf.Max(90f, size.x + 22f);
-                Rect r = new Rect(gui.x + 10f, gui.y - 12f, w, 20f);
-
-                Color bg = GUI.backgroundColor;
-                GUI.backgroundColor = joinedNow
-                    ? new Color(0.45f, 0.85f, 0.5f)
-                    : new Color(0.95f, 0.85f, 0.45f);
-
-                bool now = GUI.Toggle(r, joinedNow, gc, EditorStyles.miniButton);
-
-                GUI.backgroundColor = bg;
-
-                if (now != joinedNow)
-                {
-                    WireNodeJoin(body, touch, now);
-                    GUI.changed = true;
-                    if (SceneView.currentDrawingSceneView != null)
-                        SceneView.currentDrawingSceneView.Repaint();
-                }
-            }
-            Handles.EndGUI();
-        }
-
         private void OnSceneGUI()
         {
             UCWaterBody body = target as UCWaterBody;
             if (body == null) return;
 
-            Event e = Event.current;
-
-            // REFINEMENT #5 C4: the click-to-pick "Junction Connection Mode" is removed.
-            // Connections are made by a TICK BOX drawn at the end node in the scene (see
-            // DrawNodeConnectTicks), not by entering a mode and clicking a target body.
-
-            // ---- Waterfall Placement Mode (§12) ----
-            // The author clicks the river where it crosses a scarp. The hit is snapped
-            // onto the solved course and stored as a crest; whether it actually becomes
-            // a fall is decided later by the terrain angle at that point, not here.
-            if (isPlacingWaterfall && body.shape == UCWaterBody.ShapeMode.RiverSpline
-                && body.course != null && body.course.Count >= 2)
-            {
-                if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
-                {
-                    isPlacingWaterfall = false;
-                    e.Use();
-                    return;
-                }
-
-                if (e.type == EventType.Layout)
-                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
-
-                Ray wray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                if (RaycastTerrain(wray, body, out Vector3 hit))
-                {
-                    // Snap the hit onto the nearest point of the drawn course, so the
-                    // crest sits on the water, not on the bank the author clicked near.
-                    Vector3 snapped = hit;
-                    float best = float.MaxValue;
-                    for (int s = 0; s < body.course.Count; s++)
-                    {
-                        Vector3 wp = body.transform.TransformPoint(body.course.points[s]);
-                        float d = (wp - hit).sqrMagnitude;
-                        if (d < best) { best = d; snapped = wp; }
-                    }
-
-                    if (e.type == EventType.Repaint)
-                    {
-                        Handles.color = new Color(0.95f, 0.55f, 0.20f);
-                        float hs = HandleUtility.GetHandleSize(snapped) * 0.15f;
-                        Handles.DrawSolidDisc(snapped, Vector3.up, hs);
-                        SceneView.currentDrawingSceneView.Repaint();
-                    }
-
-                    if (e.type == EventType.MouseDown && e.button == 0)
-                    {
-                        Undo.RecordObject(body, "Place Waterfall");
-                        if (body.waterfallCrests == null)
-                            body.waterfallCrests = new System.Collections.Generic.List<Vector3>();
-                        body.waterfallCrests.Add(snapped);
-                        EditorUtility.SetDirty(body);
-                        if (body.buildTrigger == UCWaterBody.BuildTrigger.Automatic) Rebuild(body);
-                        isPlacingWaterfall = false;
-                        e.Use();
-                        return;
-                    }
-                }
-            }
-
             Polyline line = null;
             Color tint = Color.white;
 
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline)
-            {
-                line = body.course;
-                tint = new Color(0.30f, 0.85f, 0.95f, 1f);
-            }
-            else if (body.shape == UCWaterBody.ShapeMode.Polygon)
+            if (body.shape == UCWaterBody.ShapeMode.Polygon)
             {
                 line = body.outline;
                 tint = new Color(0.35f, 0.75f, 1f, 1f);
@@ -1372,101 +697,7 @@ namespace UniverseCreator.Editor.Inspectors
 
             if (line == null) return;
 
-            // ---- Draw placed waterfall crests ----
-            // Small amber markers on the river so the author can see where falls are
-            // set, independent of whether the terrain angle turned each into a fall.
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline
-                && body.waterfallCrests != null && body.waterfallCrests.Count > 0
-                && e.type == EventType.Repaint)
-            {
-                Color entry = Handles.color;
-                Handles.color = new Color(0.95f, 0.55f, 0.20f);
-                foreach (Vector3 wc in body.waterfallCrests)
-                {
-                    float hs = HandleUtility.GetHandleSize(wc) * 0.12f;
-                    Handles.DrawSolidDisc(wc, Vector3.up, hs);
-                }
-                Handles.color = entry;
-            }
-
-
-
-            // ---- Ctrl held: preview where the next appended node will go ----
-            // Like Road Architect, holding Ctrl shows a dotted line from the last
-            // node to the mouse cursor on the terrain.
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline && e.control)
-            {
-                // Raycast the terrain under the mouse for the preview
-                if (e.type == EventType.MouseMove || e.type == EventType.MouseDrag || e.type == EventType.Repaint)
-                {
-                    Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                    Vector3 previewPoint;
-                    bool previewValid = RaycastTerrain(ray, body, out previewPoint);
-
-                    if (previewValid && Event.current.type == EventType.Repaint)
-                    {
-                        Handles.color = new Color(tint.r, tint.g, tint.b, 0.6f);
-
-                        if (line.Count > 0)
-                        {
-                            Vector3 lastPoint = body.transform.TransformPoint(line.points[line.Count - 1]);
-                            Handles.DrawDottedLine(lastPoint, previewPoint, 4f);
-                        }
-
-                        // Draw a disc at the preview point
-                        float handleSize = HandleUtility.GetHandleSize(previewPoint) * 0.12f;
-                        Handles.DrawSolidDisc(previewPoint, Vector3.up, handleSize);
-                    }
-
-                    if (previewValid)
-                        SceneView.currentDrawingSceneView.Repaint();
-                }
-
-                // ---- Ctrl + Left Click: append a new node at the end ----
-                if (e.type == EventType.MouseDown && e.button == 0)
-                {
-                    Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-                    Vector3 hitPoint;
-                    if (RaycastTerrain(ray, body, out hitPoint))
-                    {
-                        // Double-click prevention: ignore if too close to last node
-                        Transform t = body.transform;
-                        if (line.Count > 0)
-                        {
-                            Vector3 lastWorld = t.TransformPoint(line.points[line.Count - 1]);
-                            if (Vector3.Distance(lastWorld, hitPoint) < 2f)
-                            {
-                                e.Use();
-                                return;
-                            }
-                        }
-
-                        Undo.RecordObject(body, "Append river node");
-                        line.points.Add(t.InverseTransformPoint(hitPoint));
-
-                        // Keep weights in sync
-                        if (line.weights != null && line.weights.Count < line.points.Count)
-                            line.weights.Add(line.weights.Count > 0 ? line.weights[line.weights.Count - 1] : 1f);
-
-                        // Keep per-node depth/width in sync (0 = inherit)
-                        SyncNodeArrays(body, line);
-
-                        selectedNodeIndex = line.points.Count - 1;
-                        EditorUtility.SetDirty(body);
-
-                        // Always rebuild so the river mesh appears immediately
-                        Rebuild(body);
-                        e.Use();
-                        return;
-                    }
-                }
-
-                // Prevent default scene interactions (orbit, selection) while Ctrl is held
-                if (e.type == EventType.Layout)
-                    HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
-            }
-
-            // ---- Draw existing spline and handles ----
+            // ---- Draw existing outline and handles ----
             if (line.Count > 0)
             {
                 DrawSegments(body, line, tint);
@@ -1474,10 +705,6 @@ namespace UniverseCreator.Editor.Inspectors
                 HandleShiftInsert(body, line);
                 HandleDelete(body, line);
             }
-
-            // REFINEMENT #5 C4: the scene tick box at the end node. It appears the moment an
-            // end node touches another body's node and connects them where they meet.
-            DrawNodeConnectTicks(body);
 
             // One rebuild per drag, on release.
             if (dragging && Event.current.type == EventType.MouseUp)
@@ -1516,31 +743,7 @@ namespace UniverseCreator.Editor.Inspectors
         }
 
         /// <summary>
-        /// Ensures nodeDepthMetres, nodeWidthMetres and nodeFloodplainMetres have the same
-        /// count as the course points. New entries default to 0 (inherit from the global value).
-        /// </summary>
-        private static void SyncNodeArrays(UCWaterBody body, Polyline line)
-        {
-            if (body.nodeDepthMetres == null) body.nodeDepthMetres = new System.Collections.Generic.List<float>();
-            if (body.nodeWidthMetres == null) body.nodeWidthMetres = new System.Collections.Generic.List<float>();
-            if (body.nodeFloodplainMetres == null) body.nodeFloodplainMetres = new System.Collections.Generic.List<float>();
-            while (body.nodeDepthMetres.Count < line.points.Count) body.nodeDepthMetres.Add(0f);
-            while (body.nodeWidthMetres.Count < line.points.Count) body.nodeWidthMetres.Add(0f);
-            while (body.nodeFloodplainMetres.Count < line.points.Count) body.nodeFloodplainMetres.Add(0f);
-            while (body.nodeDepthMetres.Count > line.points.Count) body.nodeDepthMetres.RemoveAt(body.nodeDepthMetres.Count - 1);
-            while (body.nodeWidthMetres.Count > line.points.Count) body.nodeWidthMetres.RemoveAt(body.nodeWidthMetres.Count - 1);
-            while (body.nodeFloodplainMetres.Count > line.points.Count) body.nodeFloodplainMetres.RemoveAt(body.nodeFloodplainMetres.Count - 1);
-        }
-
-        /// <summary>
         /// Draws the line the body is actually built from.
-        ///
-        /// For a river that is the CURVE, not the control polygon. Drawing straight
-        /// segments between the nodes was why the river read as a separate object
-        /// from its own spline: the screen showed chords, the carve dug the curve
-        /// through them, and on a bend those are metres apart. Both now come out of
-        /// UCWaterBody.PreviewCourseWorld, so there is one shape on screen and in
-        /// the ground.
         ///
         /// A polygon outline stays straight, because a polygon edge IS straight -
         /// bending it would be inventing geometry the fill does not use.
@@ -1552,32 +755,6 @@ namespace UniverseCreator.Editor.Inspectors
             Transform t = body.transform;
             Handles.color = tint;
 
-            List<Vector3> curve = body.shape == UCWaterBody.ShapeMode.RiverSpline
-                ? body.PreviewCourseWorld()
-                : null;
-
-            if (curve != null && curve.Count >= 2)
-            {
-                // One AA polyline rather than a DrawLine per span: the tessellation
-                // is hundreds of points and this is a repaint that runs whenever the
-                // mouse moves.
-                Handles.DrawAAPolyLine(4f, curve.ToArray());
-
-                // Control polygon behind it, thin and faint. Without it there is no
-                // way to see which part of the curve a node is responsible for, and
-                // dragging a node to fix a bend becomes guesswork.
-                Handles.color = new Color(tint.r, tint.g, tint.b, 0.28f);
-                int hull = line.closed ? line.Count : line.Count - 1;
-                for (int i = 0; i < hull; i++)
-                    Handles.DrawLine(t.TransformPoint(line.PointAt(i)),
-                                     t.TransformPoint(line.PointAt(i + 1)));
-
-                Handles.color = tint;
-                DrawFlowArrow(curve[Mathf.Max(0, curve.Count / 2 - 1)],
-                              curve[curve.Count / 2]);
-                return;
-            }
-
             int segments = line.closed ? line.Count : line.Count - 1;
             for (int i = 0; i < segments; i++)
             {
@@ -1585,95 +762,47 @@ namespace UniverseCreator.Editor.Inspectors
                 Vector3 b = t.TransformPoint(line.PointAt(i + 1));
                 Handles.DrawLine(a, b, 3f);
             }
-
-            if (body.shape == UCWaterBody.ShapeMode.RiverSpline && line.Count >= 2)
-            {
-                int mid = line.Count / 2;
-                DrawFlowArrow(t.TransformPoint(line.PointAt(Mathf.Max(0, mid - 1))),
-                              t.TransformPoint(line.PointAt(mid)));
-            }
-        }
-
-        // Which way the water runs is the one thing about a course that is invisible
-        // from its geometry, and building a river backwards is a whole afternoon.
-        private static void DrawFlowArrow(Vector3 from, Vector3 to)
-        {
-            Vector3 dir = to - from;
-            if (dir.sqrMagnitude <= 0.01f) return;
-
-            Handles.ConeHandleCap(0, to, Quaternion.LookRotation(dir.normalized),
-                                  HandleUtility.GetHandleSize(to) * 0.25f, EventType.Repaint);
         }
 
         // =====================================================================
         //  NODE MARKERS
         //
-        //  Read against Road & City Master, the road tool vendored beside this one,
-        //  which solves the same authoring problem for
-        //  roads: a node there is a coloured cube post standing on the ground, and
-        //  a node that carries a connection is drawn bigger and in a different
-        //  colour so a junction is visible from across the map without selecting
-        //  anything. That tool gets it for free because its nodes are real
-        //  GameObjects with gizmos - it has no PositionHandle anywhere - and a
-        //  water course is a list of points on one component, so the same read has
-        //  to be built out of Handles here.
-        //
-        //  What was here before drew a full three-axis PositionHandle for EVERY
-        //  point. On a forty-node river that is forty overlapping gizmos, the
-        //  course invisible underneath them, and no way to click a node without
-        //  dragging it - the first click of a select was already a move. So:
-        //  every node is a post you can click, and only the selected one gets a
-        //  handle to drag.
-        //
-        //  The posts stand on the WATER SURFACE (UCWaterBody.NodeSurfacePoint), not
-        //  on the stored point's Y, which in every ground-following mode is a
-        //  leftover from wherever the spline was dropped. Drawing at the stored Y
-        //  left the whole course hanging in the air above its own river or buried
-        //  under it. A dragged node re-reads the ground for the same reason: the
-        //  spline never floats.
+        //  Every outline point is a post you can click, and only the selected one
+        //  gets a three-axis handle to drag. Drawing a full PositionHandle for every
+        //  point turned a many-sided outline into overlapping gizmos with no way to
+        //  click a node without dragging it - the first click of a select was already
+        //  a move.
         // =====================================================================
 
-        private static readonly Color NodePlain = new Color(0.42f, 0.72f, 1f);      // river blue
-        private static readonly Color NodeEnd = new Color(1f, 0.55f, 0.15f);        // head/mouth
-        private static readonly Color NodeJoined = new Color(0.35f, 1f, 0.45f);     // carries a junction
+        private static readonly Color NodePlain = new Color(0.42f, 0.72f, 1f);      // outline blue
         private static readonly Color NodeSelected = new Color(1f, 0.92f, 0.25f);
 
         private void DrawPointHandles(UCWaterBody body, Polyline line)
         {
             Transform t = body.transform;
-            bool isCourse = line == body.course;
 
             Color entry = Handles.color;
 
             for (int i = 0; i < line.Count; i++)
             {
-                // The course knows where its water is; a polygon outline does not, so it
-                // is drawn at the point as stored.
-                Vector3 p = isCourse ? body.NodeSurfacePoint(i) : t.TransformPoint(line.points[i]);
+                Vector3 p = t.TransformPoint(line.points[i]);
 
                 bool selected = i == selectedNodeIndex;
-                bool end = isCourse && body.IsEndNode(i);
-                UCWaterBody joined = end ? body.JunctionAt(i) : null;
 
                 float hs = HandleUtility.GetHandleSize(p);
-                float post = hs * (end ? 0.85f : 0.6f);
-                float cap = hs * (selected ? 0.16f : end ? 0.14f : 0.09f);
+                float post = hs * 0.6f;
+                float cap = hs * (selected ? 0.16f : 0.09f);
 
                 Vector3 top = p + Vector3.up * post;
 
-                Handles.color = selected ? NodeSelected
-                              : joined != null ? NodeJoined
-                              : end ? NodeEnd
-                              : NodePlain;
+                Handles.color = selected ? NodeSelected : NodePlain;
 
                 Handles.DrawLine(p, top);
-
-                if (joined != null) DrawJunctionLink(top, joined);
 
                 if (selected)
                 {
                     Handles.CubeHandleCap(0, top, Quaternion.identity, cap, EventType.Repaint);
-                    DrawNodeLabel(body, i, top, cap, isCourse);
+                    DrawNodeLabel(i, top, cap);
                     continue;   // its position handle is drawn after the loop
                 }
 
@@ -1687,23 +816,21 @@ namespace UniverseCreator.Editor.Inspectors
                     selectedNodeIndex = i;
                     Repaint();
                 }
-
-                if (end) DrawNodeLabel(body, i, top, cap, isCourse);
             }
 
             Handles.color = entry;
 
-            DrawSelectedNodeHandle(body, line, isCourse);
+            DrawSelectedNodeHandle(body, line);
         }
 
         /// <summary>The drag handle, for the selected node only.</summary>
-        private void DrawSelectedNodeHandle(UCWaterBody body, Polyline line, bool isCourse)
+        private void DrawSelectedNodeHandle(UCWaterBody body, Polyline line)
         {
             int i = selectedNodeIndex;
             if (i < 0 || i >= line.Count) return;
 
             Transform t = body.transform;
-            Vector3 at = isCourse ? body.NodeSurfacePoint(i) : t.TransformPoint(line.points[i]);
+            Vector3 at = t.TransformPoint(line.points[i]);
 
             EditorGUI.BeginChangeCheck();
             Vector3 moved = Handles.PositionHandle(at, t.rotation);
@@ -1711,53 +838,14 @@ namespace UniverseCreator.Editor.Inspectors
 
             Undo.RecordObject(body, "Move water point");
 
-            // NEVER FLOATING. A course node dragged across the ground takes the ground's
-            // elevation, the way a road node snaps down to the terrain rather than
-            // hanging over it at whatever height the mouse happened to be at. The one
-            // exception is Flat Floor, where the drawn Y IS the river's datum and the
-            // solve reads it - snapping there would erase what the mode is for.
-            if (isCourse && body.bedSource != UCWaterBody.BedSource.FlatFloor)
-                moved.y = UCWaterBody.SampleGround(Terrain.activeTerrains, moved, at.y);
-
             line.points[i] = t.InverseTransformPoint(moved);
             dragging = true;
         }
 
-        /// <summary>Index, and the grade a road node would carry.</summary>
-        private static void DrawNodeLabel(UCWaterBody body, int i, Vector3 top, float cap,
-                                         bool isCourse)
+        /// <summary>The node's index, floating above its post.</summary>
+        private static void DrawNodeLabel(int i, Vector3 top, float cap)
         {
-            string text = "[" + i + "]";
-
-            if (isCourse && body.course != null && body.course.Count >= 2)
-            {
-                int last = body.course.Count - 1;
-                float g = i < last ? body.NodeGradePercentToNext(i)
-                                   : body.NodeGradePercentFromPrev(i);
-
-                text += "  " + g.ToString("0.##") + "%";
-            }
-
-            Handles.Label(top + Vector3.up * (cap * 2.2f), text);
-        }
-
-        /// <summary>
-        /// The line from a joined end to the body it empties into or comes out of.
-        /// </summary>
-        /// <remarks>
-        /// A junction is the one relationship in a water network that has no geometry of
-        /// its own: the river reaches the lake and the connection exists in a serialised
-        /// field, invisible. Which meant the only way to tell an authored junction from a
-        /// river that merely stops near a lake was to select it and read the inspector -
-        /// and an auto-connected one could not be told apart at all.
-        /// </remarks>
-        private static void DrawJunctionLink(Vector3 from, UCWaterBody joined)
-        {
-            Vector3 to = joined.transform.position;
-
-            Handles.DrawDottedLine(from, to, 4f);
-            Handles.SphereHandleCap(0, to, Quaternion.identity,
-                                    HandleUtility.GetHandleSize(to) * 0.12f, EventType.Repaint);
+            Handles.Label(top + Vector3.up * (cap * 2.2f), "[" + i + "]");
         }
 
         /// <summary>Shift-click on a segment inserts a point at the click position.
@@ -1792,22 +880,13 @@ namespace UniverseCreator.Editor.Inspectors
 
             if (bestSegment < 0) return;
 
-            Undo.RecordObject(body, "Insert river node");
+            Undo.RecordObject(body, "Insert water point");
 
             int insertAt = bestSegment + 1;
             line.points.Insert(insertAt, t.InverseTransformPoint(bestPoint));
             if (line.weights != null && line.weights.Count >= insertAt)
                 line.weights.Insert(insertAt, line.WeightAt(bestSegment));
 
-            // Insert matching entries in the per-node arrays
-            if (body.nodeDepthMetres != null && body.nodeDepthMetres.Count >= insertAt)
-                body.nodeDepthMetres.Insert(insertAt, 0f);
-            if (body.nodeWidthMetres != null && body.nodeWidthMetres.Count >= insertAt)
-                body.nodeWidthMetres.Insert(insertAt, 0f);
-            if (body.nodeFloodplainMetres != null && body.nodeFloodplainMetres.Count >= insertAt)
-                body.nodeFloodplainMetres.Insert(insertAt, 0f);
-
-            SyncNodeArrays(body, line);
             selectedNodeIndex = insertAt;
 
             EditorUtility.SetDirty(body);
@@ -1830,19 +909,12 @@ namespace UniverseCreator.Editor.Inspectors
 
             // Hit-test against the SAME world point the node post is drawn at, or Delete
             // targets a different screen position than the marker the user is aiming at.
-            // For a course that is the water surface (NodeSurfacePoint), matching
-            // DrawPointHandles; for a polygon outline it is the stored point. Using the
-            // stored Y here for a course put the test a few metres below the visible post,
-            // so at a shallow camera angle the Y gap projected past the pick radius and
-            // Delete removed a neighbour or nothing.
-            bool isCourse = line == body.course;
-
             int best = -1;
             float bestDistance = PickPixels * 2f;
 
             for (int i = 0; i < line.Count; i++)
             {
-                Vector3 wp = isCourse ? body.NodeSurfacePoint(i) : t.TransformPoint(line.points[i]);
+                Vector3 wp = t.TransformPoint(line.points[i]);
                 Vector2 gui = HandleUtility.WorldToGUIPoint(wp);
                 float distance = Vector2.Distance(gui, e.mousePosition);
                 if (distance >= bestDistance) continue;
@@ -1857,12 +929,11 @@ namespace UniverseCreator.Editor.Inspectors
             e.Use();
         }
 
-        /// <summary>Removes control point <paramref name="index"/> together with its weight
-        /// and its per-node depth/width/floodplain entries, fixes the selection, marks the
-        /// body dirty and rebuilds. Shared by the scene-view Delete key and the inspector's
-        /// "Delete this node" button so the two paths can never drift apart. Refuses to drop
-        /// a shape below the minimum it needs to exist (2 points for an open course, 3 for a
-        /// closed outline) - the same floor the key path enforces.</summary>
+        /// <summary>Removes control point <paramref name="index"/> together with its weight,
+        /// fixes the selection, marks the body dirty and rebuilds. Shared by the scene-view
+        /// Delete key and the inspector's "Delete this node" button so the two paths can never
+        /// drift apart. Refuses to drop a shape below the minimum it needs to exist (2 points
+        /// for an open line, 3 for a closed outline) - the same floor the key path enforces.</summary>
         private void RemoveNodeAt(UCWaterBody body, Polyline line, int index)
         {
             if (line == null || index < 0 || index >= line.Count) return;
@@ -1874,14 +945,6 @@ namespace UniverseCreator.Editor.Inspectors
             line.points.RemoveAt(index);
             if (line.weights != null && line.weights.Count == line.points.Count + 1)
                 line.weights.RemoveAt(index);
-            if (body.nodeDepthMetres != null && body.nodeDepthMetres.Count == line.points.Count + 1)
-                body.nodeDepthMetres.RemoveAt(index);
-            if (body.nodeWidthMetres != null && body.nodeWidthMetres.Count == line.points.Count + 1)
-                body.nodeWidthMetres.RemoveAt(index);
-            if (body.nodeFloodplainMetres != null && body.nodeFloodplainMetres.Count == line.points.Count + 1)
-                body.nodeFloodplainMetres.RemoveAt(index);
-
-            SyncNodeArrays(body, line);
 
             if (selectedNodeIndex == index) selectedNodeIndex = -1;
             else if (selectedNodeIndex > index) selectedNodeIndex--;

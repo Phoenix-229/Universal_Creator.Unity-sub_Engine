@@ -2668,10 +2668,6 @@ namespace UniverseCreator.TerrainSystem
             List<IUCTerrainCarver> carvers = WaterCarveRegistry.For(o);
             if (carvers.Count == 0)
             {
-                // U-4: no water bodies this pass. Still run the river publish, so a world whose last river was just
-                // deleted has its stale reach withdrawn from the publication rather than left claiming a river that is
-                // gone. With no carvers it finds nothing to deposit and only cleans up.
-                PublishRiverProfiles(o, carvers);
                 return;
             }
 
@@ -2715,100 +2711,6 @@ namespace UniverseCreator.TerrainSystem
 
             if (moved) ReapplyCarves();
 
-            // U-4: every river has now re-fitted to the ground that just settled, so publish each one's built profile
-            // -- per-station width, water-surface level and bed level in world space -- to the RiverProfilePublication
-            // on the world object, where a city or road tool reads it to bank the river UC actually cut. Placed last so
-            // the figures are the river as finally solved this pass; it shapes no ground and does not feed the `moved`
-            // re-cut above, so publishing after ReapplyCarves is correct.
-            PublishRiverProfiles(o, carvers);
-        }
-
-        /// <summary> U-4: publishes each live river's built profile -- per-station width, water-surface level and bed
-        /// level in world space -- to the world's <see cref="RiverProfilePublication"/>, so a city or road tool banks
-        /// the river UC actually cut instead of guessing a bed from a surface height sample. Reversible and settle-safe:
-        /// deposits a reach for every live river and withdraws any reach whose river is gone, touching only the
-        /// serialised publication -- it shapes no ground and does not feed the height re-cut. Creates the component only
-        /// when there is a river to publish, so a world with no rivers never gains it from a bake; a world whose last
-        /// river was deleted has its reaches cleared. Returns how many reaches it wrote or withdrew. </summary>
-        private int PublishRiverProfiles(UniverseCreatorObject o, List<IUCTerrainCarver> carvers)
-        {
-            if (o == null) return 0;
-
-            // The live rivers this pass, each already re-fitted to the settled ground by the loop above. A level body
-            // (lake, ocean, reservoir) is not a reach -- TryBuildRiverProfile returns false for it -- and is skipped.
-            // The id scheme lives here, in the one place that also builds the "still live" set the withdrawal reads, so a
-            // deposit and its later withdrawal can never key differently. GetEntityId is stable for the body's life; a
-            // reload re-keys on the first settle, which restates the same geometry under the new id and reaps the old.
-            List<RiverReachProfile> live = null;
-            HashSet<string> liveIds = null;
-
-            for (int i = 0; carvers != null && i < carvers.Count; i++)
-            {
-                UCWaterBody body = carvers[i] as UCWaterBody;
-                if (body == null) continue;
-
-                RiverReachProfile reach;
-                try
-                {
-                    if (!body.TryBuildRiverProfile(out reach)) continue;
-                }
-                catch (System.Exception e)
-                {
-                    // One malformed river must not stop the rest from publishing -- the guard the re-fit loop uses.
-                    Debug.LogError("Universe Creator: river profile publish failed on '" +
-                                   body.name + "'. " + e.Message, body);
-                    continue;
-                }
-
-                reach.sourceId = body.GetEntityId().GetHashCode().ToString();
-
-                if (live == null) { live = new List<RiverReachProfile>(); liveIds = new HashSet<string>(); }
-                live.Add(reach);
-                liveIds.Add(reach.sourceId);
-            }
-
-            // Find the publication without creating one, so the withdrawal path can run for a world whose last river was
-            // just deleted, and a world that never had a river does not gain an empty component from a bake.
-            RiverProfilePublication pub = RiverProfilePublication.FindFor(o.gameObject);
-
-            if (live == null)
-            {
-                // No rivers this pass. Clear a publication that still holds reaches; do nothing if there is none.
-                if (pub == null || pub.Count == 0) return 0;
-                int cleared = pub.Count;
-                pub.Clear();
-                return cleared;
-            }
-
-            // At least one river, so ensure the component exists on the world object -- the same object the inbox and
-            // the provider live on, so a tool that finds one finds all three.
-            if (pub == null) pub = RiverProfilePublication.FindOrCreateFor(o.gameObject);
-
-            int changed = 0;
-
-            // WITHDRAW rivers that are gone: any published reach whose id is not live this pass. Snapshot the ids first,
-            // because Withdraw edits the list -- the same discipline the tunnel reconcile follows.
-            List<string> stale = null;
-            IReadOnlyList<RiverReachProfile> current = pub.Reaches;
-            for (int i = 0; i < current.Count; i++)
-            {
-                RiverReachProfile r = current[i];
-                if (r != null && !string.IsNullOrEmpty(r.sourceId) && !liveIds.Contains(r.sourceId))
-                {
-                    if (stale == null) stale = new List<string>();
-                    stale.Add(r.sourceId);
-                }
-            }
-            if (stale != null)
-                for (int i = 0; i < stale.Count; i++)
-                    if (pub.Withdraw(stale[i])) changed++;
-
-            // DEPOSIT every live river. Deposit replaces a reach of the same id in place and bumps the version only when
-            // the geometry actually changed, so a river restated unchanged each settle neither stacks nor churns.
-            for (int i = 0; i < live.Count; i++)
-                if (pub.Deposit(live[i])) changed++;
-
-            return changed;
         }
 
         private void ApplyChunk(UniverseCreatorObject o, Chunk c)

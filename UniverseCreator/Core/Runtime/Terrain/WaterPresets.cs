@@ -113,13 +113,13 @@ namespace UniverseCreator.TerrainSystem
             body.water.causticsEnabled = false;
         }
 
+        // River procedural tech has been torn out (channel dig / trench / course
+        // solver). WaterBodyKind.River survives as an inert kind, so this preset now
+        // writes only the appearance + flow defaults that still exist on UCWaterBody -
+        // no channel width/segments/spacing/depth, which were removed with the dig.
         private static void ApplyRiver(UCWaterBody body)
         {
             body.sizeMetres = new Vector2(300f, 300f);
-            body.widthMetres = 12f;
-            body.widthSegments = 6;
-            body.pointSpacingMetres = 6f;
-            body.channelDepthMetres = 1.5f;
             body.manningRoughness = 0.035f;
             body.maxFlowSpeed = 4f;
 

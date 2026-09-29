@@ -617,25 +617,16 @@ namespace UniverseCreator.Editor.Windows
                 {
                     if (b == null) { continue; }
 
-                    if (b.IsLevelBody)
-                    {
-                        Bounds plan;
-                        if (!b.TryGetPlanBounds(out plan)) { continue; }
-                        float surf = b.SurfaceWorldY();
-                        mapWaters.Add(new MapWater { surfaceY = surf, floorY = plan.min.y, plan = plan });
-                    }
-                    else
-                    {
-                        // A river spline. Its world course draws the line; its width sets how
-                        // thick to stamp it. Half-width, because the stamp reaches each side.
-                        List<Vector3> course = b.PreviewCourseWorld();
-                        if (course == null || course.Count < 2) { continue; }
-                        mapRivers.Add(new MapRiver
-                        {
-                            course = course,
-                            halfWidth = Mathf.Max(1f, b.widthMetres * 0.5f)
-                        });
-                    }
+                    // Only level bodies (lakes, ocean, pools) draw on the map. Rivers no
+                    // longer contribute here: the river teardown removed the solved course
+                    // (PreviewCourseWorld) and the per-station width the map used to stamp
+                    // them. mapRivers stays empty until the rebuilt river system fills it.
+                    if (!b.IsLevelBody) { continue; }
+
+                    Bounds plan;
+                    if (!b.TryGetPlanBounds(out plan)) { continue; }
+                    float surf = b.SurfaceWorldY();
+                    mapWaters.Add(new MapWater { surfaceY = surf, floorY = plan.min.y, plan = plan });
                 }
             }
 

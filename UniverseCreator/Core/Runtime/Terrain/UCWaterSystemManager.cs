@@ -558,11 +558,10 @@ namespace UniverseCreator.TerrainSystem
                 }
 
                 // EVERY NODE THAT MEASURES FROM THE SHORELINE, NOT JUST THE TWO THAT
-                // PAINT IT. The four below decide where water STANDS, and each carries
+                // PAINT IT. The nodes below decide where water STANDS, and each carries
                 // its own copy of the one elevation: the spawner ends its rivers at it
-                // and refuses lakes below it, River Network Trace stops a course at it,
-                // River Fill hands the sea's level to the reach at the mouth, Lake Fill
-                // will not flood a basin at or under it.
+                // and refuses lakes below it, Lake Fill will not flood a basin at or
+                // under it.
                 //
                 // Left out of this walk they kept whatever the user last typed while the
                 // ocean settled somewhere else entirely - so the graph carved beds and
@@ -575,22 +574,6 @@ namespace UniverseCreator.TerrainSystem
                 if (hydrology != null)
                 {
                     if (write) { hydrology.seaLevel = seaLevel; hydrology.MarkDirty(); }
-                    touched++;
-                    continue;
-                }
-
-                RiverNetworkTraceNode trace = node as RiverNetworkTraceNode;
-                if (trace != null)
-                {
-                    if (write) { trace.seaLevel = seaLevel; trace.MarkDirty(); }
-                    touched++;
-                    continue;
-                }
-
-                RiverFillNode riverFill = node as RiverFillNode;
-                if (riverFill != null)
-                {
-                    if (write) { riverFill.seaLevel = seaLevel; riverFill.MarkDirty(); }
                     touched++;
                     continue;
                 }
@@ -878,7 +861,6 @@ namespace UniverseCreator.TerrainSystem
             }
 
             // 2. Otherwise, what kinds of water did the graph ask for?
-            bool wantRivers = false;
             bool wantLakes = false;
             bool wantOcean = false;
 
@@ -896,7 +878,6 @@ namespace UniverseCreator.TerrainSystem
             // First of each kind wins. Two Lake Fills disagreeing about sea level is a
             // graph that already contradicts itself, and picking the later one would
             // only make which contradiction wins depend on node creation order.
-            RiverNetworkTraceNode trace = null;
             LakeFillNode lakeFill = null;
             OceanLevelNode oceanLevel = null;
 
@@ -905,16 +886,7 @@ namespace UniverseCreator.TerrainSystem
                 Generator node = graph.nodes[i];
                 if (node == null || !reached.Contains(node.id)) continue;
 
-                // River Carve and Water Bank Seat are deliberately NOT here. They shape
-                // ground for water decided elsewhere; on their own they say nothing
-                // about whether any river exists, and a carve fed by a hand-drawn mask
-                // must not conjure river objects the user never asked for.
-                if (node is RiverNetworkTraceNode || node is RiverFillNode)
-                {
-                    wantRivers = true;
-                    if (trace == null) trace = node as RiverNetworkTraceNode;
-                }
-                else if (node is LakeFillNode)
+                if (node is LakeFillNode)
                 {
                     wantLakes = true;
                     if (lakeFill == null) lakeFill = (LakeFillNode)node;
@@ -926,7 +898,7 @@ namespace UniverseCreator.TerrainSystem
                 }
             }
 
-            if (!wantRivers && !wantLakes && !wantOcean) return null;   // 3.
+            if (!wantLakes && !wantOcean) return null;   // 3.
 
             HydrologyNode native = new HydrologyNode();
 
@@ -941,16 +913,9 @@ namespace UniverseCreator.TerrainSystem
                 native.lakeOutletChunkPercentage = 0f;
             }
 
-            // The synthesized spawner shares the reached trace's (or lake fill's)
-            // drainage lattice, so the lake solve runs on the same grid the author's
-            // water nodes did. The old channel-head/max-channel copy went with the
-            // spawner's River Mask - the spawner no longer emits one, and the channel
-            // network is decided on the River Network Trace itself.
-            if (trace != null)
-            {
-                native.drainageResolution = trace.drainageResolution;
-            }
-            else if (lakeFill != null)
+            // The synthesized spawner shares the reached lake fill's drainage lattice,
+            // so the lake solve runs on the same grid the author's water nodes did.
+            if (lakeFill != null)
             {
                 native.drainageResolution = lakeFill.drainageResolution;
             }
@@ -968,7 +933,6 @@ namespace UniverseCreator.TerrainSystem
             // the ocean is actually placed - ApplyToGraph then pushes its settled surface
             // back over every one of them, this node included.
             if (oceanLevel != null) native.seaLevel = oceanLevel.seaLevel;
-            else if (trace != null) native.seaLevel = trace.seaLevel;
             else if (lakeFill != null) native.seaLevel = lakeFill.seaLevel;
 
             native.generateOcean = wantOcean;

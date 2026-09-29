@@ -66,75 +66,6 @@ namespace UniverseCreator.TerrainSystem
 
         public BedProfile profile = BedProfile.LakeBasin;
 
-        /// <summary>True when the shape is a course with a width, false when it is a
-        /// closed ring. The two need different distance math, and nothing else.</summary>
-        public bool isCourse;
-
-        // ---- Course bodies (rivers) -----------------------------------------
-        // Parallel lists rather than a struct list: Unity serializes them without a
-        // wrapper type, and the carve reads them by index in a tight loop.
-
-        public List<Vector3> coursePoints = new List<Vector3>();
-        public List<float> courseWidths = new List<float>();
-        public List<float> courseDepths = new List<float>();
-        public List<float> courseSurfaceY = new List<float>();
-
-        // ---- Confining banks (§14: the gorge wall) --------------------------
-        //
-        //  The carve is cut-only everywhere else, on purpose: raising ground would
-        //  build a dam around every pond. This is the one deliberate exception, and
-        //  it is river-course only and gated hard so it can never be that dam.
-        //
-        //  Where a reach runs across a steep slope, the low bank sits BELOW the
-        //  water and there is nothing to hold the river in - the reported hanging
-        //  water. Real rivers on such ground run in a confined gorge whose wall
-        //  stands above the water. courseConfineY carries, per node, the elevation
-        //  the low bank must be RAISED to (water surface + freeboard), or a value at
-        //  or below the surface to mean "no confinement here". It is filled by
-        //  UCWaterBody only where the measured cross-valley angle surpasses the
-        //  threshold AND a bank is genuinely below the water - never otherwise.
-
-        /// <summary>Set true to let a river raise a confining bank on a steep cross
-        /// slope (§14). Off by default so the carve stays cut-only unless a river
-        /// actually needs a gorge wall to hold its water.</summary>
-        public bool confineBanks = false;
-
-        /// <summary>Per-course-node elevation the low bank is raised to where the reach
-        /// is confined - water surface plus freeboard. Entries at or below the local
-        /// surface mean "not confined here". Empty means no confinement anywhere.</summary>
-        public List<float> courseConfineY = new List<float>();
-
-        /// <summary>
-        /// §33 Fix E - slope-dependent dilated carving. Per-course-node horizontal
-        /// dilation factor (1 + alpha*tan(theta)) computed from the local CROSS-VALLEY
-        /// slope by UCWaterBody, one entry per course point. 1 = flat valley floor (the
-        /// trench stays narrow and precise); larger on a steep reach, where the valley
-        /// band fans out to turn a vertical slot into a graded V-canyon. Clamped to
-        /// <see cref="ValleyWidenMax"/> so a near-vertical probe can never request an
-        /// unbounded carve. Empty (or 1 everywhere) reproduces the pre-§33 shape exactly,
-        /// so this is inert unless UCWaterBody actually measured a steep reach.
-        /// </summary>
-        public List<float> courseValleyWiden = new List<float>();
-
-        /// <summary>
-        /// REFINEMENT #5 C1 - READ, DO NOT FLATTEN. Per-course-node "read fraction": 1 where
-        /// the station sits in an authored trench the river only fills (BANKED, read-only),
-        /// 0 where the river digs its own channel. HeightAt lerps the CHANNEL carve (the bed
-        /// cut and the signed&lt;bevel bank round-off) toward the existing ground by this
-        /// value, so a banked reach carves NOTHING - the water fills the terrain that is
-        /// already there and neither the bank crest nor the trench walls are reshaped. The
-        /// opt-in floodplain valley (ValleySag/CorridorCap, beyond the bank) is deliberately
-        /// left OUTSIDE this blend so a floodplain still grades beside a real trench. Empty
-        /// (or 0 everywhere) reproduces the pre-#5 carve exactly, so this is inert in dig
-        /// mode and on any river with no read station.
-        /// </summary>
-        public List<float> courseRead = new List<float>();
-
-        /// <summary>Hard cap on the §33 Fix E dilation factor. tan(theta) diverges toward
-        /// the vertical, so without a ceiling a cliff reach would ask for an effectively
-        /// infinite trench; 6x the base valley reach is already a broad canyon.</summary>
-        public const float ValleyWidenMax = 6f;
-
         // ---- Ring bodies (lakes, oceans, pools) -----------------------------
 
         public List<Vector3> ringPoints = new List<Vector3>();
@@ -145,9 +76,9 @@ namespace UniverseCreator.TerrainSystem
         /// scalar. When filled it makes the basin RUGGED the way a real lake is: a
         /// border node over the deep trough asks for a large depth, a node on a
         /// wave-cut shelf asks for a small one, and the bed eases between them along
-        /// the shore. This is the lake counterpart to <see cref="courseDepths"/>: the
-        /// dish profile still runs from shore to centre, but its full-depth target is
-        /// now interpolated round the ring instead of being one number everywhere.
+        /// the shore. The dish profile still runs from shore to centre, but its
+        /// full-depth target is now interpolated round the ring instead of being one
+        /// number everywhere.
         /// </summary>
         public List<float> ringDepths = new List<float>();
 
@@ -353,12 +284,7 @@ namespace UniverseCreator.TerrainSystem
 
         public bool HasShape
         {
-            get
-            {
-                return isCourse
-                    ? (coursePoints != null && coursePoints.Count >= 2)
-                    : (ringPoints != null && ringPoints.Count >= 3);
-            }
+            get { return ringPoints != null && ringPoints.Count >= 3; }
         }
 
         /// <summary>How far outside the shape this dig can still change a height. One
@@ -370,7 +296,6 @@ namespace UniverseCreator.TerrainSystem
         private float OutsideReach()
         {
             float corridorReach = Mathf.Max(0f, corridorMetres);
-            if (isCourse) corridorReach *= ValleyWidenMax;
             return Mathf.Max(0f, bevelMetres) + corridorReach;
         }
 
@@ -394,7 +319,7 @@ namespace UniverseCreator.TerrainSystem
         /// after it fills the lists, so AffectsRegion never lies.</summary>
         public void RecomputeBounds()
         {
-            List<Vector3> pts = isCourse ? coursePoints : ringPoints;
+            List<Vector3> pts = ringPoints;
             if (pts == null || pts.Count == 0)
             {
                 worldBounds = new Bounds(Vector3.zero, Vector3.zero);
@@ -418,23 +343,10 @@ namespace UniverseCreator.TerrainSystem
             Bounds b = new Bounds();
             b.SetMinMax(min, max);
 
-            // A course is a line, so its own bounds are zero-width. Widen by the
-            // widest half-width it carries or the ring gets clipped at its ends.
-            float pad = HalfWidthMax() + OutsideReach() + 2f;
+            float pad = OutsideReach() + 2f;
             b.Expand(new Vector3(pad * 2f, 4f, pad * 2f));
 
             worldBounds = b;
-        }
-
-        private float HalfWidthMax()
-        {
-            if (!isCourse || courseWidths == null) return 0f;
-
-            float w = 0f;
-            for (int i = 0; i < courseWidths.Count; i++)
-                if (courseWidths[i] > w) w = courseWidths[i];
-
-            return w * 0.5f;
         }
 
         // =====================================================================
@@ -494,7 +406,7 @@ namespace UniverseCreator.TerrainSystem
             // Paid only where it is needed. A body whose narrowest feature is already a
             // couple of posts across cannot alias, so it keeps the single-sample path and
             // its result is unchanged - lakes, oceans and wide rivers included.
-            float narrowest = NarrowestFeatureMetres();
+            float narrowest = float.MaxValue;
             int ss = Mathf.Clamp(Mathf.CeilToInt(2f * mps / Mathf.Max(0.5f, narrowest)), 1, 3);
 
             // The dig is computed into a scratch window first, then a bounded low-pass
@@ -564,14 +476,7 @@ namespace UniverseCreator.TerrainSystem
                 {
                     int w = (lz - z0) * ww + (lx - x0);
 
-                    // §33 Fix A - Minimum Penetration Constraint (strict subtractive).
-                    // A river course may NEVER add height: the only sanctioned raise is the
-                    // opt-in confining wall (confineBanks). With it off, hard-clamp the
-                    // composited result to the original ground so that no branch, and no
-                    // smoothing pass, can ever build a ridge or dam out of raw terrain -
-                    // corrected = min(original, blendedTrench), enforced once at the sink.
                     float dv = dugBuf[w];
-                    if (isCourse && !confineBanks) dv = Mathf.Min(dv, origBuf[w]);
 
                     // Only ever assigned, never accumulated. Two applications of the
                     // same dig to the same terrain give the same answer, which is
@@ -653,35 +558,10 @@ namespace UniverseCreator.TerrainSystem
         {
             if (!enabled || !HasShape || bevelOnly) return false;
 
-            if (isCourse)
-            {
-                float signed, s, d, r, c, vw, rd;
-                if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out r, out c, out vw, out rd)) return false;
-                return signed > 0f;
-            }
-
             if (!IsIsland(worldX, worldZ))
                 return RingSignedDistance(worldX, worldZ) > 0f;
 
             return false;
-        }
-
-        /// <summary>
-        /// The narrowest thing this dig has to draw, in metres, used to decide whether a
-        /// point sample per post can resolve it. For a course it is the slimmest channel
-        /// width along the run; a ring body (lake, pool, ocean) has no feature finer than
-        /// its own footprint, so it never needs sub-sampling and reports a large value.
-        /// </summary>
-        private float NarrowestFeatureMetres()
-        {
-            if (!isCourse || courseWidths == null || courseWidths.Count == 0)
-                return float.MaxValue;
-
-            float min = float.MaxValue;
-            for (int i = 0; i < courseWidths.Count; i++)
-                if (courseWidths[i] > 0.05f && courseWidths[i] < min) min = courseWidths[i];
-
-            return min == float.MaxValue ? maxDepthMetres * 2f : min;
         }
 
         /// <summary>
@@ -709,27 +589,15 @@ namespace UniverseCreator.TerrainSystem
             float localSurfaceY;
             float localDepth;
             float localRun;
-            float localConfineY = float.NegativeInfinity;
             float localValleyWiden = 1f;
-            float localRead = 0f;
 
-            if (isCourse)
-            {
-                if (!CourseFrame(worldX, worldZ, out signed, out localSurfaceY,
-                                 out localDepth, out localRun, out localConfineY,
-                                 out localValleyWiden, out localRead))
-                    return existingY;
-            }
-            else
-            {
-                signed = RingSignedDistance(worldX, worldZ);
-                localSurfaceY = surfaceY;
-                // Per-ring-node depth when authored (rugged basin), else the flat
-                // scalar. The dish profile below still shapes shore-to-centre; this
-                // only sets how deep the centre it eases to actually is, per bearing.
-                localDepth = RingDepthAt(worldX, worldZ);
-                localRun = shoreRunMetres;
-            }
+            signed = RingSignedDistance(worldX, worldZ);
+            localSurfaceY = surfaceY;
+            // Per-ring-node depth when authored (rugged basin), else the flat
+            // scalar. The dish profile below still shapes shore-to-centre; this
+            // only sets how deep the centre it eases to actually is, per bearing.
+            localDepth = RingDepthAt(worldX, worldZ);
+            localRun = shoreRunMetres;
 
             // ---- OUTSIDE: the rounded bank, then the corridor ----------------
             if (signed > 0f)
@@ -777,25 +645,9 @@ namespace UniverseCreator.TerrainSystem
                     // surface))). Both branches of that collapse to the same two values
                     // as the line below, so the extra clamps only made the rule harder
                     // to read than it is.
-                    // REFINEMENT #5 C1: the bank round-off is part of the CHANNEL carve -
-                    // on a banked (read-only) station it would shave the authored crest
-                    // down toward the waterline, which is the "flattens the trench" fault.
-                    // localRead eases it fully back to the untouched ground there (1 =
-                    // read, do not cut the bank); it is exactly Min(existingY, blended) on
-                    // a dig reach. The valley/corridor below is left OUTSIDE this blend so
-                    // an opt-in floodplain still grades beside a read trench.
-                    outside = Mathf.Lerp(Mathf.Min(existingY, blended), existingY, localRead);
+                    outside = Mathf.Min(existingY, blended);
 
                 }
-
-                // THE VALLEY. Lowers a band either side of the bank toward the
-                // floodplain, before the ceiling below shaves what stands too high.
-                // Two separate questions: this one is how low the valley floor is,
-                // that one is how fast the valley's sides may rise.
-                outside = ValleySag(signed, bevel, corridor, localSurfaceY,
-                                    localDepth, localRun, localValleyWiden, outside);
-
-                outside = ConfineWall(signed, bevel, localConfineY, outside);
 
                 return CorridorCap(signed, bevel, corridor, localSurfaceY, outside);
             }
@@ -805,7 +657,7 @@ namespace UniverseCreator.TerrainSystem
             // untouched so the hill survives and the surface builder (reading this same
             // function) stays dry over it, and the water routes around it. Only rings
             // carry islands; a course has none.
-            if (!isCourse && IsIsland(worldX, worldZ)) return existingY;
+            if (IsIsland(worldX, worldZ)) return existingY;
 
             float inward = -signed;
 
@@ -817,7 +669,7 @@ namespace UniverseCreator.TerrainSystem
             // a long wade, which is what every real lake does and what a plain
             // distance-from-shore depth cannot. Rivers skip it: a channel's profile
             // across its width really is close to symmetric.
-            if (!isCourse) t2 = WarpBasinFraction(t2, worldX, worldZ);
+            t2 = WarpBasinFraction(t2, worldX, worldZ);
 
             float frac = WaterBedMath.DepthFraction(profile, t2, shelfFraction, bankExponent);
             float depth = Mathf.Max(minDepthMetres, localDepth * frac);
@@ -846,28 +698,8 @@ namespace UniverseCreator.TerrainSystem
             bed = Mathf.Min(bed, localSurfaceY - minDepthMetres);
 
             // Deepening only. A bed is a hole, and lifting the ground to meet a
-            // shallow bed would fill a valley the river happens to cross.
-            //
-            // REFINEMENT #6 B1 (supersedes R#5 C1's absolute read no-op): INSIDE the
-            // waterline the ground can NEVER stand above the water surface - anything that
-            // does is procedural-noise BURIAL, not a bank (a bank is signed>0, OUTSIDE the
-            // waterline, and is handled by the bevel + CorridorCap above). So on a read reach
-            // we still do NOT impose the parabola bed (that was the R#4 "flattens the trench"
-            // fault), but we DO cut a gorge: clamp to just-submerged (surfaceY - minDepth).
-            //
-            //   authored trench, floor BELOW readFloor  -> Min keeps existingY: the trench is
-            //                                               READ, not reshaped (R#4 preserved).
-            //   noise dune, ground ABOVE readFloor       -> Min cuts it to the waterline: the
-            //                                               river is UN-BURIED (R#6 Defect B).
-            //
-            // readFloor tracks the monotonically-descending surface (EnforceDownhill), so the
-            // exposed channel top always falls source->mouth - the bed no longer climbs with
-            // the noise. Sea-safe: surfaceY >= sea (EnforceDownhill + ApplyCoastalTaper), so
-            // this never gouges below sea level; and the tapered coastal mouth is a DIG reach
-            // (localRead 0), which keeps its own bed. DIG reach is unchanged: Min(existingY,bed).
-            float readFloor = localSurfaceY - Mathf.Max(0.01f, minDepthMetres);
-            float floorTarget = Mathf.Lerp(bed, readFloor, localRead);
-            return Mathf.Min(existingY, floorTarget);
+            // shallow bed would fill a valley the body happens to cross.
+            return Mathf.Min(existingY, bed);
         }
 
         /// <summary>
@@ -909,145 +741,6 @@ namespace UniverseCreator.TerrainSystem
             if (current <= cap) return current;
 
             return Mathf.Lerp(current, cap, strength);
-        }
-
-        /// <summary>
-        /// Lowers the ground either side of the bank toward the river's floodplain, and
-        /// hands it back untouched everywhere the valley does not reach.
-        /// </summary>
-        /// <remarks>
-        /// Every bound is in channel widths or channel depths - see the constants above -
-        /// so the same rule gives a brook a scrape and a trunk river a broad trough
-        /// without a size table anywhere.
-        ///
-        /// Three properties are load-bearing and each one is a fault that was visible
-        /// before it held:
-        ///
-        ///   Zero at BOTH ends of the band. At the waterline the sag is nothing, so the
-        ///   ground still meets the water at exactly surface level and there is no lip
-        ///   to stand on. At the far edge it is nothing again, so the valley meets the
-        ///   untouched hillside with no crease along a line.
-        ///
-        ///   Lower only, never raise. Ground already below the floodplain is a backwater
-        ///   or a side channel; filling it would be this function inventing land the
-        ///   generator never made.
-        ///
-        ///   Never below the water. The floodplain is dry land at normal flow, held a
-        ///   fraction of the channel's depth clear of the surface. Without that the
-        ///   trough bottoms out at waterline and the valley reads as marsh.
-        /// </remarks>
-        private float ValleySag(float signed, float bevel, float corridor,
-                                float localSurfaceY, float localDepth, float localRun,
-                                float widen, float current)
-        {
-            // Rings never get one: a lake's valley is the basin it sits in, and its
-            // shore is the bevel. This is the river path only.
-            if (!valley || !isCourse) return current;
-
-            // 0 corridor is off, and off has to mean exactly the old behaviour.
-            if (corridor <= 1e-4f) return current;
-
-            // No bank, no valley. A river built with the bevel at 0 is a cut channel by
-            // request - a canal - and the sag would have nowhere to ease in from, so it
-            // would put a step at the waterline instead of a bank.
-            if (bevel <= 1e-4f) return current;
-
-            float strength = Mathf.Clamp01(corridorStrength);
-            if (strength <= 1e-4f) return current;
-
-            // Big rivers only, gated on the LOCAL width, which is what lets one river
-            // run in a notch at its head and a floodplain at its mouth. §33 Fix E: a
-            // steep reach reads as a wider river for this onset gate (width *= widen), so
-            // the graded V-valley also engages for a narrow channel that is forced across
-            // a slope - the water-slide case. On flat ground widen==1 and this is the
-            // unchanged big-river behaviour.
-            float width = Mathf.Max(0f, localRun) * 2f * Mathf.Max(1f, widen);
-            float size = Mathf.InverseLerp(ValleyOnsetWidthMetres, ValleyFullWidthMetres, width);
-            if (size <= 1e-4f) return current;
-
-            size = Mathf.SmoothStep(0f, 1f, size);
-
-            float band = bevel + Mathf.Min(corridor, width * ValleyBandWidths);
-            if (signed >= band) return current;
-
-            // REFINEMENT #5 C5 - the floodplain is a NATURAL valley beside the river, NOT a
-            // flat plane and NOT anything that touches the bank. Two rules the user set:
-            //
-            //   The BANK is never pulled. signed <= bevel is the bank round-off (and, in read
-            //   mode, the authored crest the trench already holds); the sag holds off entirely
-            //   there so the crest keeps its height. The old code ramped signed/bevel INTO the
-            //   bank, which dragged the crest down toward the floodplain ("it does not touch
-            //   the river bank" - the reported fault) - removed.
-            //
-            //   The floor is a graded scoop, not a table. A single smooth lobe rises from
-            //   nothing at the bank edge, deepens through the middle of the floodplain band,
-            //   and eases back to nothing at the untouched hillside. Because it reaches the
-            //   floor elevation only at its crest and pulls partway everywhere else, the
-            //   ground keeps its own undulation - a valley, not the dead-level plain the old
-            //   held-full sole stamped ("not flatten the terrain to be equally level"). It
-            //   still targets an absolute floor and eases toward it (lower-only), so on high
-            //   ground it excavates a real valley rather than leaving two hills.
-            if (signed <= bevel) return current;                         // bank band untouched
-
-            float u = Mathf.Clamp01((signed - bevel) / Mathf.Max(1e-4f, band - bevel));
-            float shape = Mathf.Clamp01(Mathf.Sin(Mathf.PI * u));        // 0 at bank, 0 at hillside, peak mid-band
-
-            float depth = Mathf.Max(0f, localDepth);
-
-            // The valley floor: a fraction of the channel's depth above the water so the
-            // floodplain is dry land at normal flow. No bank ramp-in now - the bank band above
-            // is excluded outright, so the floor is simply the floodplain elevation.
-            float floor = localSurfaceY + depth * ValleyFreeboardDepths * size;
-
-            // Pull the ground TOWARD that floor - do not subtract a fixed trough from it.
-            // The old code lowered the band by one channel depth, which for an alluvial
-            // river is only a metre or two: where the surrounding ground stood higher
-            // than that, the scrape could not reach the floodplain and the rise was left
-            // reading as two hills with the river slotted between them (the reported
-            // fault). Targeting the floor elevation and easing toward it by strength x
-            // shape excavates a real valley however high the ground stands, and still
-            // fades to nothing at both ends of the band (shape) and never touches the bank
-            // (excluded above), so there is no crease and no lip. Lower only:
-            // ground already at or below the floodplain is a backwater the generator
-            // made, not ours to fill.
-            float pull = Mathf.Clamp01(size * strength * shape);
-            float target = Mathf.Lerp(current, floor, pull);
-
-            return Mathf.Min(current, target);
-        }
-
-        /// <summary>
-        /// The confining wall (§14). The one place the carve is allowed to RAISE ground,
-        /// and only ever a river's low bank on a steep cross slope, because the water has
-        /// no valley to sit in there and would otherwise hang over the falling ground.
-        /// UCWaterBody decided this - it passed a target elevation (water surface plus
-        /// freeboard) only for stations where the two-bank test found a genuine slope and
-        /// a bank below the water. Here that target is simply held up across the bank
-        /// band, faded to nothing at the band edge so it eases into the hillside with no
-        /// crease.
-        ///
-        /// Raise ONLY. Where the ground already stands above the target this does nothing
-        /// (Max discards it), so it can never cap a hill or dam a pond - it only fills the
-        /// gap on the low side that the cut-only rule cannot.
-        /// </summary>
-        private float ConfineWall(float signed, float bevel, float confineY, float current)
-        {
-            if (!confineBanks || !isCourse) return current;
-            if (float.IsNegativeInfinity(confineY)) return current;   // unconfined station
-            if (confineY <= current) return current;                  // ground already holds it
-
-            // Only across the bank band, where the wall belongs; beyond the bevel it is
-            // the floodplain/hillside and the sag owns the shape.
-            float band = Mathf.Max(1e-4f, bevel);
-            if (signed >= band) return current;
-
-            // Full at the waterline, easing to nothing at the band edge, so the wall
-            // stands right beside the water and blends out into the ground.
-            float t = Mathf.Clamp01(signed / band);
-            float k = Mathf.SmoothStep(1f, 0f, t);
-
-            float raised = Mathf.Lerp(current, confineY, k);
-            return Mathf.Max(current, raised);
         }
 
         /// <summary>
@@ -1136,161 +829,6 @@ namespace UniverseCreator.TerrainSystem
         //  part of the carve that knows what shape the body is, which is what keeps
         //  HeightAt free of per-kind branching.
         // =====================================================================
-
-        /// <summary>
-        /// Nearest point on the course, and what the river is doing there. Returns
-        /// false when the sample is out of reach entirely, so the caller can leave
-        /// the terrain alone without computing a profile.
-        ///
-        /// signedDistance is metres from the water's edge: negative in the channel,
-        /// positive on the bank. Width, depth and surface elevation are interpolated
-        /// along the segment, so a river that widens and deepens down its length does
-        /// so smoothly rather than in steps at each spline point.
-        /// </summary>
-        private bool CourseFrame(float worldX, float worldZ, out float signedDistance,
-                                 out float localSurfaceY, out float localDepth, out float localRun,
-                                 out float localConfineY, out float localValleyWiden,
-                                 out float localRead)
-        {
-            signedDistance = 0f;
-            localSurfaceY = surfaceY;
-            localDepth = maxDepthMetres;
-            localRun = 1f;
-            localConfineY = float.NegativeInfinity;
-            localValleyWiden = 1f;
-            localRead = 0f;
-
-            int count = coursePoints.Count;
-            if (count < 2) return false;
-
-            float bestSqr = float.MaxValue;
-            int bestSeg = -1;
-            float bestT = 0f;
-
-            for (int i = 0; i < count - 1; i++)
-            {
-                Vector3 a = coursePoints[i];
-                Vector3 b = coursePoints[i + 1];
-
-                float dx = b.x - a.x;
-                float dz = b.z - a.z;
-
-                float lenSqr = dx * dx + dz * dz;
-                if (lenSqr < 1e-8f) continue;
-
-                float t = ((worldX - a.x) * dx + (worldZ - a.z) * dz) / lenSqr;
-                t = Mathf.Clamp01(t);
-
-                float px = a.x + dx * t;
-                float pz = a.z + dz * t;
-
-                float ox = worldX - px;
-                float oz = worldZ - pz;
-                float sqr = ox * ox + oz * oz;
-
-                if (sqr < bestSqr)
-                {
-                    bestSqr = sqr;
-                    bestSeg = i;
-                    bestT = t;
-                }
-            }
-
-            if (bestSeg < 0) return false;
-
-            float distance = Mathf.Sqrt(bestSqr);
-
-            float wA = WidthAt(bestSeg);
-            float wB = WidthAt(bestSeg + 1);
-            float halfWidth = Mathf.Max(0.05f, Mathf.Lerp(wA, wB, bestT) * 0.5f);
-
-            // Nothing beyond the bank and its corridor is this river's business.
-            // OutsideReach() already opens the corridor to the §33 Fix E maximum for a
-            // course, so a sample the fanned V-valley might touch is admitted; the actual
-            // per-node widen is interpolated below and applied to the shape. Admitting a
-            // few unwidened samples only costs a HeightAt that returns existingY.
-            if (distance > halfWidth + OutsideReach()) return false;
-
-            localDepth = Mathf.Lerp(DepthAt(bestSeg), DepthAt(bestSeg + 1), bestT);
-            localSurfaceY = Mathf.Lerp(SurfaceAt(bestSeg), SurfaceAt(bestSeg + 1), bestT);
-
-            // Confine target: only when both ends carry one, so a reach that is
-            // confined at one node and open at the next does not smear a phantom wall
-            // across the open node. Either end unconfined (NegInf) -> unconfined here.
-            float cA = ConfineYAt(bestSeg);
-            float cB = ConfineYAt(bestSeg + 1);
-            localConfineY = (float.IsNegativeInfinity(cA) || float.IsNegativeInfinity(cB))
-                ? float.NegativeInfinity
-                : Mathf.Lerp(cA, cB, bestT);
-
-            // §33 Fix E dilation, interpolated along the segment so the canyon fans in and
-            // out smoothly rather than stepping at each node. Both accessors clamp, so this
-            // is always >= 1 and <= ValleyWidenMax.
-            localValleyWiden = Mathf.Lerp(WidenAt(bestSeg), WidenAt(bestSeg + 1), bestT);
-
-            // REFINEMENT #5 C1: the read fraction, interpolated so a run that ramps from a
-            // dug flat into a banked trench eases the carve out to nothing rather than
-            // stepping - the seam between "dig here" and "read the trench" disappears.
-            localRead = Mathf.Lerp(ReadAt(bestSeg), ReadAt(bestSeg + 1), bestT);
-
-            // A channel is deepest at its middle, so the run from bank to deepest
-            // point is half the width.
-            localRun = halfWidth;
-
-            signedDistance = distance - halfWidth;
-            return true;
-        }
-
-        private float WidthAt(int i)
-        {
-            if (courseWidths == null || courseWidths.Count == 0) return 12f;
-            return courseWidths[Mathf.Clamp(i, 0, courseWidths.Count - 1)];
-        }
-
-        private float DepthAt(int i)
-        {
-            if (courseDepths == null || courseDepths.Count == 0) return maxDepthMetres;
-            return courseDepths[Mathf.Clamp(i, 0, courseDepths.Count - 1)];
-        }
-
-        private float SurfaceAt(int i)
-        {
-            if (courseSurfaceY == null || courseSurfaceY.Count == 0) return surfaceY;
-            return courseSurfaceY[Mathf.Clamp(i, 0, courseSurfaceY.Count - 1)];
-        }
-
-        /// <summary>The §33 Fix E dilation factor at node i (>= 1), or 1 where the list is
-        /// empty/short - so "no data" reads as "no widening" and the shape is unchanged.
-        /// Clamped to <see cref="ValleyWidenMax"/> at read time so a stale large value from
-        /// serialisation can never blow up the carve.</summary>
-        private float WidenAt(int i)
-        {
-            if (courseValleyWiden == null || courseValleyWiden.Count == 0) return 1f;
-            float f = courseValleyWiden[Mathf.Clamp(i, 0, courseValleyWiden.Count - 1)];
-            if (f < 1f || float.IsNaN(f)) return 1f;
-            return Mathf.Min(f, ValleyWidenMax);
-        }
-
-        /// <summary>REFINEMENT #5 C1 - the read fraction at node i (0 = dig, 1 = banked/
-        /// read-only), or 0 where the list is empty or short - so "no data" reads as "carve
-        /// as normal" and the pre-#5 shape is unchanged. Clamped to [0,1].</summary>
-        private float ReadAt(int i)
-        {
-            if (courseRead == null || courseRead.Count == 0) return 0f;
-            float f = courseRead[Mathf.Clamp(i, 0, courseRead.Count - 1)];
-            if (float.IsNaN(f)) return 0f;
-            return Mathf.Clamp01(f);
-        }
-
-        /// <summary>The elevation the low bank is confined to at node i, or negative
-        /// infinity where the list is empty or the node is unconfined - a value the
-        /// raise below always discards, so "no data" reads as "no confinement".</summary>
-        private float ConfineYAt(int i)
-        {
-            if (!confineBanks || courseConfineY == null || courseConfineY.Count == 0)
-                return float.NegativeInfinity;
-            return courseConfineY[Mathf.Clamp(i, 0, courseConfineY.Count - 1)];
-        }
 
         /// <summary>
         /// Signed distance to a closed ring: negative inside, positive outside, in
@@ -1418,13 +956,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public float SurfaceYAt(float worldX, float worldZ)
         {
-            if (!isCourse) return surfaceY;
-
-            float signed, s, d, run, c, vw, rd;
-            if (!CourseFrame(worldX, worldZ, out signed, out s, out d, out run, out c, out vw, out rd))
-                return surfaceY;
-
-            return s;
+            return surfaceY;
         }
 
         /// <summary>
@@ -1445,13 +977,6 @@ namespace UniverseCreator.TerrainSystem
 
         public void Clear()
         {
-            if (coursePoints != null) coursePoints.Clear();
-            if (courseWidths != null) courseWidths.Clear();
-            if (courseDepths != null) courseDepths.Clear();
-            if (courseSurfaceY != null) courseSurfaceY.Clear();
-            if (courseConfineY != null) courseConfineY.Clear();
-            if (courseValleyWiden != null) courseValleyWiden.Clear();
-            if (courseRead != null) courseRead.Clear();
             if (ringPoints != null) ringPoints.Clear();
             if (ringDepths != null) ringDepths.Clear();
 
@@ -1465,11 +990,7 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Total shape points, for the inspector readout.</summary>
         public int PointCount
         {
-            get
-            {
-                if (isCourse) return coursePoints != null ? coursePoints.Count : 0;
-                return ringPoints != null ? ringPoints.Count : 0;
-            }
+            get { return ringPoints != null ? ringPoints.Count : 0; }
         }
     }
 }

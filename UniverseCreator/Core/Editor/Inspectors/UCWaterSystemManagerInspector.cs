@@ -134,11 +134,6 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
-            if (ActionButton(new GUIContent("River (Spline)", "A course you drag in the " +
-                    "scene view. Flow speed comes from the gradient it falls down."),
-                    UCInspectorUI.ButtonBlue, 26))
-                Create(manager, UniverseCreatorMenus.WaterPreset.River);
-
             if (ActionButton(new GUIContent("Pool", "A small flat-floored basin. Reads " +
                     "its own floor depth rather than the terrain, so it works indoors."),
                     UCInspectorUI.ButtonBlue, 26))

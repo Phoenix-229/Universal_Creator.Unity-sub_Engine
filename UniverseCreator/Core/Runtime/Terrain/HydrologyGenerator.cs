@@ -8,6 +8,12 @@ namespace UniverseCreator.TerrainSystem
 {
     public static class HydrologyGenerator
     {
+        // A terrain height sampler in world space: "what is the ground height at (x, z)".
+        // Lake and ocean solving are handed one of these rather than a Terrain array, so
+        // there is a single copy of the "which terrain owns this point" logic. This lives
+        // here (not in any river file) because it is shared, neutral water math.
+        public delegate float GroundSampler(float worldX, float worldZ);
+
         // The "nothing to build - targets already met" line is genuine the first time
         // it explains why a Generate produced no water, but the edit-mode chunk driver
         // pumps GenerateFromNode on a loop, so left ungated it reprints on every pump
@@ -270,7 +276,7 @@ namespace UniverseCreator.TerrainSystem
             // the lake contour, the drainage solve, the valley fit - is handed this one
             // delegate rather than a Terrain array, so there is no second copy of the
             // "which terrain owns this point" logic.
-            RiverCourseSolver.GroundSampler ground = delegate (float x, float z)
+            GroundSampler ground = delegate (float x, float z)
             {
                 return GetHeightAt(terrains, x, z);
             };
@@ -928,7 +934,7 @@ namespace UniverseCreator.TerrainSystem
         /// polygon test in BuildLevelBody and the lake falls back to filling its whole
         /// bounding box - the square hole.
         /// </summary>
-        public static Polyline SolveLakeContour(RiverCourseSolver.GroundSampler ground,
+        public static Polyline SolveLakeContour(GroundSampler ground,
                                                 Bounds bounds, Vector3 centre,
                                                 out float fillLevelMetres,
                                                 out float areaSquareMetres)
@@ -1018,7 +1024,7 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>Ground height on a square grid of cell centres. Outside the world
         /// reads as infinitely high, which is the wall the water stops at.</summary>
-        private static float[] SampleLakeGrid(RiverCourseSolver.GroundSampler ground,
+        private static float[] SampleLakeGrid(GroundSampler ground,
                                               Bounds bounds,
                                               float originX, float originZ,
                                               float cell, int n)

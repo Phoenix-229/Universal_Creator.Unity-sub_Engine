@@ -80,9 +80,6 @@ namespace UniverseCreator.Editor
         [MenuItem("GameObject/3D Object/Universe Creator/Water/Lake", false, 31)]
         private static void CreateLakeMenu() { SpawnWater(WaterPreset.Lake, null); }
 
-        [MenuItem("GameObject/3D Object/Universe Creator/Water/River (Spline)", false, 32)]
-        private static void CreateRiverMenu() { SpawnWater(WaterPreset.River, null); }
-
         [MenuItem("GameObject/3D Object/Universe Creator/Water/Pool", false, 33)]
         private static void CreatePoolMenu() { SpawnWater(WaterPreset.Pool, null); }
 
@@ -112,7 +109,6 @@ namespace UniverseCreator.Editor
             switch (preset)
             {
                 case WaterPreset.Lake: body = PresetLake(parentOverride); break;
-                case WaterPreset.River: body = PresetRiver(parentOverride); break;
                 case WaterPreset.Pool: body = PresetPool(parentOverride); break;
                 case WaterPreset.Swamp: body = PresetSwamp(parentOverride); break;
                 default: body = PresetOcean(parentOverride); break;
@@ -264,20 +260,6 @@ namespace UniverseCreator.Editor
             body.SeedOutline(12);
             body.SnapCourseToGround();
 
-            return body;
-        }
-
-        private static UCWaterBody PresetRiver(Transform parentOverride)
-        {
-            UCWaterBody body = CreateWaterBody("River", WaterBodyKind.River,
-                                               UCWaterBody.ShapeMode.RiverSpline, parentOverride);
-
-            WaterPresets.ApplyDefaults(body);
-
-            // A river starts with NO course, deliberately, and unlike a lake. A lake's
-            // seeded 12-gon is a shape you then adjust; a straight seeded river is a line
-            // through ground it has nothing to do with, and dragging five points off it is
-            // more work than drawing five. So the inspector asks for CTRL + Click instead.
             return body;
         }
 

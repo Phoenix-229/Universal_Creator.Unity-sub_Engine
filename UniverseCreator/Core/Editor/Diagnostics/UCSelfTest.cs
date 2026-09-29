@@ -107,39 +107,18 @@ namespace UniverseCreator.Editor.Diagnostics
             TestGraphReachesTheHeightmap();
             TestWeatherOutputNodeCapturesBiases();
             TestLightingOutputNodeCapturesBiases();
-            TestCarveOnlyLowersGround();
-            TestReadReachUnburiesButKeepsTrench();
             TestSeaFloorLiftsDryGroundKeepsOceanDepth();
             TestCoastalShelfGradesGentleKeepsCliffAndOcean();
-            TestRefitFromSnapshotIsStable();
-            TestGroundProbeMatching();
             TestWindowExtremeMatchesBruteForce();
-            TestRiverFillProducesRealWater();
-            TestRiverPlannerJunctionsAreOrdered();
-            TestRiverValleyCorridorCaps();
-            TestRiverValleySagsTheFloodplain();
-            TestRiverFloodplainIsGradedValley();
-            TestMeanderIsSmoothNotFaceted();
             TestResampleAdaptiveKeepsBendsAndEndpoints();
             TestValleyCorridorAccessor();
             TestVolumeReachesTheRealBed();
-            TestNodeReadoutsMatchTheCourse();
             TestLakeShapeAndSizeComeFromTheBasin();
 
             // Module 2, in UCSelfTest.Hydrology.cs.
-            TestChannelHeadAreaRescalesToTheWorld();
             TestSpawnerIsLiveWhenOnlyItsHeightIsWired();
-            TestWaterWalkSeesInterfaceOnlyOutputs();
             TestSpawnerPlacesRealWaterObjects();
             TestLakeDepthGateMatchesTheMask();
-            TestWaterfallsFormOnSteepReaches();
-            TestReadModeRespectsBankLevels();
-            TestManualDigCarriesNodeValuesForward();
-            TestReadModeGapFillsToBank();
-            TestDownstreamWidthGrowsWithoutAuthoring();
-            TestInlandCourseJoinsTheRiverItFlowsInto();
-            TestTributaryLengthFollowsHacksLaw();
-            TestConnectedRiverNodesCarveATrench();
 
             TestGraphHealsMissingNodeSlots();
 
@@ -152,7 +131,6 @@ namespace UniverseCreator.Editor.Diagnostics
 
             // Module 6 Road & City Master seam, UC side of B-27 (U-1, U-4, U-5), in UCSelfTest.RcmSeam.cs.
             TestReservoirGovernance();
-            TestRiverProfilePublication();
             TestProviderSurfaceStaysSixMembers();
 
             // Module 3, in UCSelfTest.Ecology.cs.
@@ -1881,324 +1859,6 @@ namespace UniverseCreator.Editor.Diagnostics
         // ---------------------------------------------------------------------
         //  WATER RE-FIT
         // ---------------------------------------------------------------------
-        /// <summary>
-        /// Builds a straight river channel across a synthetic chunk and returns the
-        /// carve layer, ready to apply.
-        /// </summary>
-        /// <summary>
-        /// The valley corridor: a river crossing a hillside gets a valley, not a slot.
-        /// </summary>
-        /// <remarks>
-        /// This is the T17a mechanism, and it needed a test because its field default is
-        /// 0 and 0 means OFF. Every river in the project - procedural and hand-placed -
-        /// therefore ran with the cap disabled, so past the bevel the dig handed back
-        /// whatever the generator had put there. Nothing failed; the channel simply read
-        /// as a slot sawn through a cliff.
-        ///
-        /// All four checks matter in both directions. Off must mean untouched, or a
-        /// hand-placed river silently gains a valley the user never asked for. On must
-        /// visibly cut a wall, or the derivation is wired to nothing. And the cap is a
-        /// CEILING: it may not dig below the water, and it may not flatten ground that
-        /// was already gentle, because that ground is the generator's character.
-        /// </remarks>
-        private static void TestRiverValleyCorridorCaps()
-        {
-            const float surfaceY = 100f;
-            const float probeOut = 60f;    // metres outside the bank
-            const float wallRate = 2f;     // 2 m up per metre out: a 63-degree wall
-
-            float wallY = surfaceY + wallRate * probeOut;
-            float probeZ = 400f + 20f + probeOut;   // 20 m is half of the 40 m width
-
-            WaterCarveLayer off = MakeValleyLayer(surfaceY, 0f);
-            WaterCarveLayer on = MakeValleyLayer(surfaceY, 90f);
-
-            float uncapped = off.HeightAt(400f, probeZ, wallY);
-            float capped = on.HeightAt(400f, probeZ, wallY);
-
-            Check(Mathf.Abs(uncapped - wallY) < 1e-3f,
-                  "corridorMetres 0 still changed the ground " + probeOut + " m outside "
-                  + "the bank (" + uncapped + " m against " + wallY + " m). 0 has to mean "
-                  + "off, or every river left on the default silently gains a valley");
-
-            Check(capped < wallY - 10f,
-                  "the corridor left a " + (wallY - surfaceY) + " m wall standing "
-                  + probeOut + " m outside the bank (got " + capped + " m). With the cap "
-                  + "off the dig hands back raw generated ground and the river reads as "
-                  + "a slot, which is the whole defect T17a exists to fix");
-
-            Check(capped >= surfaceY - 0.01f,
-                  "the corridor pulled ground to " + capped + " m, below the water "
-                  + "surface at " + surfaceY + " m - it is a ceiling on how fast the "
-                  + "valley may rise, not a second dig");
-
-            float gentleY = surfaceY + 0.5f;
-            float gentle = on.HeightAt(400f, probeZ, gentleY);
-
-            Check(Mathf.Abs(gentle - gentleY) < 1e-3f,
-                  "the corridor flattened ground that was already gentle (" + gentle
-                  + " m against " + gentleY + " m), which would erase the generator's "
-                  + "character across a corridor width either side of every river");
-        }
-
-        /// <summary>A straight channel at a known surface height, with the corridor and
-        /// the channel size set by the caller so one course can be measured under
-        /// several configurations.</summary>
-        private static WaterCarveLayer MakeValleyLayer(float surfaceY, float corridorMetres,
-                                                       float widthMetres = 40f,
-                                                       float depthMetres = 4f,
-                                                       bool valley = true)
-        {
-            WaterCarveLayer layer = new WaterCarveLayer();
-
-            layer.isCourse = true;
-            layer.profile = BedProfile.RiverChannel;
-            layer.maxDepthMetres = depthMetres;
-            layer.bevelMetres = 6f;
-            layer.corridorMetres = corridorMetres;
-            layer.corridorStrength = 1f;
-            layer.valley = valley;
-            layer.ruggednessMetres = 0f;   // deterministic: no noise in the bed
-
-            for (int i = 0; i < 5; i++)
-            {
-                layer.coursePoints.Add(new Vector3(100f + i * 150f, surfaceY, 400f));
-                layer.courseWidths.Add(widthMetres);
-                layer.courseDepths.Add(depthMetres);
-                layer.courseSurfaceY.Add(surfaceY);
-            }
-
-            layer.RecomputeBounds();
-            return layer;
-        }
-
-        /// <summary>
-        /// The floodplain sag: a big river arrives with the shallow valley it cut, and a
-        /// stream does not.
-        /// </summary>
-        /// <remarks>
-        /// The corridor cap tested above is a CEILING - it shaves ground standing too high
-        /// too close to the water - and on ground that is already gentle it correctly does
-        /// nothing. Which left the case a river is most often in: laid across a plain, in a
-        /// channel cut straight down into flat ground, banks and all, with no valley
-        /// anywhere. A real river of any size occupies a trough it made itself.
-        ///
-        /// The probe sits 30 m outside the bank of a 40 m channel, on ground 6 m above the
-        /// water. That spot is chosen so the CEILING does not reach it - at 30 m out the
-        /// cap sits some 11 m up - which is what makes the difference between the two
-        /// layers attributable to the sag and nothing else.
-        ///
-        /// Five properties, each one a fault if it fails: off is untouched, on digs, the
-        /// trough never floods, the waterline keeps no lip to stand on, and a stream is
-        /// left alone because a stream has not the discharge to widen anything.
-        /// </remarks>
-        private static void TestRiverValleySagsTheFloodplain()
-        {
-            const float surfaceY = 100f;
-            const float gentleY = surfaceY + 6f;
-            const float outMetres = 30f;
-
-            float probeZ = 400f + 20f + outMetres;   // 20 m is half of the 40 m width
-
-            WaterCarveLayer off = MakeValleyLayer(surfaceY, 90f, 40f, 4f, false);
-            WaterCarveLayer on = MakeValleyLayer(surfaceY, 90f, 40f, 4f, true);
-
-            float flat = off.HeightAt(400f, probeZ, gentleY);
-            float dug = on.HeightAt(400f, probeZ, gentleY);
-
-            Check(Mathf.Abs(flat - gentleY) < 1e-3f,
-                  "with the valley off the ground " + outMetres + " m outside the bank moved "
-                  + "to " + flat + " m from " + gentleY + " m. Off has to be the old "
-                  + "behaviour exactly, or the sag cannot be told from the corridor cap");
-
-            Check(dug < gentleY - 0.5f,
-                  "the valley left flat ground " + outMetres + " m outside a 40 m river at "
-                  + dug + " m, against " + gentleY + " m untouched. A river on a plain with "
-                  + "no trough around it is a channel sawn into a field");
-
-            Check(dug >= surfaceY - 0.01f,
-                  "the valley pulled the floodplain to " + dug + " m, at or below the water "
-                  + "at " + surfaceY + " m. The valley floor is dry land at normal flow, "
-                  + "not marsh at waterline");
-
-            // At the waterline itself the bank must still arrive at exactly surface level.
-            float lip = on.HeightAt(400f, 400f + 20f + 0.02f, gentleY);
-
-            Check(Mathf.Abs(lip - surfaceY) < 0.05f,
-                  "the ground meets the water at " + lip + " m against a surface at "
-                  + surfaceY + " m - that difference is a lip standing at the water's edge, "
-                  + "which is what the sag being zero at the waterline exists to prevent");
-
-            // A 5 m stream: under the onset width, so no valley at all.
-            WaterCarveLayer stream = MakeValleyLayer(surfaceY, 90f, 5f, 1.5f, true);
-            float streamProbeZ = 400f + 2.5f + outMetres;
-            float untouched = stream.HeightAt(400f, streamProbeZ, gentleY);
-
-            Check(Mathf.Abs(untouched - gentleY) < 1e-3f,
-                  "a 5 m stream cut a floodplain, moving ground to " + untouched + " m from "
-                  + gentleY + " m. A headwater stream runs in the notch it has; floodplains "
-                  + "belong to rivers with the discharge to widen one");
-        }
-
-        /// <summary>
-        /// REFINEMENT #5 C5: the floodplain is a GRADED NATURAL VALLEY, not a flat plane.
-        /// </summary>
-        /// <remarks>
-        /// The user reversed the old "flat sole" rule (images #23/#24): a checked floodplain
-        /// must "create a NATURAL valley along the river... NOT flatten terrain to be
-        /// equal/level (a natural valley, not a flat plane)". ValleySag is now a single smooth
-        /// lobe (sin over bevel..band) instead of the held-flat sole the retired test enforced.
-        ///
-        /// The valley the buyer sees is that sag ACTING TOGETHER with the pre-existing corridor
-        /// cap: the cap ramps the ground up from the waterline near the channel, the sag scoops
-        /// the mid-band down toward the floodplain floor, and both fade out to the untouched
-        /// hillside. So the cross-section rises smoothly from the water's edge (~surfaceY) through
-        /// a floodplain shelf (~floor) up to the hillside - a real graded valley, deepest by the
-        /// river, never a level table. This test pins THAT, and isolates the sag's own
-        /// contribution with an off/on pair so "the valley never touches the bank" is measured on
-        /// the sag alone (the cap is present in both layers and is not what C5 changed).
-        ///
-        /// Verified geometry of MakeValleyLayer(surfaceY 100, corridor 90, width 40, depth 4):
-        /// bevel 6, sag band = 6 + min(90,40) = 46, sag floor = 100 + 4*0.5 = 102, hillside 106,
-        /// corridor cap = 100 + 48*smoothstep(signed/96). Bank edge is 20 m off the centreline, so
-        /// a signed distance d probes at z = 420 + d. Values below are the run-1 measured numbers.
-        /// </remarks>
-        private static void TestRiverFloodplainIsGradedValley()
-        {
-            const float surfaceY = 100f;
-            const float gentleY = surfaceY + 6f;   // untouched hillside, 6 m above the water
-
-            WaterCarveLayer on  = MakeValleyLayer(surfaceY, 90f, 40f, 4f, true);
-            WaterCarveLayer off = MakeValleyLayer(surfaceY, 90f, 40f, 4f, false);
-
-            const float bank = 400f + 20f;         // bank edge, signed distance 0 from here out
-
-            float onBank  = on.HeightAt(400f,  bank + 7f,  gentleY);   // just past the bevel
-            float offBank = off.HeightAt(400f, bank + 7f,  gentleY);   // same spot, sag off
-            float nearCh  = on.HeightAt(400f,  bank + 10f, gentleY);   // near-channel floodplain
-            float mid     = on.HeightAt(400f,  bank + 26f, gentleY);   // floodplain shelf (~floor)
-            float offMid  = off.HeightAt(400f, bank + 26f, gentleY);   // same spot, sag off
-            float wall    = on.HeightAt(400f,  bank + 42f, gentleY);   // rising back to hillside
-
-            // C5 "must NOT touch the river bank": the SAG adds essentially nothing right at the
-            // bank (on == off there). Whatever shaping exists that close to the water is the
-            // corridor cap, which is in both layers and is not what the floodplain changed.
-            Check(Mathf.Abs(onBank - offBank) < 0.5f,
-                  "the floodplain touched the bank: with the sag on the ground just past the "
-                  + "bevel sits at " + onBank + " m, with it off at " + offBank + " m. C5 requires "
-                  + "the valley fade to NOTHING at the bank, so these must match");
-
-            // The sag digs a REAL floodplain valley through the mid-band - well below both the
-            // hillside and the same spot with the valley off (so it is the sag's own doing).
-            Check(mid < gentleY - 2f && mid < offMid - 1f,
-                  "the floodplain did not dig a valley: the mid-band sits at " + mid + " m against "
-                  + "an untouched hillside at " + gentleY + " m and the sag-off ground at " + offMid
-                  + " m. A checked floodplain must scoop a natural valley beside the channel");
-
-            // GRADED, not a flat plane (the C5 reversal): the near-channel floodplain sits
-            // distinctly LOWER than the rising valley wall - the cross-section climbs, it is not
-            // the level table the retired flat-sole test required.
-            Check(wall - nearCh > 1f,
-                  "the floodplain floor is a flat table: near the channel it sits at " + nearCh
-                  + " m and out at the wall at " + wall + " m, level within a metre. C5 wants a "
-                  + "GRADED natural valley that rises to its walls, not the old level sole");
-
-            // The wall climbs back TOWARD the untouched hillside but never above it.
-            Check(wall > mid + 1f && wall < gentleY + 1e-3f,
-                  "the valley wall does not ease back to the hillside: the mid-band is " + mid
-                  + " m, the wall " + wall + " m, the hillside " + gentleY + " m. The valley must "
-                  + "rise back toward the hillside (wall above the floor) but never above it");
-
-            // Lower only - the sag never pushes ground above the untouched hillside.
-            Check(onBank <= gentleY + 1e-3f && nearCh <= gentleY + 1e-3f
-                  && mid <= gentleY + 1e-3f && wall <= gentleY + 1e-3f,
-                  "the sag raised ground above the untouched hillside at " + gentleY + " m (bank "
-                  + onBank + ", near " + nearCh + ", mid " + mid + ", wall " + wall + "). The valley "
-                  + "lowers only - it may rise back TO the hillside but never above it");
-
-            // The floodplain shelf is dry land at normal flow, not marsh at the waterline.
-            Check(mid >= surfaceY - 0.01f,
-                  "the floodplain shelf sits at " + mid + " m, at or below the water at "
-                  + surfaceY + " m. The valley floor is dry land at normal flow, not a backwater");
-        }
-
-        /// <summary>
-        /// The meander is a smooth curve, not a run of straight facets.
-        /// </summary>
-        /// <remarks>
-        /// The floodplain clamp searches inward from the full loop offset for the largest
-        /// that stays level. When that search was only four steps, the offset could land on
-        /// just four fractions of the target, so two neighbouring points sitting on the
-        /// gently sloped edge of the floodplain snapped to DIFFERENT fractions and the loop
-        /// kinked between them - the "meander is not smooth" seen in-editor. On a symmetric
-        /// valley whose floor is level and whose sides rise gently (so the clamp bites but
-        /// never refuses outright), the lateral offset the meander applies must vary
-        /// smoothly point to point: the largest jump between neighbours is a small fraction
-        /// of the loop amplitude. A four-step clamp fails this; the fine clamp holds it.
-        /// </remarks>
-        private static void TestMeanderIsSmoothNotFaceted()
-        {
-            const float floorY = 100f;
-
-            // Level along the flow (+x), rising gently away from the centreline at z=400 so
-            // the meander belt runs onto a slope and the level-band clamp engages without
-            // refusing every offset (which would give a straight line and nothing to test).
-            RiverCourseSolver.GroundSampler valley = delegate (float x, float z)
-            {
-                return floorY + Mathf.Abs(z - 400f) * 0.08f;
-            };
-
-            int n = 160;
-            List<Vector3> pts = new List<Vector3>(n);
-            List<float> widths = new List<float>(n);
-            for (int i = 0; i < n; i++)
-            {
-                float x = 100f + i * 6f;                 // 6 m spacing, the mesh default
-                pts.Add(new Vector3(x, floorY, 400f));
-                widths.Add(40f);
-            }
-
-            RiverCourseSolver.Meander(pts, valley, widths, 1f, 0.08f, 40f);
-
-            // Lateral offset = how far each point moved off the original z=400 centreline.
-            // The floodplain here is only ~31 m to either side (0.08 slope, ~2.5 m band),
-            // so a 40 m river's loop (which wants ~120 m) is CONFINED and rides the
-            // floodplain edge - the case that showed facets in-editor.
-            float amplitude = 0f;
-            for (int i = 0; i < n; i++)
-                amplitude = Mathf.Max(amplitude, Mathf.Abs(pts[i].z - 400f));
-
-            Check(amplitude > 3f,
-                  "the meander barely moved (peak offset " + amplitude + " m on a 40 m "
-                  + "river): the fixture pinned the course straight, so a facet test on it "
-                  + "would pass on nothing");
-
-            // Curvature, not turn rate, is the facet test. A confined loop genuinely turns
-            // fast where it crosses the centreline - a real amplitude-30 sine at 6 m
-            // spacing moves ~10 m per step there, and that is the curve, not a fault. A
-            // FACET is a spike in the SECOND difference: the turn rate itself jumping,
-            // which is what a hard clip's corner or a stepped-clamp snap does and a smooth
-            // curve does not. For this sine the second difference sits near a quarter-metre;
-            // a hard clip spiked it above ten. 2 m sits well clear of both.
-            float maxCurv = 0f;
-            int maxAt = 0;
-            for (int i = 1; i < n - 1; i++)
-            {
-                float second = (pts[i + 1].z - 400f) - 2f * (pts[i].z - 400f) + (pts[i - 1].z - 400f);
-                if (Mathf.Abs(second) > maxCurv) { maxCurv = Mathf.Abs(second); maxAt = i; }
-            }
-
-            string near = "";
-            for (int i = Mathf.Max(0, maxAt - 2); i <= Mathf.Min(n - 1, maxAt + 2); i++)
-                near += " [" + i + "]=" + (pts[i].z - 400f).ToString("F2");
-
-            Check(maxCurv < 2f,
-                  "the meander kinks: the largest curvature (second difference of the "
-                  + "offset) is " + maxCurv + " m at point " + maxAt + " of " + n
-                  + ", against a peak offset of " + amplitude + " m. Offsets near it:" + near
-                  + ". A smooth loop turns gradually even where it turns fast; a curvature "
-                  + "spike is a clip corner or a clamp snap - the faceted meander");
-        }
 
         /// <summary>
         /// The curvature-adaptive resample (Step 43 L) keeps the points a bend needs to
@@ -2359,63 +2019,6 @@ namespace UniverseCreator.Editor.Diagnostics
             }
         }
 
-        // ---------------------------------------------------------------------
-        //  PER-NODE READOUTS
-        // ---------------------------------------------------------------------
-
-        /// <summary>
-        /// The figures the node panel shows come off the course and mean what they say.
-        /// </summary>
-        /// <remarks>
-        /// Flat Floor is the mode used here because it is the one where the authored Y is
-        /// the river's datum, so the elevations are arithmetic and need no terrain in the
-        /// scene. The grade is the surveyor's figure a road node carries - rise over the
-        /// HORIZONTAL run - and the sign convention is load-bearing: negative downhill,
-        /// which is the direction a river is allowed to go.
-        /// </remarks>
-        private static void TestNodeReadoutsMatchTheCourse()
-        {
-            GameObject go = new GameObject("UC SelfTest River Nodes");
-
-            try
-            {
-                UCWaterBody body = go.AddComponent<UCWaterBody>();
-
-                body.SetKindOnce(WaterBodyKind.River);
-                body.bedSource = UCWaterBody.BedSource.FlatFloor;
-                body.flatFloorDepthMetres = 3f;
-                body.surfaceOffsetMetres = 0f;
-
-                body.course.points.Clear();
-                body.course.points.Add(new Vector3(0f, 100f, 0f));
-                body.course.points.Add(new Vector3(100f, 90f, 0f));
-                body.course.points.Add(new Vector3(200f, 90f, 0f));
-
-                Check(Mathf.Abs(body.NodeSurfaceY(0) - 97f) < 1e-3f,
-                      "node 0 reads its surface at " + body.NodeSurfaceY(0) + " m where the "
-                      + "line is at 100 m and the flat floor is 3 m down, so the water is "
-                      + "at 97 m. The panel showed the point's raw Y before, which the "
-                      + "solve discards in every mode but this one");
-
-                Check(Mathf.Abs(body.NodeGradePercentToNext(0) + 10f) < 1e-3f,
-                      "a 10 m drop over a 100 m run reads as "
-                      + body.NodeGradePercentToNext(0) + "% instead of -10%. Rise over the "
-                      + "horizontal run, and negative downhill");
-
-                Check(Mathf.Abs(body.NodeGradePercentFromPrev(2)) < 1e-3f,
-                      "a level reach reads as " + body.NodeGradePercentFromPrev(2)
-                      + "% instead of 0%");
-
-                Check(body.IsEndNode(0) && body.IsEndNode(2) && !body.IsEndNode(1),
-                      "the ends of a three-node course did not report as ends. Only an end "
-                      + "can carry a junction, and the marker for one is drawn from this");
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(go);
-            }
-        }
-
         /// <summary>
         /// The corridor the dig is handed is the one the inspector reports. One accessor
         /// answers both, because two copies of "how wide is the valley" would eventually
@@ -2441,42 +2044,6 @@ namespace UniverseCreator.Editor.Diagnostics
                 UCWaterBody body = go.AddComponent<UCWaterBody>();
 
                 body.SetKindOnce(WaterBodyKind.River);
-                body.shape = UCWaterBody.ShapeMode.RiverSpline;
-                body.corridorMetres = 0f;
-                body.valleyWidthMultiple = 3f;
-                body.widthMetres = 40f;
-
-                Check(Mathf.Abs(body.ValleyCorridorMetres - 120f) < 1e-3f,
-                      "a 40 m river at multiple 3 derived a " + body.ValleyCorridorMetres
-                      + " m valley instead of 120 m. This is the number the dig cuts with "
-                      + "and the number the inspector prints, so a wrong one is wrong twice");
-
-                body.widthMetres = 1f;
-                Check(Mathf.Abs(body.ValleyCorridorMetres - 8f) < 1e-3f,
-                      "a 1 m channel derived a " + body.ValleyCorridorMetres + " m valley. "
-                      + "Below the 8 m floor a corridor is thinner than the heightmap's own "
-                      + "texel spacing and cannot express a ramp at all");
-
-                body.widthMetres = 200f;
-                Check(Mathf.Abs(body.ValleyCorridorMetres - 160f) < 1e-3f,
-                      "a 200 m channel derived a " + body.ValleyCorridorMetres + " m valley. "
-                      + "Past the 160 m ceiling it reshapes ground with nothing to do with "
-                      + "the river, and widens the area every chunk apply has to sample");
-
-                body.widthMetres = 40f;
-                body.corridorMetres = 25f;
-                Check(Mathf.Abs(body.ValleyCorridorMetres - 25f) < 1e-3f,
-                      "typed metres gave " + body.ValleyCorridorMetres + " m instead of the "
-                      + "25 m authored. An absolute override has to win, or the field does "
-                      + "nothing on any river whose width would derive something else");
-
-                body.corridorMetres = 0f;
-                body.valleyWidthMultiple = 0f;
-                Check(body.ValleyCorridorMetres <= 0f,
-                      "both dials at 0 still gave " + body.ValleyCorridorMetres + " m. Off "
-                      + "must mean the dig cuts what it finds, or a hand-placed river gains "
-                      + "a valley nobody asked for");
-
                 body.shape = UCWaterBody.ShapeMode.Polygon;
                 body.valleyWidthMultiple = 3f;
                 Check(body.ValleyCorridorMetres <= 0f,
@@ -2636,7 +2203,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // ceiling is what stops the fill here, and it has to actually stop it.
             const float curvature = 30f / (80f * 80f);
 
-            RiverCourseSolver.GroundSampler bowl = delegate (float x, float z)
+            HydrologyGenerator.GroundSampler bowl = delegate (float x, float z)
             {
                 return floorY + curvature * (x * x + z * z);
             };
@@ -2720,7 +2287,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // that measures radii from the centre cannot describe this at all: it would
             // either lose the arm or flood the walls beside it. Sized to sit under the
             // ceiling - about 310 m^2 - so the ground is what decides, not the cap.
-            RiverCourseSolver.GroundSampler lobed = delegate (float x, float z)
+            HydrologyGenerator.GroundSampler lobed = delegate (float x, float z)
             {
                 float d = Mathf.Sqrt(x * x + z * z);
                 bool inBowl = d < 8f;
@@ -2782,7 +2349,7 @@ namespace UniverseCreator.Editor.Diagnostics
             {
                 float rim = rims[r];
 
-                RiverCourseSolver.GroundSampler walled = delegate (float x, float z)
+                HydrologyGenerator.GroundSampler walled = delegate (float x, float z)
                 {
                     float d = Mathf.Sqrt(x * x + z * z);
                     return d < rim ? floorY + d * 0.005f : floorY + 200f;
@@ -2815,7 +2382,7 @@ namespace UniverseCreator.Editor.Diagnostics
 
             // Two metres across, about 13 m^2. The generator passes this over instead of
             // dressing it up as a lake, which is what the 60 m^2 floor is for.
-            RiverCourseSolver.GroundSampler dimple = delegate (float x, float z)
+            HydrologyGenerator.GroundSampler dimple = delegate (float x, float z)
             {
                 float d = Mathf.Sqrt(x * x + z * z);
                 return d < 2f ? floorY + d * 0.005f : floorY + 200f;
@@ -2834,7 +2401,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // A five-metre rim is a real tarn and must survive - it is the small end the
             // 60 m^2 floor exists to admit, and the coarse-to-fine passes are what let one
             // search window resolve both it and a lake ten times its size.
-            RiverCourseSolver.GroundSampler tarn = delegate (float x, float z)
+            HydrologyGenerator.GroundSampler tarn = delegate (float x, float z)
             {
                 float d = Mathf.Sqrt(x * x + z * z);
                 return d < 5f ? floorY + d * 0.005f : floorY + 200f;
@@ -2857,7 +2424,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // past the ceiling. The level has to be found BETWEEN two steps; a solver that
             // only tried the steps would find no level that fitted and report no lake at
             // all - which on real, gently graded terrain is most of the lakes.
-            RiverCourseSolver.GroundSampler broad = delegate (float x, float z)
+            HydrologyGenerator.GroundSampler broad = delegate (float x, float z)
             {
                 return floorY + 0.0002f * (x * x + z * z);
             };
@@ -2892,30 +2459,6 @@ namespace UniverseCreator.Editor.Diagnostics
                       + (broadLevel - floorY).ToString("F3") + " m");
         }
 
-        private static WaterCarveLayer MakeRiverLayer(float groundY, float depth)
-        {
-            WaterCarveLayer layer = new WaterCarveLayer();
-
-            layer.isCourse = true;
-            layer.profile = BedProfile.RiverChannel;
-            layer.maxDepthMetres = depth;
-            layer.bevelMetres = 6f;
-            layer.ruggednessMetres = 0f;   // deterministic: no noise in the bed
-
-            // Straight run west to east through the middle of an 800 m cell.
-            for (int i = 0; i < 5; i++)
-            {
-                float x = 100f + i * 150f;
-                layer.coursePoints.Add(new Vector3(x, groundY, 400f));
-                layer.courseWidths.Add(40f);
-                layer.courseDepths.Add(depth);
-                layer.courseSurfaceY.Add(groundY);
-            }
-
-            layer.RecomputeBounds();
-            return layer;
-        }
-
         private static float[,] FlatField(int res, float normalisedHeight)
         {
             float[,] h = new float[res, res];
@@ -2933,134 +2476,6 @@ namespace UniverseCreator.Editor.Diagnostics
                     if (h[z, x] < lo) lo = h[z, x];
             return lo;
         }
-
-        /// <summary>
-        /// The dig must only ever lower ground, never raise it.
-        /// </summary>
-        /// <remarks>
-        /// This is the property that makes a pristine snapshot the ONLY way to undo a
-        /// dig. Every bed value goes through Mathf.Min(existingY, bed), so once a
-        /// channel is cut, no amount of re-running the carvers can put that ground
-        /// back - which means "delete the river and the trench fills in" is not
-        /// something a re-carve can ever achieve, however it is arranged.
-        ///
-        /// It is asserted rather than assumed because the whole memory cost of
-        /// Chunk.graphHeights is justified by it. If the carve ever became able to
-        /// raise ground, that copy would stop being necessary and this test is where
-        /// that would surface.
-        /// </remarks>
-        private static void TestCarveOnlyLowersGround()
-        {
-            const int res = 129;
-            const float maxHeight = 600f;
-            const float mps = 800f / (res - 1);
-
-            float groundNorm = 0.5f;
-            float groundY = groundNorm * maxHeight;
-
-            Bounds chunk = new Bounds(new Vector3(400f, maxHeight * 0.5f, 400f),
-                                      new Vector3(800f, maxHeight, 800f));
-
-            WaterCarveLayer layer = MakeRiverLayer(groundY, 12f);
-
-            float[,] pristine = FlatField(res, groundNorm);
-            float[,] dug = FlatField(res, groundNorm);
-
-            layer.ApplyTo(dug, chunk, mps, maxHeight);
-
-            bool anyRaised = false;
-            bool anyLowered = false;
-
-            for (int z = 0; z < res; z++)
-            {
-                for (int x = 0; x < res; x++)
-                {
-                    if (dug[z, x] > pristine[z, x] + 1e-6f) anyRaised = true;
-                    if (dug[z, x] < pristine[z, x] - 1e-6f) anyLowered = true;
-                }
-            }
-
-            Check(anyLowered, "the river carve did not lower any ground - the test river "
-                              + "missed the chunk, so nothing below was actually verified");
-
-            Check(!anyRaised, "the river carve RAISED ground somewhere. Every bed value is "
-                              + "supposed to pass through Mathf.Min(existingY, bed)");
-
-            // And the depth has to be real, not a rounding artifact.
-            float cutMetres = (groundNorm - LowestSample(dug)) * maxHeight;
-            Check(cutMetres > 1f,
-                  "the river cut only " + cutMetres.ToString("F2") + " m - too shallow to be a channel");
-        }
-
-        /// <summary>
-        /// REFINEMENT #6 B1: on a READ reach (courseRead 1 - the river reads a hand-cut
-        /// trench instead of digging its own) the INSIDE branch must cut a min() gorge to
-        /// just-submerged, so it (a) UN-BURIES the channel when procedural noise has piled a
-        /// dune over it above the water, and (b) still PRESERVES a genuine authored trench
-        /// whose floor is already below the waterline. This is the property that fixes
-        /// Defect B (river buried under the terrain, img #29) without re-breaking R#4
-        /// (a read reach must not reshape the trench the user cut).
-        /// </summary>
-        private static void TestReadReachUnburiesButKeepsTrench()
-        {
-            const int res = 129;
-            const float maxHeight = 600f;
-            const float mps = 800f / (res - 1);
-
-            float surfaceY = 0.5f * maxHeight;          // 300 m water surface
-            float minDepth = 2f;
-            float readFloorY = surfaceY - minDepth;     // ground can't stand above this inside
-
-            Bounds chunk = new Bounds(new Vector3(400f, maxHeight * 0.5f, 400f),
-                                      new Vector3(800f, maxHeight, 800f));
-
-            // A read reach: every station is flagged read-only (courseRead 1).
-            WaterCarveLayer ReadLayer()
-            {
-                WaterCarveLayer layer = MakeRiverLayer(surfaceY, 12f);
-                layer.minDepthMetres = minDepth;
-                for (int i = 0; i < layer.coursePoints.Count; i++) layer.courseRead.Add(1f);
-                layer.RecomputeBounds();
-                return layer;
-            }
-
-            // --- Case DUNE: procedural noise piled a 40 m hill OVER the whole reach, well
-            // above the water. The read gorge must cut the CHANNEL down to the waterline; the
-            // river must no longer be buried.
-            float duneNorm = (surfaceY + 40f) / maxHeight;
-            float[,] dune = FlatField(res, duneNorm);
-            ReadLayer().ApplyTo(dune, chunk, mps, maxHeight);
-
-            float channelTopY = LowestSample(dune) * maxHeight;
-            Check(channelTopY < surfaceY - 1e-3f,
-                  "R#6 B1: a read reach left the channel BURIED at " + channelTopY.ToString("F2")
-                  + " m, above the " + surfaceY.ToString("F2") + " m water surface");
-            Check(Mathf.Abs(channelTopY - readFloorY) < 0.5f,
-                  "R#6 B1: the un-buried channel top settled at " + channelTopY.ToString("F2")
-                  + " m, not the expected ~" + readFloorY.ToString("F2") + " m waterline gorge");
-
-            // --- Case TRENCH: the ground already carries a hand-cut trench 30 m below the
-            // water surface (below readFloor). The read reach must READ it, not fill it up to
-            // the shallow gorge - Min keeps the deeper floor.
-            float trenchY = surfaceY - 30f;
-            float trenchNorm = trenchY / maxHeight;
-            float[,] trench = FlatField(res, trenchNorm);
-            ReadLayer().ApplyTo(trench, chunk, mps, maxHeight);
-
-            float keptFloorY = LowestSample(trench) * maxHeight;
-            Check(Mathf.Abs(keptFloorY - trenchY) < 0.25f,
-                  "R#6 B1: a read reach RESHAPED the authored trench - floor moved from "
-                  + trenchY.ToString("F2") + " m to " + keptFloorY.ToString("F2")
-                  + " m (a deeper authored trench must be read, not filled to the gorge)");
-
-            // And it stays lower-only even on a read reach.
-            bool anyRaised = false;
-            for (int z = 0; z < res; z++)
-                for (int x = 0; x < res; x++)
-                    if (trench[z, x] > trenchNorm + 1e-6f) anyRaised = true;
-            Check(!anyRaised, "R#6 B1: a read reach RAISED ground - the carve must only lower");
-        }
-
 
         /// <summary>
         /// REFINEMENT #6 SL1: the global sea-level floor (SeaLevelFloor.Apply, baked into
@@ -3230,146 +2645,6 @@ namespace UniverseCreator.Editor.Diagnostics
             Check(!anyRaised, "C-TEST: the coastal shelf RAISED ground somewhere - it must be lower-only");
         }
 
-
-        /// <summary>
-        /// Re-deriving a dig from the pristine snapshot gives the same surface every
-        /// time, while re-deriving it from the previous result does not.
-        /// </summary>
-        /// <remarks>
-        /// This is the regression that ReapplyCarves had. It cloned the graph output
-        /// from c.tile, which the pump nulls immediately after applying a chunk, so the
-        /// method returned without doing anything at all and the bug hid behind a
-        /// no-op. Now that it reads Chunk.graphHeights instead, the two halves below
-        /// are what say the snapshot is being used for the right reason:
-        ///
-        ///   from the snapshot  - stable, because the input never changes
-        ///   from the last pass - drifts, because the course is re-solved against
-        ///                        ground that already has the channel in it
-        ///
-        /// The second half deliberately asserts that feeding the result back in is
-        /// WORSE. If that ever stops being true the guard is free to be dropped, and a
-        /// test that only checked the good path could not tell.
-        /// </remarks>
-        /// <summary>
-        /// The gate that decides whether a settle re-fits a river at all.
-        /// </summary>
-        /// <remarks>
-        /// This is the whole reason a 25-cell build does not re-solve, re-mesh and
-        /// rewrite its rivers 25 times over. It has to be exact in both directions:
-        /// too loose and a valley moves under a river that never notices, too tight
-        /// and the work comes straight back.
-        ///
-        /// The NaN case is the one worth having. Mathf.Abs(NaN) is NaN and NaN fails
-        /// every comparison, so a naive (diff > eps) test reads a NaN probe as "no
-        /// movement" and skips a re-fit forever. Same class of trap as Clamp01 not
-        /// filtering NaN, which is what HeightGuard exists for.
-        /// </remarks>
-        private static void TestGroundProbeMatching()
-        {
-            // Two course points: x, z, undug ground height apiece.
-            float[] baseline = new float[] { 100f, 200f, 55f, 130f, 200f, 54f };
-
-            Check(UCWaterBody.GroundProbesMatch(baseline, (float[])baseline.Clone()),
-                  "water re-fit gate: an identical probe reports no movement");
-
-            float[] requantised = (float[])baseline.Clone();
-            requantised[2] += 0.004f;
-            Check(UCWaterBody.GroundProbesMatch(baseline, requantised),
-                  "water re-fit gate: 4 mm is heightmap quantisation, not movement");
-
-            float[] moved = (float[])baseline.Clone();
-            moved[5] += 0.5f;
-            Check(!UCWaterBody.GroundProbesMatch(baseline, moved),
-                  "water re-fit gate: half a metre under the course is movement");
-
-            float[] rerouted = (float[])baseline.Clone();
-            rerouted[0] += 25f;
-            Check(!UCWaterBody.GroundProbesMatch(baseline, rerouted),
-                  "water re-fit gate: a course point that moved in XZ re-fits even at "
-                  + "the same height");
-
-            Check(!UCWaterBody.GroundProbesMatch(baseline, new float[] { 100f, 200f, 55f }),
-                  "water re-fit gate: a probe of a different length never matches");
-
-            Check(!UCWaterBody.GroundProbesMatch(null, baseline)
-                  && !UCWaterBody.GroundProbesMatch(baseline, null),
-                  "water re-fit gate: no baseline means the re-fit goes ahead");
-
-            Check(!UCWaterBody.GroundProbesMatch(new float[0], new float[0]),
-                  "water re-fit gate: an empty probe is not a baseline");
-
-            float[] broken = (float[])baseline.Clone();
-            broken[2] = float.NaN;
-            Check(!UCWaterBody.GroundProbesMatch(baseline, broken)
-                  && !UCWaterBody.GroundProbesMatch(broken, broken)
-                  && !UCWaterBody.GroundProbesMatch(broken, baseline),
-                  "water re-fit gate: a NaN probe reports movement instead of passing "
-                  + "the <= test");
-
-            float[] infinite = (float[])baseline.Clone();
-            infinite[2] = float.PositiveInfinity;
-            Check(!UCWaterBody.GroundProbesMatch(baseline, infinite),
-                  "water re-fit gate: an infinite probe reports movement");
-        }
-
-        private static void TestRefitFromSnapshotIsStable()
-        {
-            const int res = 129;
-            const float maxHeight = 600f;
-            const float mps = 800f / (res - 1);
-
-            float groundNorm = 0.5f;
-            float groundY = groundNorm * maxHeight;
-
-            Bounds chunk = new Bounds(new Vector3(400f, maxHeight * 0.5f, 400f),
-                                      new Vector3(800f, maxHeight, 800f));
-
-            float[,] snapshot = FlatField(res, groundNorm);
-
-            // --- Re-fit twice from the snapshot, exactly as ReapplyCarves now does ---
-            float[,] first = CloneField(snapshot);
-            MakeRiverLayer(groundY, 12f).ApplyTo(first, chunk, mps, maxHeight);
-
-            float[,] second = CloneField(snapshot);
-            MakeRiverLayer(groundY, 12f).ApplyTo(second, chunk, mps, maxHeight);
-
-            float maxDrift = 0f;
-            for (int z = 0; z < res; z++)
-                for (int x = 0; x < res; x++)
-                {
-                    float d = Mathf.Abs(first[z, x] - second[z, x]);
-                    if (d > maxDrift) maxDrift = d;
-                }
-
-            Check(maxDrift < 1e-6f,
-                  "two re-fits from the same snapshot disagreed by "
-                  + maxDrift.ToString("F8") + " - the re-fit is not deterministic, so a "
-                  + "river would creep every time its spline was touched");
-
-            // --- And the snapshot must be left untouched by the re-fit ---
-            bool snapshotClean = true;
-            for (int z = 0; z < res && snapshotClean; z++)
-                for (int x = 0; x < res; x++)
-                    if (Mathf.Abs(snapshot[z, x] - groundNorm) > 1e-6f) { snapshotClean = false; break; }
-
-            Check(snapshotClean,
-                  "the re-fit wrote into the snapshot it was reading from. It would then be "
-                  + "cloning already-carved ground, and the channel would deepen on every pass");
-
-            // --- Feeding the result back in is the failure mode being prevented ---
-            float[,] fedBack = CloneField(first);
-            MakeRiverLayer(groundY, 12f).ApplyTo(fedBack, chunk, mps, maxHeight);
-
-            float deepenedBy = (LowestSample(first) - LowestSample(fedBack)) * maxHeight;
-
-            // Not "must deepen": with an absolute bed and no ground resampling in this
-            // isolated harness it may well come out identical, and that is fine. What
-            // must hold is that it never comes out SHALLOWER - the direction of the
-            // error is the part that matters, because a re-carve can never restore.
-            Check(deepenedBy >= -1e-4f,
-                  "re-carving already-carved ground made the channel shallower by "
-                  + (-deepenedBy).ToString("F3") + " m, which contradicts the min-only carve");
-        }
 
         private static float[,] CloneField(float[,] source)
         {
@@ -3562,304 +2837,5 @@ namespace UniverseCreator.Editor.Diagnostics
             }
         }
 
-        /// <summary>
-        /// Runs a hand-built channel through River Fill and asserts the water is real:
-        /// it stands above its bed, it deepens toward the middle, it does not climb
-        /// downstream, it stops at the bank, and it comes out the same from either side
-        /// of a chunk seam.
-        /// </summary>
-        /// <remarks>
-        /// The node shipped computing `level = ground + extraFill` and
-        /// `depth = level - ground`, so Depth was algebraically the constant
-        /// `extraFill` - zero by default - and Water Level was the ground itself. The
-        /// graph looked wired and the terrain had trenches with no water in them. Every
-        /// check below is one of the properties that arithmetic could not have.
-        ///
-        /// The last group is the seam: the bed and crest are sliding extremes over the
-        /// channel width, so a pixel near a chunk edge used to measure only the part of
-        /// its channel that fell inside that chunk. The check evaluates ONE world
-        /// position from two chunks that place it differently - at the edge of one and
-        /// deep inside the other - and requires the same answer from both.
-        /// </remarks>
-        private static void TestRiverFillProducesRealWater()
-        {
-            const int res = 65;
-            const int centreZ = 32;
-            const float worldSpan = 800f;
-
-            Graph graph = ScriptableObject.CreateInstance<Graph>();
-            try
-            {
-                ChannelGroundFeed heightFeed = new ChannelGroundFeed();
-                ChannelMaskFeed maskFeed = new ChannelMaskFeed();
-
-                RiverFillNode fill = new RiverFillNode();
-                fill.bankWidth = ChannelHalfWidth;   // window matches the channel
-
-                graph.nodes.Add(heightFeed);
-                graph.nodes.Add(maskFeed);
-                graph.nodes.Add(fill);
-                graph.connections.Add(new Connection(heightFeed.id, 0, fill.id, 0));
-                graph.connections.Add(new Connection(maskFeed.id, 0, fill.id, 1));
-
-                // The channel runs off both edges, so it drains and the depression fill
-                // leaves it alone; everything sits far above sea level so the mouth
-                // clamp stays out of the way and the test is only about the channel.
-                GraphEvaluator evaluator;
-                TileData tile = ChannelTile(graph, res, 0f, worldSpan, out evaluator);
-
-                Matrix ground = tile.CreateMatrix();
-                FillFromWorld(ground, false);
-
-                StopToken stop = new StopToken();
-
-                Matrix wetMask = evaluator.PullNode(fill, 0, tile, stop) as Matrix;
-                Matrix depth = evaluator.PullNode(fill, 1, tile, stop) as Matrix;
-                Matrix level = evaluator.PullNode(fill, 2, tile, stop) as Matrix;
-
-                Check(wetMask != null && depth != null && level != null,
-                      "River Fill returned null for one of its three outputs");
-                if (wetMask == null || depth == null || level == null) return;
-
-                int mid = res / 2;
-                int thalweg = centreZ * res + mid;
-                int shoulder = (centreZ + 2) * res + mid;   // inside the channel, off-centre
-                int dry = (centreZ + 12) * res + mid;       // well clear of the banks
-
-                // 1. There is water at all. This is the whole complaint: trenches with
-                //    nothing in them.
-                Check(level.arr[thalweg] > ground.arr[thalweg] + 1e-4f,
-                      "the river water surface sits at or below its own bed ("
-                      + level.arr[thalweg].ToString("F5") + " vs ground "
-                      + ground.arr[thalweg].ToString("F5") + ") - the channel is dry");
-
-                Check(depth.arr[thalweg] > 1e-3f,
-                      "River Fill reported no depth in the middle of a 0.02-deep channel");
-
-                // 2. Depth is a cross-section, not one number. The old code returned the
-                //    same value at every pixel, which is what this separates.
-                Check(depth.arr[thalweg] > depth.arr[shoulder] + 1e-3f,
-                      "depth is not deeper at the thalweg (" + depth.arr[thalweg].ToString("F5")
-                      + ") than two pixels off-centre (" + depth.arr[shoulder].ToString("F5")
-                      + ") - the depth port is still a constant");
-
-                // 3. Water does not run uphill. A surface built by adding a constant to
-                //    the ground reproduces every bump of the bed instead.
-                float climbed = 0f;
-                for (int x = mid - 8; x < mid + 8; x++)
-                {
-                    float rise = level.arr[centreZ * res + x + 1] - level.arr[centreZ * res + x];
-                    if (rise > climbed) climbed = rise;
-                }
-
-                Check(climbed < 1e-5f, "the river surface climbs " + climbed.ToString("F7")
-                                       + " downstream - water would be flowing uphill");
-
-                // 4. The mask is what hands the water to the shader, so it has to be on
-                //    in the channel and off outside it, with no film over dry ground.
-                Check(wetMask.arr[thalweg] > 0.5f,
-                      "the River Mask output is " + wetMask.arr[thalweg].ToString("F3")
-                      + " on the channel centreline - wiring River Fill to the Water "
-                      + "Output would show no river");
-
-                Check(wetMask.arr[dry] < 1e-4f,
-                      "the River Mask output is " + wetMask.arr[dry].ToString("F3")
-                      + " twelve pixels clear of the bank - water on dry ground");
-
-                Check(depth.arr[dry] < 1e-4f, "River Fill reported depth outside the channel");
-
-                // 5. A dry cell must report the GROUND as its water level, not zero.
-                //    Zero would pull a water surface built from this port down to the
-                //    bottom of the world.
-                Check(Mathf.Abs(level.arr[dry] - ground.arr[dry]) < 1e-5f,
-                      "outside the channel Water Level reads " + level.arr[dry].ToString("F5")
-                      + " instead of the ground height " + ground.arr[dry].ToString("F5"));
-
-                // 6. Nothing non-finite or out of range reaches a shader parameter.
-                bool sane = true;
-                for (int i = 0; i < res * res && sane; i++)
-                {
-                    if (!IsUnitFinite(wetMask.arr[i])) sane = false;
-                    if (!IsUnitFinite(depth.arr[i])) sane = false;
-                    if (!IsUnitFinite(level.arr[i])) sane = false;
-                }
-
-                Check(sane, "a River Fill output contains a NaN, an infinity, or a value "
-                            + "outside 0..1");
-
-                // 7. The seam. World x = 800 is the LAST pixel of the first chunk and a
-                //    deep-interior pixel of a chunk starting at 400. Both must answer
-                //    the same, or the water steps at every tile border.
-                GraphEvaluator shiftedEval;
-                TileData shifted = ChannelTile(graph, res, worldSpan * 0.5f, worldSpan,
-                                               out shiftedEval);
-
-                Matrix shiftedMask = shiftedEval.PullNode(fill, 0, shifted, stop) as Matrix;
-                Matrix shiftedDepth = shiftedEval.PullNode(fill, 1, shifted, stop) as Matrix;
-                Matrix shiftedLevel = shiftedEval.PullNode(fill, 2, shifted, stop) as Matrix;
-
-                Check(shiftedMask != null && shiftedDepth != null && shiftedLevel != null,
-                      "River Fill returned null when evaluated at a shifted chunk");
-
-                if (shiftedMask != null && shiftedDepth != null && shiftedLevel != null)
-                {
-                    int atEdge = centreZ * res + (res - 1);           // world x = 800
-                    int atInterior = centreZ * res + (res - 1) / 2;   // world x = 800 too
-
-                    Check(Mathf.Abs(level.arr[atEdge] - shiftedLevel.arr[atInterior]) < 1e-4f,
-                          "Water Level at one world position differs between chunks ("
-                          + level.arr[atEdge].ToString("F6") + " at a chunk edge vs "
-                          + shiftedLevel.arr[atInterior].ToString("F6")
-                          + " inside the next) - the river surface steps at the seam");
-
-                    Check(Mathf.Abs(depth.arr[atEdge] - shiftedDepth.arr[atInterior]) < 1e-4f,
-                          "Depth at one world position differs between chunks ("
-                          + depth.arr[atEdge].ToString("F6") + " vs "
-                          + shiftedDepth.arr[atInterior].ToString("F6") + ")");
-
-                    Check(Mathf.Abs(wetMask.arr[atEdge] - shiftedMask.arr[atInterior]) < 1e-4f,
-                          "River Mask at one world position differs between chunks ("
-                          + wetMask.arr[atEdge].ToString("F6") + " vs "
-                          + shiftedMask.arr[atInterior].ToString("F6") + ")");
-                }
-            }
-            finally
-            {
-                UnityEngine.Object.DestroyImmediate(graph);
-            }
-        }
-
-        private static bool IsUnitFinite(float v)
-        {
-            if (float.IsNaN(v) || float.IsInfinity(v)) return false;
-            return v >= 0f && v <= 1f;
-        }
-
-        /// <summary>
-        /// The planner's junction bookkeeping, which the river spawner trusts without
-        /// re-deriving: a course that joins another must name one EARLIER in the list,
-        /// and a lake outlet must name a lake that exists.
-        /// </summary>
-        /// <remarks>
-        /// HydrologyGenerator hands a tributary the trunk object out of an array it
-        /// fills as it walks the plans in order, so a forward reference would read a
-        /// slot that is still null. Nothing would throw: the join would simply be
-        /// dropped, and the only symptom is a confluence that reads as a step between
-        /// two water planes, with nothing in the log pointing here. That is what makes
-        /// the ordering worth a test rather than a comment.
-        /// </remarks>
-        private static void TestRiverPlannerJunctionsAreOrdered()
-        {
-            // A valley: downhill in +x, rising away from the centreline, with the sides
-            // corrugated so they drain as discrete hollows. Flow converges on the
-            // centreline and leaves at the +x edge, which is what yields a trunk with
-            // branches entering it. Every height is above the sea level passed below, so
-            // the mouths are edge outlets - a land-locked world, deliberately, since that
-            // path is the one with no standing water to fall back on.
-            const float span = 4000f;
-            const float centreZ = span * 0.5f;
-            const float halfSpan = span * 0.5f;
-
-            RiverCourseSolver.GroundSampler ground = delegate (float x, float z)
-            {
-                float wall = Mathf.Abs(z - centreZ);
-
-                float downhill = 300f - x * 0.03f;
-                float valley = wall * 0.06f;
-
-                // The corrugation is what makes this fixture worth running. Its troughs
-                // are hollows running down the wall, so cells either side flow into them
-                // and each arrives at the trunk carrying a whole ribbon of hillside -
-                // enough to clear the 0.25 km^2 channel-head area. Amplitude grows with
-                // distance from the centreline so the trunk itself stays a clean line.
-                // A SMOOTH wall drains as sheet flow and yields no tributary at all,
-                // which is what the first version of this fixture did: it passed while
-                // never once running the ordering check below.
-                float hollows = Mathf.Sin(x * 0.00785f) * 30f * (wall / halfSpan);
-
-                return downhill + valley + hollows;
-            };
-
-            Bounds bounds = new Bounds(new Vector3(span * 0.5f, 0f, span * 0.5f),
-                                       new Vector3(span, 600f, span));
-
-            RiverNetworkPlanner.DrainageGrid grid =
-                RiverNetworkPlanner.Solve(ground, bounds, 128);
-
-            Check(grid != null, "the drainage solve returned nothing for a plain valley");
-            if (grid == null) return;
-
-            List<Vector3> lakeCentres = new List<Vector3>();
-            lakeCentres.Add(new Vector3(span * 0.25f,
-                                        ground(span * 0.25f, centreZ), centreZ));
-
-            // Index-aligned with lakeCentres: the planner takes each lake's own reach,
-            // not one shared radius.
-            List<float> lakeRadii = new List<float>();
-            lakeRadii.Add(120f);
-
-            List<RiverNetworkPlanner.PlannedRiver> plans =
-                RiverNetworkPlanner.PlanTrunkRivers(grid, 2, 3, 0f, lakeCentres, lakeRadii,
-                                                    60f, 0f);
-
-            Check(plans != null && plans.Count > 0,
-                  "the planner found no river at all on a valley that drains to one edge");
-            if (plans == null) return;
-
-            int joins = 0;
-
-            for (int i = 0; i < plans.Count; i++)
-            {
-                RiverNetworkPlanner.PlannedRiver p = plans[i];
-                if (p == null || p.joinsPlanIndex < 0) continue;
-
-                joins++;
-
-                Check(p.joinsPlanIndex >= 0 && p.joinsPlanIndex < plans.Count,
-                      "plan " + i + " joins index " + p.joinsPlanIndex
-                      + ", which is outside the " + plans.Count + " plans returned");
-
-                Check(p.joinsPlanIndex < i,
-                      "plan " + i + " joins index " + p.joinsPlanIndex + ", which comes "
-                      + "LATER in the list - the spawner would read a trunk it has not "
-                      + "created yet and drop the confluence in silence");
-            }
-
-            // Without this the two checks above are skipped on a fixture that happens to
-            // produce no branches, and the test reports PASS having verified nothing.
-            Check(joins > 0,
-                  "the planner returned " + plans.Count + " courses but not one of them "
-                  + "joins another, so the ordering invariant was never tested - the "
-                  + "fixture is draining as sheet flow, not the planner's fault");
-
-            // Outlets are appended to the same list by the spawner, so the lake index is
-            // the other half of what it trusts.
-            List<RiverNetworkPlanner.PlannedRiver> outlets =
-                RiverNetworkPlanner.PlanLakeOutlets(grid, 2, 0f, lakeCentres, lakeRadii, 60f);
-
-            Check(outlets != null, "the lake-outlet planner returned null");
-            if (outlets == null) return;
-
-            Check(outlets.Count > 0,
-                  "no outlet was planned for a lake sitting in a draining valley, so the "
-                  + "fromLakeIndex check below never ran");
-
-            for (int i = 0; i < outlets.Count; i++)
-            {
-                RiverNetworkPlanner.PlannedRiver o = outlets[i];
-                if (o == null) continue;
-
-                Check(o.fromLakeIndex >= 0 && o.fromLakeIndex < lakeCentres.Count,
-                      "outlet " + i + " names lake " + o.fromLakeIndex + " of "
-                      + lakeCentres.Count + " - its head cannot be joined to a lake it "
-                      + "cannot identify");
-            }
-
-            // Printed, not asserted: the exact counts are what make the check total
-            // reconcilable, and a silent drop from 3 branches to 1 is worth seeing
-            // without having to fail the run to find out.
-            Debug.Log("[UC SelfTest] river junctions: " + plans.Count + " courses, "
-                      + joins + " confluences, " + outlets.Count + " lake outlets");
-        }
     }
 }
