@@ -168,8 +168,8 @@ namespace UniverseCreator.Editor.Inspectors
             // onRegenerate; a raw toggle here would set the flag and leave the
             // body still refitting, which is the opposite of what it promises.
             DrawPropertiesExcluding(serializedObject,
-                "m_Script", "bodyKind", "shape", "outline", "course",
-                "nodeDepthMetres", "nodeWidthMetres", "nodeFloodplainMetres", "placementSaved",
+                "m_Script", "bodyKind", "shape", "outline",
+                "nodeDepthMetres", "placementSaved",
                 "useOwnMaterial", "water", "materialOverride");
             serializedObject.ApplyModifiedProperties();
 
