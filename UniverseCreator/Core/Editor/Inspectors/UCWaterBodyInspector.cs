@@ -377,17 +377,62 @@ namespace UniverseCreator.Editor.Inspectors
                                        + "elevations by hand."),
                     shownY);
 
-            float newDepth = EditorGUILayout.FloatField(
-                new GUIContent("Depth (0 to inherit)",
-                               "Channel depth at this node in metres. 0 carries the depth "
-                               + "of the last node that set one, easing between them."),
-                body.nodeDepthMetres[i]);
+            // Depth and width are AUTHORED in dig mode and READ in read mode, and the box
+            // has to tell the truth about which. In read mode the node's typed values are
+            // ignored by the solve, so showing them as editable is the "control that does
+            // nothing" this inspector is at pains to avoid; instead we display what the last
+            // solve MEASURED from the trench (item D). In dig mode they are the per-node
+            // values that carry forward until the next node sets one (item E).
+            float newDepth = body.nodeDepthMetres[i];
+            float newWidth = body.nodeWidthMetres[i];
 
-            float newWidth = EditorGUILayout.FloatField(
-                new GUIContent("Width (0 to inherit)",
-                               "Channel width at this node in metres. 0 carries the width "
-                               + "of the last node that set one."),
-                body.nodeWidthMetres[i]);
+            if (body.readTrenchWidth)
+            {
+                float readDepth, readWidth;
+                bool haveRead = body.TryGetReadProfileAt(body.NodeWorldPoint(i), out readDepth, out readWidth);
+
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    if (haveRead)
+                    {
+                        EditorGUILayout.FloatField(
+                            new GUIContent("Read depth (m)",
+                                           "The channel depth MEASURED from the terrain at this "
+                                           + "node. Read mode fills the trench the graph already "
+                                           + "cut - this is what it found, not a value you set."),
+                            readDepth);
+                        EditorGUILayout.FloatField(
+                            new GUIContent("Read width (m)",
+                                           "The channel width MEASURED from the terrain at this "
+                                           + "node, bank to bank."),
+                            readWidth);
+                    }
+                    else
+                    {
+                        EditorGUILayout.LabelField("Read depth / width (m)", "— rebuild to read —");
+                    }
+                }
+
+                if (!haveRead)
+                    EditorGUILayout.HelpBox(
+                        "Read depth and width are measured from the terrain when the river "
+                        + "builds. Rebuild the river to read the trench it follows.",
+                        MessageType.None);
+            }
+            else
+            {
+                newDepth = EditorGUILayout.FloatField(
+                    new GUIContent("Depth (0 to inherit)",
+                                   "Channel depth at this node in metres. 0 carries the depth "
+                                   + "of the last node that set one, easing between them."),
+                    body.nodeDepthMetres[i]);
+
+                newWidth = EditorGUILayout.FloatField(
+                    new GUIContent("Width (0 to inherit)",
+                                   "Channel width at this node in metres. 0 carries the width "
+                                   + "of the last node that set one."),
+                    body.nodeWidthMetres[i]);
+            }
 
             // REFINEMENT #5 C5: the floodplain is a TICK plus a size, opt-in on THIS node
             // (not every node, not the whole river). Ticked, it carves a natural valley
@@ -504,11 +549,32 @@ namespace UniverseCreator.Editor.Inspectors
                 }
             }
 
+            // Item C: a discoverable delete for the selected control point, next to the
+            // scene gestures that add and insert. A button reaches a node the position
+            // handle is drawn on top of, which the Delete key - hit-tested by cursor - can
+            // miss. The gestures are spelled out too, so add / insert / delete are all
+            // findable from the inspector and not only by knowing the shortcut.
+            EditorGUILayout.Space(4);
+            Polyline courseLine = body.course;
+            bool canDelete = courseLine != null && courseLine.Count > 2;
+            using (new EditorGUI.DisabledScope(!canDelete))
+            {
+                if (GUILayout.Button(new GUIContent("Delete this node",
+                        "Removes this control point and rebuilds. Disabled at two points, the "
+                        + "fewest a river course can have.")))
+                {
+                    RemoveNodeAt(body, courseLine, i);
+                    GUIUtility.ExitGUI();   // the node is gone; stop drawing its now-stale panel
+                }
+            }
+
+            EditorGUILayout.HelpBox(
+                "Edit the course in the Scene view: Ctrl+Click adds a node at the end, "
+                + "Shift+Click on the line inserts one where you click, and Delete (or the "
+                + "button above) removes the node under the cursor.", MessageType.None);
+
             EditorGUILayout.EndVertical();
         }
-
-        /// <summary>
-        /// REFINEMENT #5 C4 - the joinable body whose edge is touching a specific END node,
         /// or null. Used by both the node inspector tick and the Scene tick so the two agree
         /// on when a connection is offered and to whom. Tight radius (the node must be ON the
         /// other body's edge, not merely within Auto Connect metres) so the tick means "these
@@ -1787,28 +1853,41 @@ namespace UniverseCreator.Editor.Inspectors
 
             if (best < 0) return;
 
+            RemoveNodeAt(body, line, best);
+            e.Use();
+        }
+
+        /// <summary>Removes control point <paramref name="index"/> together with its weight
+        /// and its per-node depth/width/floodplain entries, fixes the selection, marks the
+        /// body dirty and rebuilds. Shared by the scene-view Delete key and the inspector's
+        /// "Delete this node" button so the two paths can never drift apart. Refuses to drop
+        /// a shape below the minimum it needs to exist (2 points for an open course, 3 for a
+        /// closed outline) - the same floor the key path enforces.</summary>
+        private void RemoveNodeAt(UCWaterBody body, Polyline line, int index)
+        {
+            if (line == null || index < 0 || index >= line.Count) return;
+            int floor = line.closed ? 3 : 2;
+            if (line.Count <= floor) return;
+
             Undo.RecordObject(body, "Remove water point");
 
-            line.points.RemoveAt(best);
+            line.points.RemoveAt(index);
             if (line.weights != null && line.weights.Count == line.points.Count + 1)
-                line.weights.RemoveAt(best);
-                
+                line.weights.RemoveAt(index);
             if (body.nodeDepthMetres != null && body.nodeDepthMetres.Count == line.points.Count + 1)
-                body.nodeDepthMetres.RemoveAt(best);
+                body.nodeDepthMetres.RemoveAt(index);
             if (body.nodeWidthMetres != null && body.nodeWidthMetres.Count == line.points.Count + 1)
-                body.nodeWidthMetres.RemoveAt(best);
+                body.nodeWidthMetres.RemoveAt(index);
             if (body.nodeFloodplainMetres != null && body.nodeFloodplainMetres.Count == line.points.Count + 1)
-                body.nodeFloodplainMetres.RemoveAt(best);
+                body.nodeFloodplainMetres.RemoveAt(index);
 
             SyncNodeArrays(body, line);
-                
-            if (selectedNodeIndex == best) selectedNodeIndex = -1;
-            else if (selectedNodeIndex > best) selectedNodeIndex--;
+
+            if (selectedNodeIndex == index) selectedNodeIndex = -1;
+            else if (selectedNodeIndex > index) selectedNodeIndex--;
 
             EditorUtility.SetDirty(body);
             Rebuild(body);
-
-            e.Use();
         }
 
         /// <summary>Point on segment ab nearest the camera ray. This is the

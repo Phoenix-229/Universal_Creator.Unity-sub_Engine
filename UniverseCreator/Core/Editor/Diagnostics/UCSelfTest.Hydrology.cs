@@ -716,6 +716,274 @@ namespace UniverseCreator.Editor.Diagnostics
         }
 
         // =====================================================================
+        //  6b. Read mode respects a level bank; dig mode still falls (item B)
+        // =====================================================================
+
+        /// <summary>
+        /// The anti-climb rule must RESPECT a read trench/bank: level where the bank is
+        /// level, descending where it descends, never uphill. It must NOT force a river to
+        /// fall along a genuinely level reach the way a fresh dig does, or the water is
+        /// tilted off the banks it was read to sit inside.
+        /// </summary>
+        /// <remarks>
+        /// One profile, two modes. The input has a LEVEL reach (100 to 100), a DESCENDING
+        /// reach (100 to 99), a second LEVEL reach (99 to 99), and finally a RISE (99 to
+        /// 101 - the river drawn up over a hump).
+        ///
+        /// Read Trenches And Banks: the level reaches must survive untouched (no forced
+        /// grade), the descent is kept, and only the rise is clamped - down to the upstream
+        /// LEVEL, never above it. Dig mode: the same level reach must instead be pulled
+        /// below its upstream neighbour by the minimum gradient, because a fresh channel
+        /// cut on flat ground has to fall or it stalls into a dam lip. The one profile
+        /// proves both halves of the contract and, more importantly, their DIFFERENCE - the
+        /// level station stays put in read mode and drops in dig mode. In both modes no
+        /// station may end up higher than the one above it: water never runs uphill.
+        /// </remarks>
+        private static void TestReadModeRespectsBankLevels()
+        {
+            GameObject go = new GameObject("UC_SelfTest_ReadLevel_Probe");
+            try
+            {
+                UCWaterBody body = go.AddComponent<UCWaterBody>();
+
+                // z runs downstream at a wide 1 km spacing, so the dig-mode minimum grade
+                // (0.1 m/km) produces a 0.1 m drop per step - small, but far above the
+                // 1e-4 m epsilon these checks use, so "level" and "forced to fall" cannot
+                // be confused. x is held, so each run is exactly the z step.
+                float[] zs = { 0f, 1000f, 2000f, 3000f, 4000f };
+                List<Vector3> pts = new List<Vector3>();
+                for (int i = 0; i < zs.Length; i++) pts.Add(new Vector3(0f, 0f, zs[i]));
+
+                const float eps = 1e-4f;
+
+                // ---- Read mode: level survives, descent kept, rise clamped to level ----
+                float[] r = { 100f, 100f, 99f, 99f, 101f };
+                body.EnforceDownhillForTest(r, pts, true);
+
+                Check(Mathf.Abs(r[1] - 100f) < eps,
+                      "read mode forced a LEVEL bank reach downhill: station 1 came out "
+                      + r[1].ToString("0.####") + " m instead of staying at 100 m. A river read "
+                      + "into its banks must sit level where the bank is level, not be tilted off "
+                      + "it by an enforced grade");
+
+                Check(Mathf.Abs(r[2] - 99f) < eps && Mathf.Abs(r[3] - 99f) < eps,
+                      "read mode disturbed a reach it should have left alone: the descent to 99 m "
+                      + "and the second level reach came out " + r[2].ToString("0.####") + " and "
+                      + r[3].ToString("0.####") + " instead of 99 and 99. Read mode only clamps a "
+                      + "rise; it may not move a level or descending station");
+
+                Check(Mathf.Abs(r[4] - 99f) < eps,
+                      "read mode let the river climb, or over-corrected it: the uphill station "
+                      + "(drawn at 101 m over a 99 m neighbour) came out " + r[4].ToString("0.####")
+                      + " m instead of being clamped to the upstream LEVEL of 99 m. Uphill is "
+                      + "clamped to level - never left climbing, never dragged below the bank");
+
+                for (int i = 1; i < r.Length; i++)
+                    Check(r[i] <= r[i - 1] + eps,
+                          "read mode left water running uphill at station " + i + ": "
+                          + r[i].ToString("0.####") + " m sits above its upstream neighbour "
+                          + r[i - 1].ToString("0.####") + " m");
+
+                // ---- Dig mode: the SAME level reach is instead forced to fall ----
+                float[] d = { 100f, 100f, 99f, 99f, 101f };
+                body.EnforceDownhillForTest(d, pts, false);
+
+                Check(d[1] < 100f - eps,
+                      "dig mode did NOT enforce a downhill grade on a level reach: station 1 held "
+                      + "at " + d[1].ToString("0.####") + " m instead of being pulled below 100 m. "
+                      + "A fresh channel cut on flat ground must fall or it stalls into a still-water "
+                      + "dam lip - this is exactly the behaviour read mode must NOT copy");
+
+                for (int i = 1; i < d.Length; i++)
+                    Check(d[i] <= d[i - 1] + eps,
+                          "dig mode left water running uphill at station " + i + ": "
+                          + d[i].ToString("0.####") + " m sits above its upstream neighbour "
+                          + d[i - 1].ToString("0.####") + " m");
+
+                // The whole point of item B: same input, same station, different answer.
+                Check(r[1] > d[1] + eps,
+                      "read mode and dig mode treated a level reach identically (both "
+                      + r[1].ToString("0.####") + " m). Read mode must leave it level and dig mode "
+                      + "must pull it downhill; if they agree, the read/dig distinction the author "
+                      + "asked for is not being made");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        // =====================================================================
+        //  6c. Manual dig carries per-node depth/width forward (item E)
+        // =====================================================================
+
+        /// <summary>
+        /// A river dug manually (Read Trenches And Banks off) takes its depth and width
+        /// from the node values, and those CARRY FORWARD to every node below until a node
+        /// sets a new one. A node left unset (0) is not "zero depth" - it inherits what the
+        /// river is already carrying. The run before the first authored node takes the
+        /// body-wide default, so a course with nothing typed behaves exactly as before
+        /// per-node values existed.
+        /// </summary>
+        /// <remarks>
+        /// Two cases. FIRST, one authored node in the middle proves the carry-forward and
+        /// the pre-first-node default cleanly, with no easing to muddy it: default before
+        /// it, the authored value at it, and that same value held to the end. SECOND, two
+        /// authored nodes with a gap between prove the documented easing - the inherited
+        /// stretch transitions from the upstream value to the downstream one rather than
+        /// stepping, and stays strictly between the two the whole way.
+        /// </remarks>
+        private static void TestManualDigCarriesNodeValuesForward()
+        {
+            GameObject go = new GameObject("UC_SelfTest_NodeCarry_Probe");
+            try
+            {
+                UCWaterBody body = go.AddComponent<UCWaterBody>();
+
+                // Five nodes; positions do not matter to the inherit rule, only the count.
+                body.course.points.Clear();
+                for (int i = 0; i < 5; i++) body.course.points.Add(new Vector3(i * 10f, 0f, 0f));
+
+                const float eps = 1e-3f;
+
+                // ---- Case 1: one authored node, default before, carried after ----
+                // depth authored only at node 2 (= 5 m); body default is 1 m.
+                var authored1 = new List<float> { 0f, 0f, 5f, 0f, 0f };
+                float[] r1 = body.ResolveNodeSeriesForTest(authored1, 1f);
+
+                Check(r1 != null && r1.Length == 5,
+                      "the resolved depth series came back "
+                      + (r1 == null ? "null" : r1.Length + " long") + " for a 5-node course");
+
+                Check(Mathf.Abs(r1[0] - 1f) < eps && Mathf.Abs(r1[1] - 1f) < eps,
+                      "the run BEFORE the first authored node did not take the body default: "
+                      + "nodes 0,1 came out " + r1[0].ToString("0.###") + "," + r1[1].ToString("0.###")
+                      + " instead of 1,1. A course with a value set only downstream must still have "
+                      + "a sensible depth above it");
+
+                Check(Mathf.Abs(r1[2] - 5f) < eps,
+                      "the authored node did not take its own value: node 2 came out "
+                      + r1[2].ToString("0.###") + " instead of the authored 5 m");
+
+                Check(Mathf.Abs(r1[3] - 5f) < eps && Mathf.Abs(r1[4] - 5f) < eps,
+                      "the authored value did NOT carry forward: nodes 3,4 came out "
+                      + r1[3].ToString("0.###") + "," + r1[4].ToString("0.###") + " instead of 5,5. "
+                      + "A depth typed at one node must be carried down every node below it until a "
+                      + "new one is typed - this is the carry-forward the author asked for");
+
+                // ---- Case 2: two authored nodes, the gap eases between them ----
+                var authored2 = new List<float> { 2f, 0f, 0f, 0f, 6f };
+                float[] r2 = body.ResolveNodeSeriesForTest(authored2, 10f);
+
+                Check(Mathf.Abs(r2[0] - 2f) < eps && Mathf.Abs(r2[4] - 6f) < eps,
+                      "the two authored ends were not held: nodes 0,4 came out "
+                      + r2[0].ToString("0.###") + "," + r2[4].ToString("0.###") + " instead of 2,6 "
+                      + "(and note the pre-first-node default of 10 must NOT leak into node 0)");
+
+                Check(r2[1] > r2[0] + eps && r2[2] > r2[1] + eps && r2[3] > r2[2] + eps
+                      && r2[4] > r2[3] + eps,
+                      "the inherited stretch between two authored nodes did not EASE upward "
+                      + "monotonically: [" + r2[0].ToString("0.##") + "," + r2[1].ToString("0.##")
+                      + "," + r2[2].ToString("0.##") + "," + r2[3].ToString("0.##") + ","
+                      + r2[4].ToString("0.##") + "]. A step in the dig shows as a shelf across the "
+                      + "channel, so the value must transition, not plateau then jump");
+
+                for (int i = 0; i < 5; i++)
+                    Check(r2[i] >= 2f - eps && r2[i] <= 6f + eps,
+                          "the eased value at node " + i + " (" + r2[i].ToString("0.###")
+                          + ") left the 2..6 m span of the two authored ends it interpolates between");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        // =====================================================================
+        //  6d. Read mode gap-fills to the next bank, but never gouges open ground (item F)
+        // =====================================================================
+        // The manual river reads existing trenches, but the procedural pass does not
+        // trench every metre. Where the course crosses a stretch the procedural node
+        // left flat, and that stretch ENDS at an existing bank (or a joined mouth),
+        // the read must DIG a ramp that deepens toward the bank so the two meet
+        // continuously - no cliff where the authored trench begins. Where the stretch
+        // ends at NEITHER a bank nor a mouth, it must dig nothing and rest on the
+        // ground. Both halves are asserted here against the real BuildBankAwareReadChannel.
+        private static void TestReadModeGapFillsToBank()
+        {
+            GameObject go = new GameObject("UC_SelfTest_GapFill_Probe");
+            try
+            {
+                UCWaterBody body = go.AddComponent<UCWaterBody>();
+                body.bankFreeboardMetres = 0.10f;   // pin the flat-ground inset the assertions expect
+
+                // Five stations, 10 m apart, so arc length is uniform and the ramp is easy
+                // to reason about. widths only feed the mouth case (not exercised here).
+                var world  = new List<Vector3>();
+                var widths = new List<float>();
+                for (int i = 0; i < 5; i++) { world.Add(new Vector3(i * 10f, 0f, 0f)); widths.Add(5f); }
+
+                const float eps = 1e-3f;
+
+                // ---- Case A: a flat gap that ENDS at a downstream bank ----
+                // depths[] doubles as the "banked" marker: >5 cm means the ground already
+                // holds a trench of that crest. Banks at station 0 and 4 (3 m); 1..3 flat.
+                var depthsA = new List<float> { 3f, 0f, 0f, 0f, 3f };
+                float[] surfA = new float[5];
+                float[] digA  = body.BuildBankAwareReadChannelForTest(world, widths, depthsA, surfA);
+
+                Check(digA != null && digA.Length == 5,
+                      "the read-mode dig came back "
+                      + (digA == null ? "null" : digA.Length + " long") + " for a 5-station course");
+
+                Check(Mathf.Abs(digA[0]) < eps && Mathf.Abs(digA[4]) < eps,
+                      "a banked station was re-dug: stations 0 and 4 (which already hold a "
+                      + "trench) came out " + digA[0].ToString("0.###") + "," + digA[4].ToString("0.###")
+                      + " instead of 0 - a read bank must be cut-only, never re-carved");
+
+                Check(digA[3] > digA[2] + eps && digA[2] > digA[1] + eps,
+                      "the gap dig did NOT ramp UP toward the downstream bank: stations 1..3 "
+                      + "came out [" + digA[1].ToString("0.###") + "," + digA[2].ToString("0.###")
+                      + "," + digA[3].ToString("0.###") + "]. It must deepen as it approaches the "
+                      + "existing trench so the bed meets the bank continuously");
+
+                Check(digA[3] > 0.5f * 3f,
+                      "the gap did not deepen ENOUGH to meet the 3 m bank it flows into: the "
+                      + "station just above the bank dug only " + digA[3].ToString("0.###")
+                      + " m. Where the river reaches an existing trench the dig must approach that "
+                      + "trench's depth, or a step is left where they join");
+
+                // ---- Case B: the same flat gap ending at NEITHER a bank nor a mouth ----
+                // Only station 0 is banked; 1..4 run to the open end with no join authored.
+                var depthsB = new List<float> { 3f, 0f, 0f, 0f, 0f };
+                float[] surfB = new float[5];
+                float[] digB  = body.BuildBankAwareReadChannelForTest(world, widths, depthsB, surfB);
+
+                Check(Mathf.Abs(digB[1] - digB[2]) < eps && Mathf.Abs(digB[2] - digB[3]) < eps
+                      && Mathf.Abs(digB[3] - digB[4]) < eps,
+                      "an open run that reaches no bank and no mouth was RAMPED anyway: stations "
+                      + "1..4 came out [" + digB[1].ToString("0.###") + "," + digB[2].ToString("0.###")
+                      + "," + digB[3].ToString("0.###") + "," + digB[4].ToString("0.###") + "]. With "
+                      + "nothing downstream to meet, the read must rest flat on the ground, not dig");
+
+                Check(digB[4] < 1f,
+                      "an open run gouged open ground: the far station dug " + digB[4].ToString("0.###")
+                      + " m with no bank or mouth ahead of it. Only the freeboard inset (a few cm) is "
+                      + "allowed where the river merely rests on flat terrain");
+
+                Check(digA[3] > digB[3] + 1f,
+                      "the read did not DISTINGUISH a gap that meets a bank from one that does not: "
+                      + "the station above a 3 m bank dug " + digA[3].ToString("0.###")
+                      + " m yet the same station over open ground dug " + digB[3].ToString("0.###")
+                      + " m. Only the run that reaches a trench should deepen");
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(go);
+            }
+        }
+
+        // =====================================================================
         //  7. Downstream width grows on its own, with nothing typed (J.4)
         // =====================================================================
 
@@ -969,6 +1237,179 @@ namespace UniverseCreator.Editor.Diagnostics
                   "a tiny-catchment branch was bounded to " + tiny.ToString("0") + " m, under the "
                   + "minimum course length. The bound must never clip a valid branch below the floor a "
                   + "river object needs to exist at all");
+        }
+
+        // =====================================================================
+        //  10. A connected River Network Trace / River Course Solver actually
+        //      carves a trench through River Carve
+        // =====================================================================
+
+        private const float TraceCarveWorldMetres = 2000f;
+
+        /// <summary>
+        /// Analytic ground for the trace-&gt;carve check: a regional slope with one trunk
+        /// valley down the centre, so drainage converges into a channel with a real
+        /// catchment and descends monotonically to the sea. Normalised 0..1 height.
+        /// </summary>
+        private static float TraceCarveHeight(float wx, float wz)
+        {
+            float metres = 480f - 0.11f * wz;
+            float u = (wx - TraceCarveWorldMetres * 0.5f) / 300f;
+            metres -= 60f * Mathf.Exp(-u * u);
+            return Mathf.Clamp01(metres / 600f);
+        }
+
+        /// <summary>Test feed: the analytic converging-valley ground.</summary>
+        private class TraceCarveGroundFeed : CreatorNode
+        {
+            public override string NodeName { get { return "Test Trace-Carve Ground"; } }
+            public override NodeCategory Category { get { return NodeCategory.Creator; } }
+
+            protected override void Create(Matrix m, TileData tile, StopToken stop)
+            {
+                int sx = m.rect.size.x, sz = m.rect.size.z;
+                Vector2 ps = m.PixelSize;
+                for (int z = 0; z < sz; z++)
+                {
+                    float wz = m.worldPos.z + z * ps.y;
+                    int row = z * sx;
+                    for (int x = 0; x < sx; x++)
+                    {
+                        float wx = m.worldPos.x + x * ps.x;
+                        m.arr[row + x] = TraceCarveHeight(wx, wz);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Builds a single tile that IS the whole world, bound to its own evaluator, so a
+        /// world-wide drainage solve and the per-tile stamp both land in the one matrix we read.
+        /// </summary>
+        private static TileData TraceCarveTile(Graph graph, int res, out GraphEvaluator evaluator)
+        {
+            float w = TraceCarveWorldMetres;
+            TileData tile = new TileData(
+                Coord.Zero,
+                new CoordRect(new Coord(0, 0), new Coord(res, res)),
+                Vector3.zero,
+                new Vector3(w, 600f, w),
+                600f);
+            tile.SetFullWorld(Vector3.zero, new Vector3(w, 600f, w));
+            evaluator = new GraphEvaluator(graph);
+            tile.Bind(evaluator);
+            return tile;
+        }
+
+        /// <summary>
+        /// Shared checks for a trace-&gt;carve pull: the mask has wet cells, River Carve cut
+        /// the ground below where it started at some wet cell, and it left the world corner
+        /// (far from any channel) alone.
+        /// </summary>
+        private static void AssertTraceCarvesTrench(string who, Matrix ground, Matrix mask, Matrix carved)
+        {
+            Check(ground != null && mask != null && carved != null,
+                  who + " -> River Carve returned null somewhere in the chain (ground/mask/carved)");
+            if (ground == null || mask == null || carved == null) return;
+
+            int n = mask.arr.Length;
+            int wet = 0, lowered = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (mask.arr[i] <= 0.001f) continue;
+                wet++;
+                if (carved.arr[i] < ground.arr[i] - 1e-4f) lowered++;
+            }
+
+            Check(wet > 0,
+                  who + " produced a River Mask with no wet cells, so River Carve had nothing to "
+                  + "cut. A connected trace over a draining world must stamp a channel; a blank "
+                  + "mask is the trace half of \"no river trenches\"");
+
+            Check(lowered > 0,
+                  who + " stamped " + wet + " wet cell(s) but River Carve lowered the ground at "
+                  + "none of them. The mask reached the carve and no trench came out - the carve "
+                  + "half of \"no river trenches\"");
+
+            int dry = 0;  // world origin corner, far from the centre valley
+            Check(mask.arr[dry] <= 0.001f && Mathf.Abs(carved.arr[dry] - ground.arr[dry]) < 1e-4f,
+                  who + " -> River Carve changed ground away from any channel, or the mask bled to "
+                  + "the world corner - the carve must be confined to the channel it was given");
+        }
+
+        /// <summary>
+        /// The exact wiring the report is about: River Network Trace (and River Course
+        /// Solver) feeding River Carve. Trace's mask -&gt; Carve's River Mask, the ground -&gt;
+        /// Carve's Height. If the trace returns a blank mask, or the carve reads it and cuts
+        /// nothing, the terrain gets no river trench - which is what "I connected the river
+        /// nodes and there are no trenches" is. None of this is arithmetic the compiler
+        /// covers: it is whether the graph path end-to-end still puts a channel in the ground.
+        /// It is also the ONLY self-test that exercises StampNetwork + BuildValleyRefine (the
+        /// WalkDownhill re-route) through the node graph - the spawner path does not touch them.
+        /// </summary>
+        private static void TestConnectedRiverNodesCarveATrench()
+        {
+            const int res = 129;
+
+            // ---- River Network Trace -> River Carve ----
+            Graph traceGraph = ScriptableObject.CreateInstance<Graph>();
+            try
+            {
+                TraceCarveGroundFeed ground = new TraceCarveGroundFeed();
+                RiverNetworkTraceNode trace = new RiverNetworkTraceNode();
+                RiverCarveNode carve = new RiverCarveNode();
+
+                traceGraph.nodes.Add(ground);
+                traceGraph.nodes.Add(trace);
+                traceGraph.nodes.Add(carve);
+                traceGraph.connections.Add(new Connection(ground.id, 0, trace.id, 0)); // ground -> Trace.Height
+                traceGraph.connections.Add(new Connection(ground.id, 0, carve.id, 0)); // ground -> Carve.Height
+                traceGraph.connections.Add(new Connection(trace.id, 0, carve.id, 1));  // River Mask -> Carve.River Mask
+
+                GraphEvaluator eval;
+                TileData tile = TraceCarveTile(traceGraph, res, out eval);
+                StopToken stop = new StopToken();
+
+                Matrix groundM = eval.PullNode(ground, 0, tile, stop) as Matrix;
+                Matrix maskM = eval.PullNode(trace, 0, tile, stop) as Matrix;
+                Matrix carvedM = eval.PullNode(carve, 0, tile, stop) as Matrix;
+
+                AssertTraceCarvesTrench("River Network Trace", groundM, maskM, carvedM);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(traceGraph);
+            }
+
+            // ---- River Course Solver -> River Carve (one node feeds both carve inputs) ----
+            Graph solverGraph = ScriptableObject.CreateInstance<Graph>();
+            try
+            {
+                TraceCarveGroundFeed ground = new TraceCarveGroundFeed();
+                RiverCourseSolverNode solver = new RiverCourseSolverNode();
+                RiverCarveNode carve = new RiverCarveNode();
+
+                solverGraph.nodes.Add(ground);
+                solverGraph.nodes.Add(solver);
+                solverGraph.nodes.Add(carve);
+                solverGraph.connections.Add(new Connection(ground.id, 0, solver.id, 0)); // ground -> Solver.Height
+                solverGraph.connections.Add(new Connection(solver.id, 0, carve.id, 0));  // Height passthrough -> Carve.Height
+                solverGraph.connections.Add(new Connection(solver.id, 1, carve.id, 1));  // River Mask -> Carve.River Mask
+
+                GraphEvaluator eval;
+                TileData tile = TraceCarveTile(solverGraph, res, out eval);
+                StopToken stop = new StopToken();
+
+                Matrix groundM = eval.PullNode(ground, 0, tile, stop) as Matrix;
+                Matrix maskM = eval.PullNode(solver, 1, tile, stop) as Matrix;
+                Matrix carvedM = eval.PullNode(carve, 0, tile, stop) as Matrix;
+
+                AssertTraceCarvesTrench("River Course Solver", groundM, maskM, carvedM);
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(solverGraph);
+            }
         }
     }
 }

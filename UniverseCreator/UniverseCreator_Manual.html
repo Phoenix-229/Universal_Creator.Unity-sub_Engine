@@ -6000,12 +6000,12 @@ lowering the floor below 60 m&sup2; starts reading heightmap noise as lakes.</p>
 <tbody>
 <tr><td><code>Course</code></td><td>empty</td><td>The spline the river follows &mdash; a list of points in local space</td></tr>
 <tr><td><code>Width Metres</code></td><td>&mdash;</td><td>Surface width of the channel</td></tr>
-<tr><td><code>Read Trench Width</code></td><td>off</td><td>Read the channel already cut into the terrain instead of digging one. Both the width <em>and</em> the depth are measured from the trench cross-section and the water is filled to the bank, so it never hangs. Nothing is dug and no carve math runs &mdash; <code>Width Metres</code> and <code>Channel Depth Metres</code> are ignored and the ground is left exactly as the graph made it</td></tr>
+<tr><td><code>Read Trenches And Banks</code></td><td>off</td><td>Read the channel already cut into the terrain instead of digging one. Both the width <em>and</em> the depth are measured from the trench cross-section and the water is filled to the bank, so it never hangs. Nothing is dug and no carve math runs &mdash; <code>Width Metres</code> and <code>Channel Depth Metres</code> are ignored and the ground is left exactly as the graph made it. The Selected Node panel then <em>shows</em> the depth and width it read at each node (greyed, since you did not set them), and where the drawn course crosses ground the graph did <strong>not</strong> trench it digs just enough to meet the existing bank, so the two are continuous rather than stepped</td></tr>
 <tr><td><code>Width Segments</code></td><td>(2..24)</td><td>Vertices across the river. More gives a smoother cross-section</td></tr>
 <tr><td><code>Point Spacing Metres</code></td><td>&mdash;</td><td>Distance between generated points along the course</td></tr>
 <tr><td><code>Channel Depth Metres</code></td><td>&mdash;</td><td>How deep the bed is cut below the surface</td></tr>
 <tr><td><code>Bank Profile</code></td><td>(1..6)</td><td>Cross-section shape. 1 is a V, 2 a U, higher approaches a box channel</td></tr>
-<tr><td><code>Enforce Downhill</code></td><td>on</td><td>Forces the water surface to descend monotonically along the course</td></tr>
+<tr><td><code>Enforce Downhill</code></td><td>on</td><td>Keeps the water surface from ever climbing. When digging it forces a monotonic descent along the course. In <code>Read Trenches And Banks</code> mode it does <em>not</em> impose a grade &mdash; it only clamps rises, so the surface stays <strong>level where the read trench is level</strong> and descends where the trench descends, following the bank profile instead of overriding it</td></tr>
 <tr><td><code>Profile Smoothing</code></td><td>(0..12)</td><td>Smoothing passes on the longitudinal profile</td></tr>
 </tbody>
 </table></div>
@@ -6049,11 +6049,12 @@ under the course is noisy. 4&ndash;6 passes usually suffice.</p>
 <thead><tr><th>Row</th><th>Meaning</th></tr></thead>
 <tbody>
 <tr><td><code>Elevation (m)</code></td><td>The water surface at this node. <strong>Editable only when <code>Bed Source</code> is <code>Flat Floor</code></strong>, because that is the only mode where the drawn line is the river&rsquo;s datum. In every other mode the row is greyed and reads <code>Elevation (m, from ground)</code> &mdash; the number is real, but it comes off the terrain and typing into it would be a lie</td></tr>
-<tr><td><code>Depth (0 to inherit)</code></td><td>Channel depth here, in metres. <code>0</code> carries the depth of the last node that set one, easing between them</td></tr>
-<tr><td><code>Width (0 to inherit)</code></td><td>Channel width here, in metres. <code>0</code> carries the width of the last node that set one</td></tr>
+<tr><td><code>Depth (0 to inherit)</code></td><td>Channel depth here, in metres. <code>0</code> carries the depth of the last node that set one, easing between them. When <code>Read Trenches And Banks</code> is on this row is greyed and reads <code>Read depth (m)</code> instead &mdash; the number is <em>measured</em> from the trench the graph cut, not one you type</td></tr>
+<tr><td><code>Width (0 to inherit)</code></td><td>Channel width here, in metres. <code>0</code> carries the width of the last node that set one. In <code>Read Trenches And Banks</code> mode it is greyed and reads <code>Read width (m)</code>, the bank-to-bank width measured off the terrain</td></tr>
 <tr><td><code>Floodplain valley</code> / <code>Valley size (m)</code></td><td>A per-node valley: tick it and give a width, and the corridor at this node widens to that floodplain regardless of the body-wide setting. Off carries the body&rsquo;s own valley</td></tr>
 <tr><td><code>Grade</code></td><td><code>from X%&nbsp; to Y%</code> &mdash; the surveyor&rsquo;s figure a road node carries: rise over the <strong>horizontal</strong> run, negative downhill. This is what tells you <em>which single node</em> is wrong on a river that looks wrong. &quot;This reach is at 9%&quot; is a rapid; &quot;0.2%&quot; is a pond</td></tr>
 <tr><td>Junction</td><td>On an end node only (Head or Mouth): a tick box <code>Connect to &lt;name&gt; (&lt;kind&gt;)</code> when the end is touching another body, or <code>Connected to &lt;name&gt;</code> once joined &mdash; untick to drop it. The target is whatever the node touches; there is no picking mode</td></tr>
+<tr><td><code>Delete this node</code></td><td>Removes this control point and rebuilds &mdash; the same as pressing Delete over it in the scene, but reachable when the position handle is drawn on top of the node. Greyed at two nodes, the fewest a course can have</td></tr>
 </tbody>
 </table></div>
 So type a depth at the three or four places the river actually changes &mdash; shallow at the head, deep at the outside of a big bend, deep again at the mouth &mdash; and leave everything else at zero. Real rivers do not have a single depth, and this is where they stop having one. If the selected node sits uphill of a neighbour the panel says so in a warning: the solve will flatten that reach rather than let water climb, so the river ponds there. Move the node downhill.</li>
@@ -9762,7 +9763,7 @@ Min, Max.</p>
 </ul></div>
 <!--BODY-->
 <h3 id="run-self-test" data-title="Run Self Test">Run Self Test</h3>
-<p><strong>Tools &#9656; Universe Creator &#9656; Run Self Test.</strong> Exercises node evaluation, graph serialisation, chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the shoreline conformer and the scatter placer, the Module 2 water chain enumerated below, and the whole Living-World layer. It writes the result to the console. The most recent passing run recorded here reports <strong>15012 checks</strong>.</p>
+<p><strong>Tools &#9656; Universe Creator &#9656; Run Self Test.</strong> Exercises node evaluation, graph serialisation, chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the shoreline conformer and the scatter placer, the Module 2 water chain enumerated below, and the whole Living-World layer. It writes the result to the console. The most recent passing run recorded here reports <strong>15051 checks</strong>.</p>
 <p>It <strong>never opens a dialog</strong>, so it is safe in batch mode:</p>
 <pre data-lang="shell"><code>Unity.exe -batchmode -quit -silent-crashes \
   -projectPath &quot;&lt;project&gt;&quot; \
@@ -9771,7 +9772,7 @@ Min, Max.</p>
 </code></pre>
 <p>The last three lines of the log are the result:</p>
 <pre data-lang="console"><code>=== UC SELF TEST: PASS ===
-checks run : 15012
+checks run : 15051
 failures   : 0
 </code></pre>
 <p><strong>The process exit code is not a reliable pass signal.</strong> Grep the log for <code>error CS</code> and for the self-test's own failure lines. A batch run that reports success while the log contains compile errors means Unity never got as far as the test.</p>

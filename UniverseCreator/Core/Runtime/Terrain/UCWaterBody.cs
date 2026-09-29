@@ -2278,10 +2278,30 @@ namespace UniverseCreator.TerrainSystem
         /// already steeper than this keeps its own natural slope. This is a refinement of
         /// the anti-climb rule, not a replacement - a rise is still clamped, now to just
         /// below the neighbour instead of level with it.
+        ///
+        /// The gradient floor applies to DIG mode only. In Read Trenches And Banks the
+        /// surface already tracks the measured trench/bank, so the floor is dropped to
+        /// zero and the rule becomes pure anti-climb (clamp a rise to level, leave a level
+        /// or descending reach as the trench reads it). Forcing a fall there would tilt a
+        /// level bank downhill and lift the water off the banks it was read to sit in.
         /// </remarks>
         private void EnforceDownhill(float[] surf, List<Vector3> pts)
         {
             if (!enforceDownhill || surf == null) return;
+
+            // Read Trenches And Banks: the surface here already follows the MEASURED
+            // trench/bank profile (BuildBankAwareReadChannel) - level along a level bank,
+            // falling where the trench floor falls. Forcing a minimum grade on top of that
+            // would tilt a genuinely level reach downhill and pull the water off the banks
+            // it was read to sit inside, which is exactly the "respect the banks and
+            // trenches where they are level, move downhill only where they move downhill,
+            // but never uphill" the author asked for. So in read mode the rule is pure
+            // anti-climb: a RISE is clamped down to the upstream level (water never runs
+            // uphill), while a level or descending reach is left exactly as the trench
+            // reads it. In DIG mode the river cuts its own fresh channel, where a
+            // guaranteed minimum fall is what keeps a reach from stalling into a
+            // still-water dam lip - so the gradient floor stays there.
+            float gradient = readTrenchWidth ? 0f : MinRiverGradient;
 
             for (int i = 1; i < surf.Length; i++)
             {
@@ -2297,7 +2317,7 @@ namespace UniverseCreator.TerrainSystem
                     run = Mathf.Sqrt(dx * dx + dz * dz);
                 }
 
-                float maxAllowed = surf[i - 1] - run * MinRiverGradient;
+                float maxAllowed = surf[i - 1] - run * gradient;
                 if (surf[i] > maxAllowed) surf[i] = maxAllowed;
             }
         }
@@ -3575,6 +3595,47 @@ namespace UniverseCreator.TerrainSystem
         public void ApplyHydraulicGeometryForTest(List<Vector3> pts, List<float> widths, List<float> depths)
         {
             ApplyHydraulicGeometry(pts, widths, depths);
+        }
+
+        /// <summary>Editor-only: run the anti-climb / gradient rule on a supplied surface
+        /// profile in the chosen mode. Sets Read Trenches And Banks to <paramref name="readTrench"/>
+        /// first, so the self test can prove that in read mode a LEVEL trench reach stays
+        /// level (no forced fall) while a rise is still clamped down, and that in dig mode
+        /// the minimum gradient floor still pulls every reach downhill. Rewrites
+        /// <paramref name="surf"/> in place. Public for the same cross-assembly reason as
+        /// above, behind the same build guard.</summary>
+        public void EnforceDownhillForTest(float[] surf, List<Vector3> pts, bool readTrench)
+        {
+            readTrenchWidth = readTrench;
+            EnforceDownhill(surf, pts);
+        }
+
+        /// <summary>Editor-only: resolve a per-node series (depth or width) the way the
+        /// manual DIG does - an unset (0) node inherits the value carried down from the
+        /// last node above it that was set, easing between two set nodes rather than
+        /// stepping. Reads <see cref="course"/>.Count for the length, so the caller sets
+        /// the course points first. Lets the self test prove the carry-forward the author
+        /// asked for. Public for the same cross-assembly reason as above, behind the same
+        /// build guard.</summary>
+        public float[] ResolveNodeSeriesForTest(List<float> authored, float fallback)
+        {
+            return ResolveNodeSeries(authored, fallback);
+        }
+
+        /// <summary>Editor-only: run the Read Trenches And Banks gap-fill on a supplied
+        /// course and a hand-marked bank pattern (a station is "banked" where its
+        /// <paramref name="depths"/> crest is over 5 cm). Returns the per-station DIG the
+        /// solver would cut, so the self test can prove the continuity rule: an unbanked
+        /// run that reaches a downstream bank ramps its dig up to that bank's depth (the
+        /// terrain joins continuously), while a run that reaches neither a bank nor a
+        /// joined mouth digs nothing and rests on the ground. Rewrites <paramref name="surf"/>
+        /// and <paramref name="depths"/> in place exactly as the real solve does. Public
+        /// for the same cross-assembly reason as above, behind the same build guard.</summary>
+        public float[] BuildBankAwareReadChannelForTest(List<Vector3> world, List<float> widths,
+                                                        List<float> depths, float[] surf)
+        {
+            readTrenchWidth = true;
+            return BuildBankAwareReadChannel(world, widths, depths, surf);
         }
 #endif
 
@@ -5413,6 +5474,41 @@ namespace UniverseCreator.TerrainSystem
             Vector3 w = NodeWorldPoint(index);
             w.y = NodeSurfaceY(index);
             return w;
+        }
+
+        /// <summary>
+        /// Editor readout for Read Trenches And Banks mode: the channel DEPTH and WIDTH the
+        /// last solve MEASURED from the terrain at the solved station nearest
+        /// <paramref name="worldPoint"/> (matched on the XZ plane, since a station's Y is
+        /// the water surface, not a position to match on). Returns false when nothing has
+        /// been read yet - dig mode, or before the first solve - so the inspector shows a
+        /// prompt instead of a stale zero. In read mode the node's own Depth/Width fields
+        /// are ignored, so these measured figures are the only honest ones to display: item
+        /// D asked that a reading river SHOW what it reads. solvedDepths/solvedWidths run
+        /// 1:1 with solvedPoints, so the nearest station's pair is this node's reading.
+        /// </summary>
+        public bool TryGetReadProfileAt(Vector3 worldPoint, out float depth, out float width)
+        {
+            depth = 0f;
+            width = 0f;
+            if (!readTrenchWidth) return false;
+            if (solvedPoints == null || solvedPoints.Count == 0) return false;
+            if (solvedDepths == null || solvedWidths == null) return false;
+
+            int best = -1;
+            float bestSq = float.MaxValue;
+            for (int i = 0; i < solvedPoints.Count; i++)
+            {
+                float dx = solvedPoints[i].x - worldPoint.x;
+                float dz = solvedPoints[i].z - worldPoint.z;
+                float sq = dx * dx + dz * dz;
+                if (sq < bestSq) { bestSq = sq; best = i; }
+            }
+            if (best < 0) return false;
+
+            depth = (best < solvedDepths.Count) ? Mathf.Max(0f, solvedDepths[best]) : 0f;
+            width = (best < solvedWidths.Count) ? Mathf.Max(0f, solvedWidths[best]) : 0f;
+            return true;
         }
 
         /// <summary>

@@ -133,9 +133,13 @@ namespace UniverseCreator.Editor.Diagnostics
             TestSpawnerPlacesRealWaterObjects();
             TestLakeDepthGateMatchesTheMask();
             TestWaterfallsFormOnSteepReaches();
+            TestReadModeRespectsBankLevels();
+            TestManualDigCarriesNodeValuesForward();
+            TestReadModeGapFillsToBank();
             TestDownstreamWidthGrowsWithoutAuthoring();
             TestInlandCourseJoinsTheRiverItFlowsInto();
             TestTributaryLengthFollowsHacksLaw();
+            TestConnectedRiverNodesCarveATrench();
 
             TestGraphHealsMissingNodeSlots();
 
