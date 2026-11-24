@@ -100,6 +100,24 @@ namespace UniverseCreator.TerrainSystem.Lighting
             return (float)(illuminanceLux / (4 * System.Math.PI * sine * sine));
         }
 
+        /// <summary>Peak displayed (post-exposure) channel value allowed for the sun disc.</summary>
+        /// <remarks>The true solar radiance is ~10^8 cd/m2 and saturates every channel, which is why the disc looked pure white
+        /// at every hour. Capping the brightest channel keeps hue: a low, reddened sun stays orange, noon stays warm white.</remarks>
+        internal static float SunDiscDisplayPeak(float sunNormalLux)
+        {
+            float t = Mathf.Clamp01(sunNormalLux / LightingConstants.NoonClearSkyLux);
+            return Mathf.Lerp(2.5f, 24f, Mathf.Sqrt(t));
+        }
+
+        /// <summary>Scales a colour down so its brightest channel does not exceed peak, preserving hue.</summary>
+        internal static Color LimitPeakPreservingHue(Color c, float peak)
+        {
+            float max = Mathf.Max(c.r, Mathf.Max(c.g, c.b));
+            if (max <= peak || max <= 0f) return c;
+            float k = peak / max;
+            return new Color(c.r * k, c.g * k, c.b * k, c.a);
+        }
+
         /// <summary>
         /// The sun's share of the lighting across the civil-twilight band: 0 at and
         /// below the sun 6 deg under the horizon, rising smoothly to 1 as it reaches

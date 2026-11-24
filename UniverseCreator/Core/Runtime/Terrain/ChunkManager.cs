@@ -2626,7 +2626,7 @@ namespace UniverseCreator.TerrainSystem
                 if (!bakeClimatePreparation.IsCompleted || !bakeClimatePreparation.GetAwaiter().GetResult()) return;
             }
             RefreshQueuedChunkDemand(o); // UC-T02-08: shared-pool waiters track the current camera and collision demand too.
-            int limit = Mathf.Max(1, o.maxConcurrentChunks);
+            int limit = UniverseCreatorObject.ChunkConcurrency;
 
             if (o.frustumFirstBuildOrder)
             {
@@ -2946,7 +2946,7 @@ namespace UniverseCreator.TerrainSystem
             System.Collections.Generic.Dictionary<string, RetainedProduct> retainedSeed = c.retained;
 
             GenerationSnapshot.Lease workerLease = snapshot.Acquire();
-            c.task = scheduler.RunWorkerAsync(worldRun, Mathf.Max(1, o.maxConcurrentChunks), stop, () =>
+            c.task = scheduler.RunWorkerAsync(worldRun, UniverseCreatorObject.ChunkConcurrency, stop, () =>
             {
                 TileData tile = null;
                 bool published = false;

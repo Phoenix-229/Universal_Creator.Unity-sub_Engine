@@ -149,6 +149,9 @@ Shader "UniverseCreator/Skybox"
                 // Discs crossing the horizon disappear progressively; a below-horizon sky ray must not show either body.
                 float horizon = smoothstep(0.0, max(fwidth(dir.y), 1e-5), dir.y);
                 moon *= horizon; sun *= horizon;
+                // Circumsolar glow must not clip to a big white blob: cap the brightest channel, keep the hue.
+                float skyPeak = max(sky.r, max(sky.g, sky.b));
+                sky *= min(1.0, 8.0 / max(skyPeak, 1e-5));
                 sky = lerp(sky, _UCMoonColor.rgb, moon);
                 sky = lerp(sky, _UCSunColor.rgb, sun);
 
@@ -156,7 +159,9 @@ Shader "UniverseCreator/Skybox"
                 // render stage; the skybox itself carries only the clear-air dome.
                 // UC Scene/Play: exposed solar radiance can exceed half/HDR render-target range at a manual stop.
                 // Keep the physical LUT unchanged; bound only the display output below the HDR target's finite limit.
-                return float4(min(sky, 60000.0), 1.0);
+                float outPeak = max(sky.r, max(sky.g, sky.b));
+                sky *= min(1.0, 60000.0 / max(outPeak, 1e-5)); // hue-preserving, unlike a per-channel min
+                return float4(sky, 1.0);
             }
             ENDHLSL
         }

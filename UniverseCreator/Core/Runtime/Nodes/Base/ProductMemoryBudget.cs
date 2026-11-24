@@ -55,6 +55,11 @@ namespace UniverseCreator.Nodes
             get { lock (gate) { long bytes = 0; foreach (Entry entry in entries.Values) if (entry.Pins > 0) bytes += entry.Managed + entry.Native; return bytes; } }
         }
 
+        /// <summary>Milliseconds a request may wait for pinned work to finish before failing; 0 (default) fails immediately.</summary>
+        /// <remarks>Parallel chunk workers each pin large solver scratch. Waiting lets earlier workers finish and release it
+        /// instead of every later chunk failing at once. The wait is bounded, so a genuine over-budget live set still reports.</remarks>
+        public int WaitForRoomMilliseconds { get; set; }
+
         /// <summary>Creates an empty budget with a positive byte limit.</summary>
         /// <param name="limitBytes">Total admitted payload limit in bytes, greater than zero.</param>
         /// <exception cref="ArgumentOutOfRangeException">The limit is not positive.</exception>
@@ -158,6 +163,7 @@ namespace UniverseCreator.Nodes
             if (bytes > LimitBytes)
                 throw new InvalidOperationException("UC-T02-06: one payload requests " + bytes + " bytes above the " + LimitBytes + " byte budget.");
             // Eviction order is LRU, then ordinal producer key; dictionary enumeration never decides a victim.
+            int waitedMs = 0;
             while (bytes > LimitBytes - managed - native)
             {
                 Entry oldest = null;
@@ -165,8 +171,19 @@ namespace UniverseCreator.Nodes
                     if (entry.Pins == 0 && (oldest == null || entry.Used < oldest.Used ||
                         (entry.Used == oldest.Used && string.CompareOrdinal(entry.Key, oldest.Key) < 0))) oldest = entry;
                 if (oldest == null)
+                {
+                    // Wait (releasing the gate) for a running consumer to dispose its pin, then re-evaluate.
+                    int budgetMs = WaitForRoomMilliseconds;
+                    if (budgetMs > 0 && waitedMs < budgetMs)
+                    {
+                        int slice = Math.Min(250, budgetMs - waitedMs);
+                        Monitor.Wait(gate, slice);
+                        waitedMs += slice;
+                        continue;
+                    }
                     throw new InvalidOperationException("UC-T02-06: product memory budget exhausted; requested " + bytes +
                         " bytes, resident " + (managed + native) + ", limit " + LimitBytes + ". Active consumers remain protected.");
+                }
                 Remove(oldest); evictions++;
             }
         }
@@ -175,6 +192,7 @@ namespace UniverseCreator.Nodes
         {
             entries.Remove(entry.Product);
             managed -= entry.Managed; native -= entry.Native;
+            Monitor.PulseAll(gate); // wake any request waiting for room (caller holds the gate)
             // Retained dictionaries hold only this token; clearing it really releases the budget's product reference.
             entry.Product = null;
         }

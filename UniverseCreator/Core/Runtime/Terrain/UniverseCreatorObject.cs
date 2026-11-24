@@ -444,7 +444,10 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("How many chunks may generate concurrently. Keep below core count " +
                  "so the editor stays responsive.")]
         [Range(1, 16)]
-        public int maxConcurrentChunks = 4;
+        public int maxConcurrentChunks = 1;
+        // Chunks are built strictly one at a time (the saved maxConcurrentChunks value of older scenes is ignored):
+        // each chunk's river/lake solve pins ~100 MiB, so parallel chunks exhausted the product memory budget.
+        internal const int ChunkConcurrency = 1;
 
         [Tooltip("Opt-in. Build pending chunks the camera can actually SEE first: inside the " +
                  "frustum and within draw distance, then inside the frustum but farther, then " +
@@ -585,16 +588,16 @@ namespace UniverseCreator.TerrainSystem
 
         // UC-T02-06: a world shares admission across its workers, retained fields and generated terrain reservations.
         [SerializeField, Min(16), Tooltip("Generated payload budget in MiB, fixed when this world's first job starts. Active consumers are protected; over-budget new work reports an error. Excludes imported assets and engine/driver overhead.")]
-        private int productMemoryBudgetMiB = 512;
+        private int productMemoryBudgetMiB = 1024;
         private ProductMemoryBudget productMemory;
         /// <summary>World's generated-payload budget, initialized once from its authored MiB limit (minimum 16 MiB).</summary>
-        /// <remarks>Defaults to 512 MiB. Estimates exclude imported assets, GC heap and graphics-driver overhead; reload the world to change an initialized limit.</remarks>
+        /// <remarks>Defaults to 1024 MiB (older scenes keep their serialized value; raise it in the Inspector). Estimates exclude imported assets, GC heap and graphics-driver overhead; reload the world to change an initialized limit.</remarks>
         public ProductMemoryBudget ProductMemory
         {
             get
             {
                 if (productMemory == null) System.Threading.Interlocked.CompareExchange(ref productMemory,
-                    new ProductMemoryBudget(System.Math.Max(16L, productMemoryBudgetMiB) * 1024 * 1024), null);
+                    new ProductMemoryBudget(System.Math.Max(16L, productMemoryBudgetMiB) * 1024 * 1024) { WaitForRoomMilliseconds = 20000 }, null);
                 return productMemory;
             }
         }
@@ -970,7 +973,7 @@ namespace UniverseCreator.TerrainSystem
             try
             {
                 // UC-T02-02: cancelled predecessors still count; queued replacements consume no waiting thread.
-                currentTask = GenerationScheduler.RunWorkerAsync(run, Mathf.Max(1, maxConcurrentChunks), stop,
+                currentTask = GenerationScheduler.RunWorkerAsync(run, ChunkConcurrency, stop,
                     () => GenerateOnWorkerThread(snapshot, stop, run),
                     () =>
                     {

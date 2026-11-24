@@ -78,8 +78,12 @@ namespace UniverseCreator.TerrainSystem.Lighting
             // UC celestial repair: the daylight white-point approximation stays fixed; atmosphere changes along the path.
             Color body = Blackbody(LightingConstants.DaylightSunKelvin);
 
-            Vector3 t = AtmosphericTransmittance(airMass, turbidity);
-            return new Color(body.r * t.x, body.g * t.y, body.b * t.z, 1f);
+            // Realistic sunrise/sunset: use the stronger visible-sun extinction so a low sun turns orange/red.
+            float m = Mathf.Max(0f, airMass) * Mathf.Max(0f, turbidity);
+            return new Color(
+                body.r * Mathf.Exp(-LightingConstants.SunVisualExtinctionR * m),
+                body.g * Mathf.Exp(-LightingConstants.SunVisualExtinctionG * m),
+                body.b * Mathf.Exp(-LightingConstants.SunVisualExtinctionB * m), 1f);
         }
 
         /// <summary>

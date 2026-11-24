@@ -58,6 +58,13 @@ namespace UniverseCreator.TerrainSystem.Lighting
         public const float BeamExtinctionB = 0.0225f;
 
         /// <summary>Per-channel beam extinction, assembled for the exp(-k*airMass*turbidity) law.</summary>
+        // Visible-sun extinction (per air mass, times turbidity). The beam values above are far too weak to
+        // redden a sun at 10-20 degrees, so the sun stayed white until it touched the horizon. These give
+        // roughly 5800 K at 30 deg, ~4000 K at 10 deg and a deep orange-red at 2 deg.
+        public const float SunVisualExtinctionR = 0.0200f;
+        public const float SunVisualExtinctionG = 0.0400f;
+        public const float SunVisualExtinctionB = 0.0800f;
+
         public static Vector3 BeamExtinction
         {
             get { return new Vector3(BeamExtinctionR, BeamExtinctionG, BeamExtinctionB); }
