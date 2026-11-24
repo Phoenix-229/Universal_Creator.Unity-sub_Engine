@@ -67,6 +67,15 @@ namespace UniverseCreator.Editor.Diagnostics
                 GameObject root = new GameObject("UC domain reload world"); root.SetActive(false);
                 SceneManager.MoveGameObjectToScene(root, fixture);
                 UniverseCreatorObject world = root.AddComponent<UniverseCreatorObject>(); world.enabled = false; world.graph = graph;
+                // UC climate restore: keep the legacy density fixture separate from explicit TerrainWater bindings.
+                Graph climateGraph = ScriptableObject.CreateInstance<Graph>();
+                climateGraph.nodes.Add(new HeightOutputNode { id = "climate-height" });
+                AssetDatabase.CreateAsset(climateGraph, folder + "/ClimateTerrain.asset");
+                GameObject climateRoot = new GameObject("UC climate domain reload world"); climateRoot.SetActive(false);
+                SceneManager.MoveGameObjectToScene(climateRoot, fixture);
+                UniverseCreatorObject climateWorld = climateRoot.AddComponent<UniverseCreatorObject>();
+                climateWorld.enabled = false; climateWorld.graph = climateGraph;
+                SessionState.SetString(SnapshotReloadKey + "climate", PrepareClimateReloadFixture(climateWorld, folder).ToString(CultureInfo.InvariantCulture));
                 UCVegetationSystemManager veg = root.AddComponent<UCVegetationSystemManager>(); veg.enabled = false;
                 veg.useEcology = true; veg.suitabilityThreshold = 0.2f;
                 captured = GenerationSnapshot.Capture(graph, world);
@@ -130,6 +139,11 @@ namespace UniverseCreator.Editor.Diagnostics
                 if (graph == null || !scene.IsValid() || !scene.isLoaded) throw new InvalidOperationException("The saved domain fixture is unavailable.");
                 UniverseCreatorObject world = scene.GetRootGameObjects()[0].GetComponent<UniverseCreatorObject>();
                 if (world == null) throw new InvalidOperationException("The fixture's world did not reload.");
+                // UC climate restore: validate persisted acceptance without migrating the legacy graph under test.
+                GameObject climateRoot = Array.Find(scene.GetRootGameObjects(), root => root.name == "UC climate domain reload world");
+                UniverseCreatorObject climateWorld = climateRoot != null ? climateRoot.GetComponent<UniverseCreatorObject>() : null;
+                if (climateWorld == null) throw new InvalidOperationException("The climate fixture's world did not reload.");
+                CheckClimateReloadFixture(climateWorld, ReloadBaselineHash("climate"));
                 Check(graph.GetNodeById("source").contentHash == 0UL && graph.GetNodeById("density").preparedContextHash == 0UL,
                     "UC-T01-07 managed reload clears transient authored-node hashes/context.");
                 captured = GenerationSnapshot.Capture(graph, world);
@@ -196,7 +210,7 @@ namespace UniverseCreator.Editor.Diagnostics
             // UC-T01-07: cleanup is part of acceptance; Unity can report failure without throwing.
             if (AssetDatabase.IsValidFolder(folder) && !AssetDatabase.DeleteAsset(folder))
                 throw new InvalidOperationException("Could not remove the scoped domain fixture assets during cleanup.");
-            foreach (string key in new[] { "Folder", "Original", "source", "curve", "raster", "removedRaster", "lithology", "density" })
+            foreach (string key in new[] { "Folder", "Original", "source", "curve", "raster", "removedRaster", "lithology", "density", "climate" })
                 SessionState.EraseString(SnapshotReloadKey + key);
             SessionState.EraseBool(SnapshotReloadKey + "Single"); SessionState.EraseInt(SnapshotReloadKey + "Checks");
         }

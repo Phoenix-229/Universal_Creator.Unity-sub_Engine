@@ -326,6 +326,8 @@ namespace UniverseCreator.Editor.Diagnostics
             TestClockIsDeterministic();
             TestWorldClockContinuation(); // UC-T08-02: one instant, validated seek/pause/calendar limits and partition-independent regular stepping.
             TestClimateBaselineContracts(); // UC-T08-03: early publication, immutable climate, regional overlaps and dependent-only invalidation.
+            TestClimateRestoreContracts(); // UC repair: persisted strict inputs, retained native ground and honest failure/retry.
+            TestRiverMemoryOutputCoexistence(); // UC repair: 512-square river IDs and independent height/splat publication under the unchanged budget.
             TestRegionalEnvironmentConsumers(); // UC-T08-05: independent worlds, connected wind/particles and actual regional weather samples.
             TestWeatherRegionTransitions(); // UC-T08-06: real typed graph, bounded cached fronts, overlapping/moving regions and large-instant gusts.
             TestEnvironmentLightingSamples(); // UC-T08-07: captured clock/bias, actual sky/light/fog consumers, nested worlds and owned native retirement.

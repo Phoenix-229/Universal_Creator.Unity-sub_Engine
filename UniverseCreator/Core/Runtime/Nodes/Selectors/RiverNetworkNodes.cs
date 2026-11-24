@@ -381,9 +381,6 @@ namespace UniverseCreator.Nodes.Selectors
             if (wd.height.arr.Length < count || wd.filled.Length < count)
                 return outputIndex == 1 ? src.Blank() : new Matrix(src);
 
-            // UC-T03-05: bounded selection scratch stays admitted until its final rasterisation consumer returns.
-            using var hierarchyMemory = hierarchyTargets != null && hierarchyTargets.enabled
-                ? tile.ReserveProductMemory(4096L + count * 512L) : null;
             using var outletMemory = tile.ReserveProductMemory(4096L + count * 384L); // UC-T03-06: classification/record scratch remains admitted through publication.
 
             float sea = Mathf.Clamp01(seaLevel);
@@ -532,6 +529,9 @@ namespace UniverseCreator.Nodes.Selectors
             // UC-T03-05: select once from the solved tree; a cached product replays the same immutable report.
             if (net != null && hierarchyTargets != null && hierarchyTargets.enabled)
             {
+                // UC climate/memory repair: selection allocates by actual reach count, not every solve pixel.
+                // Copied reaches borrow their cell lists; this scratch retires before raster publication.
+                using var hierarchyMemory = tile.ReserveProductMemory(4096L + net.reaches.Count * 512L);
                 net = RiverNetworkExtractor.SelectHierarchy(wd, net, hierarchyTargets, scaleToWorld, minOrderToCarve, stop);
                 if (stop != null && stop.StopRequested) return null;
                 if (net != null) tile.AddPublication(new RiverHierarchyGraphPublication(id + ":hierarchy", net.hierarchy));
@@ -602,6 +602,7 @@ namespace UniverseCreator.Nodes.Selectors
                 float sourceArcM = 0;
                 bool spring = !hasIncoming[r] && reach.cells.Count > 0 &&
                     reach.cells[0] >= 0 && reach.cells[0] < count && float.IsNaN(pubSurface[reach.cells[0]]);
+                string reachId = reach.cells.Count > 0 ? id + ":reach:" + reach.cells[0] : null; // UC memory repair: one shared immutable identity per reach.
 
                 for (int k = 0; k < reach.cells.Count; k++)
                 {
@@ -620,7 +621,7 @@ namespace UniverseCreator.Nodes.Selectors
                     // through Hydrology, never by indexing `filled` with it directly.
                     int d = Hydrology.DownstreamCell(wd.dir, c, resX, resZ);
                     pubDownstream[c] = d; // UC-T03-09: shared junction identity follows its downstream reach.
-                    pubReachIds[c] = id + ":reach:" + reach.cells[0];
+                    pubReachIds[c] = reachId;
                     if (d >= 0)
                     {
                         float dz = wd.filled[c] - wd.filled[d];

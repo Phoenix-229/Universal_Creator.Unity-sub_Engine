@@ -136,6 +136,7 @@ namespace UniverseCreator.Editor.Diagnostics
                 graph = TerrainRiverGateGraph(); AssetDatabase.CreateAsset(graph, folder + "/Graph.asset");
                 var root = new GameObject("UC river scene reload owner"); root.SetActive(false); SceneManager.MoveGameObjectToScene(root, fixture);
                 var world = root.AddComponent<UniverseCreatorObject>(); world.graph = graph;
+                ulong climateHash = PrepareClimateReloadFixture(world, folder); // UC repair: persisted acceptance crosses a real scene close/open.
                 float[,] baseline = CheckTerrainRiverRegeneration(world, null, true);
                 Guid formerWorld = world.GenerationScheduler.CurrentRun.WorldId;
                 Check(RiverChannelRegistry.TrySampleGround(world, 1024, 1024, out _, out _),
@@ -149,7 +150,8 @@ namespace UniverseCreator.Editor.Diagnostics
                 world = fixture.GetRootGameObjects()[0].GetComponent<UniverseCreatorObject>();
                 Check(world != null && world.graph != null && world.GenerationScheduler.CurrentRun.WorldId != formerWorld,
                     "UC-T03-11 scene reload restores authored graph settings with a fresh runtime owner.");
-                if (world != null && world.graph != null) CheckTerrainRiverRegeneration(world, baseline);
+                if (world != null && world.graph != null)
+                { CheckClimateReloadFixture(world, climateHash); CheckTerrainRiverRegeneration(world, baseline); }
             }
             catch (Exception error) { Check(false, "UC-T03-11 native river scene reload exception: " + error); }
             finally

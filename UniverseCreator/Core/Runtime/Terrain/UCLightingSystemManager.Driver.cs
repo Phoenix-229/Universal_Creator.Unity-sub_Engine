@@ -249,7 +249,8 @@ namespace UniverseCreator.TerrainSystem
             float stars = settings.enableStars && starSky != null ?
                 StarSky.Visibility(clock.elevationDeg) * Mathf.Clamp(settings.starBrightness, 0, 4) *
                     starSky.RadianceScale * exposureMul : 0;
-            Shader.SetGlobalVector(s_StarParamsId, new Vector4(stars, 0, 0, 0));
+            // UC celestial follow-up: share captured haze and the existing bounded air-path floor with the star pass.
+            Shader.SetGlobalVector(s_StarParamsId, new Vector4(stars, atmo.turbidity, AtmoConstants.AirMassDenominatorFloor, 0));
             BindSampleSkybox(cache, exposureMul, allowCreate);
             PublishSampleClouds(sample, atmo, cache, exposureMul, allowCreate); // UC-T08-08: the shared sky pass receives this world's captured decks and clock-derived drift.
 

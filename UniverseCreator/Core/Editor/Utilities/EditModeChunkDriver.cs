@@ -118,7 +118,7 @@ namespace UniverseCreator.Editor.Utilities
                 // Said out loud only when the restore had to re-bake, because that is the
                 // case where the user will see cells fill in and should know why. A world
                 // that came back whole says nothing at all.
-                if (queued > 0)
+                if (queued > 0 && string.IsNullOrEmpty(cm.ReadinessDiagnostic)) // UC climate restore: a synchronously failed recovery is not running in the background.
                     Debug.Log("Universe Creator: '" + w.name + "' came back with " + queued
                               + " cell(s) missing their surface - re-baking those in the "
                               + "background. The rest were kept as they were.", w);

@@ -15,7 +15,8 @@ namespace UniverseCreator.Editor.Diagnostics
             if (!Application.isBatchMode) throw new InvalidOperationException("Streaming readiness acceptance requires isolated batch mode.");
             checks = 0; failures.Clear();
             foreach (Action fixture in new Action[] { TestFramePerformanceContracts, TestStagedChunkCommits,
-                TestChunkRestore, TestChunkReadiness, TestChunkRegionDemand, TestTerrainResidency, TestFarTerrain, TestGenerationDemand, TestGenerationMetrics })
+                TestChunkRestore, TestClimateRestoreContracts, TestRiverMemoryOutputCoexistence,
+                TestChunkReadiness, TestChunkRegionDemand, TestTerrainResidency, TestFarTerrain, TestGenerationDemand, TestGenerationMetrics })
             {
                 try { fixture(); }
                 catch (Exception error) { Check(false, "UC-T09-01..04 " + fixture.Method.Name + " exception: " + error); }

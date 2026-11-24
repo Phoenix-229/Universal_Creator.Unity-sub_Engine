@@ -58,6 +58,7 @@ Shader "UniverseCreator/Skybox"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "UC_Sky.hlsl"   // _SkyLUT / _SkyExposure / _UCSunDir + UCSkyUV live here (one home)
+            #include "UC_Lighting.hlsl" // UC celestial follow-up: reuse the published atmospheric extinction.
 
             // Published by the lighting controller each frame; zero by default, which
             // leaves both bodies undrawn and the sky whatever the table holds.
@@ -67,7 +68,7 @@ Shader "UniverseCreator/Skybox"
             float4 _UCSkyDiscParams; // x = sun half-angle, y = sun limb, z = moon half-angle, w = moon limb (radians)
             TEXTURE2D(_UCStars); SAMPLER(sampler_UCStars);
             float4x4 _UCWorldToEquatorial;
-            float4 _UCStarParams; // x = catalog flux-to-radiance scale * shared exposure * continuous night visibility
+            float4 _UCStarParams; // x = exposed catalog radiance, y = captured turbidity, z = bounded air-path floor
 
             struct Attributes { float4 positionOS : POSITION; };
             struct Varyings { float4 positionCS : SV_POSITION; float3 viewDirWS : TEXCOORD0; };
@@ -134,7 +135,10 @@ Shader "UniverseCreator/Skybox"
                         asin(clamp(equatorial.y, -1.0, 1.0)) / PI + 0.5);
                     float poleArea = max(sqrt(saturate(1.0 - equatorial.y * equatorial.y)), 0.003);
                     float horizonFade = smoothstep(0.0, 0.08, dir.y);
-                    sky += SAMPLE_TEXTURE2D(_UCStars, sampler_UCStars, uv).rgb * (_UCStarParams.x * horizonFade / poleArea);
+                    // UC celestial follow-up: bounded plane-parallel path relative to zenith; clouds still composite afterward.
+                    float extraAirMass = max(0.0, rcp(max(dir.y, max(_UCStarParams.z, 1e-5))) - 1.0);
+                    float3 transmission = UCAtmosphericExtinction(extraAirMass, _UCStarParams.y);
+                    sky += SAMPLE_TEXTURE2D(_UCStars, sampler_UCStars, uv).rgb * transmission * (_UCStarParams.x * horizonFade / poleArea);
                 }
 
                 // The sun sits in front of the sky; the moon behind the sun, so an

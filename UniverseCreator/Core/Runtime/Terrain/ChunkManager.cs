@@ -438,6 +438,8 @@ namespace UniverseCreator.TerrainSystem
         private bool bakeNodesPrimed;
         // UC-T01-06: copied inputs are shared across this bake; workers and applying tiles hold leases.
         private GenerationSnapshot bakeSnapshot;
+        private System.Threading.Tasks.Task<bool> bakeClimatePreparation;
+        private string bakeInputFailure;
         // UC-T02-01: unlike each cell's local runId, this identity also covers setup, materials and environment hooks.
         private GenerationRunId bakeRun;
         private WorldGenerationScheduler bakeScheduler;
@@ -448,6 +450,7 @@ namespace UniverseCreator.TerrainSystem
             GenerationSnapshot previous = bakeSnapshot;
             bakeSnapshot = null;
             bakeNodesPrimed = false;
+            bakeClimatePreparation = null; bakeInputFailure = null;
             if (previous != null) previous.Release();
         }
 
@@ -930,9 +933,6 @@ namespace UniverseCreator.TerrainSystem
             // whose apply is cancelled mid-rebuild would otherwise keep reporting the
             // counts it had before the graph changed. The panel reads zero and climbs
             // back, which is what a rebuild actually looks like.
-            UCVegetationSystemManager rebuildVeg = EnsureVegetationManager();
-            if (rebuildVeg != null) rebuildVeg.ClearRegistry();
-
             // Held across the awaits below. The pump ticks inside them, and without this
             // it would see an empty queue, call the world settled, and close the progress
             // item before the first cell was queued.
@@ -940,6 +940,11 @@ namespace UniverseCreator.TerrainSystem
 
             try
             {
+                // UC climate restore: reject/prepare strict prerequisites before layout or native data can be replaced.
+                bakeClimatePreparation = PrepareBakeClimateAsync(o, run);
+                if (!await bakeClimatePreparation || !o.GenerationScheduler.IsCurrent(run)) return;
+                UCVegetationSystemManager rebuildVeg = EnsureVegetationManager();
+                if (rebuildVeg != null) rebuildVeg.ClearRegistry(); // UC climate restore: prerequisite rejection retains accepted scatter too.
                 EnsurePool(o);
 
                 // Give every cell a real TerrainData, layers and material BEFORE any worker
@@ -1010,6 +1015,7 @@ namespace UniverseCreator.TerrainSystem
             // A fresh arming replaces whatever a previous regenerate left waiting, so a
             // burst of regenerates finishes once - from the last one - not once each.
             pendingAfterSettle.Clear();
+            if (bakeInputFailure != null) return; // UC climate restore: callers cannot arm success after a synchronous prerequisite failure.
             if (steps == null) return;
             WorldGenerationScheduler scheduler = Owner != null ? Owner.GenerationScheduler : null;
             GenerationRunId run = scheduler != null ? scheduler.CurrentRun : default;
@@ -2585,6 +2591,7 @@ namespace UniverseCreator.TerrainSystem
         // is honoured.
         private void QueueGenerate(UniverseCreatorObject o, Chunk c)
         {
+            if (bakeInputFailure != null) { c.generationFailure = bakeInputFailure; return; } // UC climate restore: one failed capture retires the whole bake.
             // Supersede any run already in flight for this cell.
             if (c.stop != null) c.stop.RequestStop();
             DisposeCommit(c); // UC-T02-04: release detached native terrain before replacing its captured tile.
@@ -2611,6 +2618,13 @@ namespace UniverseCreator.TerrainSystem
                 bakeRun = bakeScheduler.CaptureRun();
             }
             if (!bakeScheduler.IsCurrent(bakeRun)) { pending.Clear(); return; }
+            if (bakeInputFailure != null) { pending.Clear(); return; }
+            if (pending.Count > 0 && !bakeNodesPrimed)
+            {
+                // Restore and streamed cells use the same asynchronous prerequisite as an explicit rebuild.
+                if (bakeClimatePreparation == null) bakeClimatePreparation = PrepareBakeClimateAsync(o, bakeRun);
+                if (!bakeClimatePreparation.IsCompleted || !bakeClimatePreparation.GetAwaiter().GetResult()) return;
+            }
             RefreshQueuedChunkDemand(o); // UC-T02-08: shared-pool waiters track the current camera and collision demand too.
             int limit = Mathf.Max(1, o.maxConcurrentChunks);
 
@@ -2769,6 +2783,44 @@ namespace UniverseCreator.TerrainSystem
         private bool IsCollisionDemand(UniverseCreatorObject o, Chunk c) => o.generateCollider &&
             (DualLODSystem.RingDistance(c.cell.x, c.cell.z, centreCell.x, centreCell.z) <= 1 || IsLandingDemand(c));
 
+        private async System.Threading.Tasks.Task<bool> PrepareBakeClimateAsync(UniverseCreatorObject o, GenerationRunId run)
+        {
+            try
+            {
+                if (UCWorldGraphBindings.RequiresTerrainClimate(o.graph))
+                {
+                    var bindings = o.GetComponent<UCWorldGraphBindings>();
+                    if (bindings == null || !await bindings.PrepareTerrainClimateAsync())
+                    {
+                        if (o.GenerationScheduler.IsCurrent(run))
+                            FailBakeInputCapture(o, "Early climate preparation failed: " + (bindings != null ? bindings.LightingStatus :
+                                "Bind a Lighting Graph with Climate Baseline connected to Weather Output before building this strict terrain graph."));
+                        return false;
+                    }
+                }
+                if (!o.GenerationScheduler.IsCurrent(run)) return false;
+                // UC climate restore: all captured inputs must pass before replacing layout/native ground.
+                if (bakeSnapshot == null) bakeSnapshot = GenerationSnapshot.Capture(o.graph, o, requireOutput: true);
+                return true;
+            }
+            catch (System.Exception ex)
+            {
+                if (o.GenerationScheduler.IsCurrent(run)) FailBakeInputCapture(o, "Early climate preparation failed: " + ex.Message, ex);
+                return false;
+            }
+        }
+
+        private void FailBakeInputCapture(UniverseCreatorObject o, string message, System.Exception error = null)
+        {
+            if (bakeInputFailure != null) return;
+            bakeInputFailure = message; readinessFailure = message;
+            foreach (var chunk in pool) if (chunk.resident) chunk.generationFailure = message;
+            pending.Clear(); pendingAfterSettle.Clear(); settlePhase = 0; settleStitchPending = false;
+            settleWaterOrder = null; settleWaterIndex = 0; IsRebuildingAll = false;
+            // No replacement was published: preserve accepted native heights/colliders and their prior presentation state.
+            Debug.LogError("Universe Creator: " + message + (error != null ? "\n" + error : ""), this);
+        }
+
         private void Dispatch(UniverseCreatorObject o, Chunk c)
         {
             // Prime nodes on the main thread (textures/curves copied to plain arrays).
@@ -2780,11 +2832,11 @@ namespace UniverseCreator.TerrainSystem
             {
                 // UC-T01-06/07: no priming, context or content hashes are written into the shared asset.
                 // UC-T01-09: reject invalid topology before any chunk worker or plugin begin hook runs.
-                try { bakeSnapshot = GenerationSnapshot.Capture(o.graph, o, requireOutput: true); }
+                try { if (bakeSnapshot == null) bakeSnapshot = GenerationSnapshot.Capture(o.graph, o, requireOutput: true); }
                 catch (System.Exception ex)
                 {
-                    c.generationFailure = "Chunk input capture failed: " + ex.Message; // UC-T09-03: retain the real failure beside accepted collision.
-                    Debug.LogError("Universe Creator: chunk input capture failed - " + ex, this);
+                    c.generationFailure = "Chunk input capture failed: " + ex.Message;
+                    FailBakeInputCapture(o, c.generationFailure, ex); // UC climate restore: retain accepted ground and never run success callbacks.
                     return;
                 }
                 bakeEcology = bakeSnapshot.Ecology;
@@ -3195,7 +3247,8 @@ namespace UniverseCreator.TerrainSystem
                 wrote = true;
             }
 
-            if (freed) PumpQueue(o);
+            // UC climate restore: cold restoration may finish its prerequisite before any chunk owns a worker slot.
+            if (freed || (pending.Count > 0 && bakeClimatePreparation != null && bakeClimatePreparation.IsCompleted)) PumpQueue(o);
 
             // UC-T02-04: local stitching belongs to the measured final publication; full-grid settle remains below.
 
@@ -3219,6 +3272,17 @@ namespace UniverseCreator.TerrainSystem
 
             bool drained = activeWorkers == 0 && pending.Count == 0 && setupDepth == 0;
             bool advancedSettle = false;
+
+            // UC climate restore: a drained failed queue is not accepted ground. Never stitch/carve/fire hydrology on it.
+            if (drained && bakeInputFailure != null) return wrote; // UC climate restore: an empty failed initial pool is not a successful bake either.
+            if (drained)
+                foreach (var chunk in pool)
+                    if (chunk.resident && chunk.generationFailure != null)
+                    {
+                        pendingAfterSettle.Clear(); settlePhase = 0; settleStitchPending = false;
+                        settleWaterOrder = null; settleWaterIndex = 0; IsRebuildingAll = false;
+                        return wrote;
+                    }
 
             // UC-T02-01: an obsolete bake may retire workers, but may not stitch, carve or fire completion hooks.
             if (bakeRun.IsAssigned && !o.GenerationScheduler.IsCurrent(bakeRun))

@@ -7,13 +7,14 @@ using UniverseCreator.Weather;
 
 namespace UniverseCreator.TerrainSystem.Lighting
 {
-    /// <summary>Bakes BSC5 J2000 stellar positions once into a 4 MiB equatorial texture, without per-star scene objects.</summary>
+    /// <summary>Bakes BSC5 J2000 stellar positions once into a 16 MiB equatorial texture, without per-star scene objects.</summary>
     /// <remarks>Main-thread construction/upload; temporary pixels are released after upload. Coordinates omit precession/proper motion.
     /// The manager owns Texture and must destroy it after restoring camera bindings. The retained resource contains the original catalog.</remarks>
     internal sealed class StarSky
     {
         internal const string ResourcePath = "UniverseCreator/BSC5/catalog";
-        internal const int Width = 1024, Height = 512;
+        // UC celestial follow-up: halve the angular raster footprint without per-frame work or unbounded texture growth.
+        internal const int Width = 2048, Height = 1024;
         internal readonly Texture2D Texture;
         internal readonly int Count;
         internal readonly float RadianceScale;
@@ -56,7 +57,7 @@ namespace UniverseCreator.TerrainSystem.Lighting
                 filterMode = FilterMode.Bilinear, hideFlags = HideFlags.DontSave
             };
             Texture.SetPixels(pixels);
-            Texture.Apply(false, true); // 8 MiB temporary pixel buffer and native CPU copy are not retained.
+            Texture.Apply(false, true); // 32 MiB temporary pixel buffer and native CPU copy are not retained.
         }
 
         private static void Add(Color[] pixels, int x, int y, float flux)

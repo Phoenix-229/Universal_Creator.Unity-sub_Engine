@@ -110,6 +110,20 @@ namespace UniverseCreator.Editor.Diagnostics
                 long duplicate = ProductMemoryFootprint.Estimate(new object[] { alias, alias });
                 Check(duplicate - single == IntPtr.Size,
                     "UC-T02-06 a single payload counts shared array aliases once.");
+                // UC climate/memory repair: real river raster dimensions, shared IDs and retained safety bounds.
+                var ids = new string[512 * 512];
+                long emptyIds = ProductMemoryFootprint.Estimate(ids);
+                string reach = new string('r', 64);
+                for (int i = 0; i < ids.Length; i++) ids[i] = reach;
+                Check(ProductMemoryFootprint.Estimate(ids) - emptyIds == 24 + reach.Length * 2L,
+                    "UC repair: a 512-square river ID grid charges all slots and one shared identity.");
+                bool overSlots = false, overObjects = false, genericBound = false;
+                try { ProductMemoryFootprint.Estimate(new string[1048577]); } catch (InvalidOperationException) { overSlots = true; }
+                try { ProductMemoryFootprint.Estimate(new object[100001]); } catch (InvalidOperationException) { genericBound = true; }
+                for (int i = 0; i < 100001; i++) ids[i] = new string('r', 64);
+                try { ProductMemoryFootprint.Estimate(ids); } catch (InvalidOperationException) { overObjects = true; }
+                Check(overSlots && overObjects && genericBound,
+                    "UC repair: string-slot, unique-object and recursive-array limits remain enforced.");
             }
             finally
             {

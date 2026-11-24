@@ -60,6 +60,9 @@ namespace UniverseCreator.Editor.Diagnostics
                     }
             }
             Check(found, "UC stars Polaris HR 424 uses its retained J2000 coordinates, not a random northern point.");
+            Check(360f / StarSky.Width < 0.18f && 180f / StarSky.Height < 0.18f &&
+                (long)StarSky.Width * StarSky.Height * 8 <= 16L * 1024 * 1024,
+                "UC stars retain sub-0.18-degree sampling within 16 MiB native pixel storage.");
             Resources.UnloadAsset(source);
             Color low = SkyModel.SunColorLinear(2, 10, 2.2f), high = SkyModel.SunColorLinear(80, 10, 2.2f);
             Check(low == high, "UC sun spectrum changes through supplied atmospheric path, without a second altitude-temperature ramp.");
@@ -133,6 +136,9 @@ namespace UniverseCreator.Editor.Diagnostics
                         Check(nativeStars is Texture2D atlas && atlas.width == StarSky.Width && atlas.height == StarSky.Height && !atlas.isReadable,
                             "UC stars bounded native texture releases its CPU copy, mode " + mode);
                         float strength = Shader.GetGlobalVector("_UCStarParams").x;
+                        Check(Shader.GetGlobalVector("_UCStarParams").y == lighting.AtmosphereForSample(sample, out _).turbidity &&
+                            Shader.GetGlobalVector("_UCStarParams").z == AtmoConstants.AirMassDenominatorFloor,
+                            "UC star attenuation receives the same captured atmospheric turbidity as the sky, mode " + mode);
                         if (mode == 0) darkStrength = strength;
                         if (mode == 2) Check(strength < darkStrength * 0.1f,
                             "UC full-moon exposure suppresses faint stars even at twice the authored brightness.");

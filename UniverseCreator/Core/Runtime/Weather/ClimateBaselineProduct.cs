@@ -33,6 +33,82 @@ namespace UniverseCreator.Weather
         /// <summary>Fingerprint of exactly the captured climate values, bounds, masks and seasonal samples.</summary>
         public ulong ContentHash { get; }
 
+        // UC climate restore: save accepted values, never the live graph or mutable worker leases.
+        [Serializable]
+        internal sealed class SavedState
+        {
+            public int version = 1;
+            public string hash;
+            public SavedBand[] bands;
+        }
+
+        [Serializable]
+        internal sealed class SavedBand
+        {
+            public string id;
+            public int priority;
+            public Rect bounds;
+            public float blend, temperature, moisture;
+            public Vector2 wind, maskMin, maskExtent;
+            public Vector2Int maskSize;
+            public float[] temperatures, moistures, mask;
+        }
+
+        internal SavedState SaveAccepted()
+        {
+            var saved = new SavedBand[bands.Length];
+            for (int i = 0; i < saved.Length; i++) saved[i] = bands[i].SaveAccepted();
+            return new SavedState { hash = ContentHash.ToString("X16"), bands = saved };
+        }
+
+        internal static ClimateBaselineProduct RestoreAccepted(SavedState saved)
+        {
+            if (saved == null || saved.version != 1 || saved.bands == null || saved.bands.Length < 1 || saved.bands.Length > 65)
+                throw new InvalidOperationException("Saved early climate has an unsupported schema or region count. Apply the early Lighting stage explicitly.");
+            var restored = new Band[saved.bands.Length];
+            var ids = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < restored.Length; i++)
+            {
+                SavedBand band = saved.bands[i];
+                if (band == null || !Finite(band.temperature) || band.temperature < -100 || band.temperature > 70 ||
+                    !Finite(band.moisture) || band.moisture < 0 || band.moisture > 1 ||
+                    !Finite(band.wind.x) || !Finite(band.wind.y) || band.wind.magnitude > 100.001f ||
+                    !Finite(band.blend) || band.blend < 0 || !Finite(band.bounds.x) || !Finite(band.bounds.y) ||
+                    !Finite(band.bounds.xMax) || !Finite(band.bounds.yMax) ||
+                    (i > 0 && (band.bounds.width <= 0 || band.bounds.height <= 0 || !ids.Add(band.id ?? ""))))
+                    throw new InvalidOperationException("Saved early climate contains invalid regional values.");
+                ValidateSeason(band.temperatures, -100, 100); ValidateSeason(band.moistures, 0, 4);
+                Matrix mask = null;
+                // UC climate restore: Unity serializes an absent array as empty; zero metadata keeps absence unambiguous.
+                if (band.mask != null && band.mask.Length > 0)
+                {
+                    long count = (long)band.maskSize.x * band.maskSize.y;
+                    if (band.maskSize.x < 2 || band.maskSize.y < 2 || count > 1048576 || count != band.mask.LongLength ||
+                        !Finite(band.maskMin.x) || !Finite(band.maskMin.y) || !Finite(band.maskExtent.x) || !Finite(band.maskExtent.y) ||
+                        band.maskExtent.x <= 0 || band.maskExtent.y <= 0)
+                        throw new InvalidOperationException("Saved early climate mask exceeds its captured grid budget.");
+                    mask = new Matrix(new CoordRect(0, 0, band.maskSize.x, band.maskSize.y), band.mask)
+                    { worldPos = new Vector3(band.maskMin.x, 0, band.maskMin.y), worldSize = new Vector3(band.maskExtent.x, 1, band.maskExtent.y) };
+                }
+                else if (band.maskSize != Vector2Int.zero || band.maskMin != Vector2.zero || band.maskExtent != Vector2.zero)
+                    throw new InvalidOperationException("Saved early climate mask metadata has no captured samples.");
+                restored[i] = new Band(band.id, band.priority, band.bounds, band.blend, band.temperature, band.moisture,
+                    band.wind, band.temperatures, band.moistures, mask);
+            }
+            var product = new ClimateBaselineProduct(restored);
+            if (!string.Equals(saved.hash, product.ContentHash.ToString("X16"), StringComparison.Ordinal))
+                throw new InvalidOperationException("Saved early climate fingerprint differs from its accepted values. Apply the early Lighting stage explicitly.");
+            return product;
+        }
+
+        private static void ValidateSeason(float[] values, float min, float max)
+        {
+            if (values == null || values.Length != SeasonalSamples)
+                throw new InvalidOperationException("Saved early climate requires its complete seasonal table.");
+            foreach (float value in values) if (!Finite(value) || value < min || value > max)
+                throw new InvalidOperationException("Saved early climate contains an invalid seasonal sample.");
+        }
+
         internal sealed class Band
         {
             internal readonly string Id;
@@ -44,6 +120,13 @@ namespace UniverseCreator.Weather
             private readonly Vector2Int maskSize;
             private readonly Vector2 maskMin, maskExtent;
             internal readonly ulong Hash;
+
+            internal SavedBand SaveAccepted() => new SavedBand
+            {
+                id = Id, priority = Priority, bounds = Bounds, blend = BlendMetres, temperature = Temperature, moisture = Moisture,
+                wind = Wind, temperatures = (float[])temperatureSeason.Clone(), moistures = (float[])moistureSeason.Clone(),
+                mask = mask == null ? null : (float[])mask.Clone(), maskSize = maskSize, maskMin = maskMin, maskExtent = maskExtent
+            };
 
             internal Band(string id, int priority, Rect bounds, float blend, float temperature, float moisture,
                 Vector2 wind, float[] temperatures, float[] moistures, Matrix regionMask)

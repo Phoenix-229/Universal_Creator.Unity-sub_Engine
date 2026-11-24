@@ -41,7 +41,10 @@ namespace UniverseCreator.Nodes
                     long bytes = 32L + array.Rank * 8L + array.LongLength * ValueSize(element);
                     if (ContainsReferences(element))
                     {
-                        if (array.LongLength > 100000)
+                        // UC climate/memory repair: river ID grids have many slots but few shared immutable strings.
+                        // Bound scalar-string scanning separately; recursive graphs retain their object/depth limits.
+                        long slotLimit = element == typeof(string) ? 1048576 : 100000;
+                        if (array.LongLength > slotLimit)
                             throw new InvalidOperationException("UC-T02-06: reference-array accounting exceeds the bounded traversal limit.");
                         foreach (object item in array) bytes += Measure(item, seen, depth + 1);
                     }

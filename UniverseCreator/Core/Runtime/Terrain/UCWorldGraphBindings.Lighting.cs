@@ -30,6 +30,9 @@ namespace UniverseCreator.TerrainSystem
         private StopToken pendingLighting;
         private Task<bool> lightingTask;
         private long lightingRevision, baselineRevision;
+        [SerializeField, HideInInspector] private Weather.ClimateBaselineProduct.SavedState savedClimate;
+        [SerializeField, HideInInspector] private long savedClimateRevision;
+        private Weather.ClimateBaselineProduct restoredClimate;
         private static readonly Func<Generator, bool> BaselineRoots = node => node is WeatherOutputNode;
         private static readonly Func<Generator, bool> DynamicRoots = node => node is WeatherOutputNode || node is LightingOutputNode;
 
@@ -50,8 +53,8 @@ namespace UniverseCreator.TerrainSystem
         public Transform EnvironmentSampleTarget { get => environmentSampleTarget; set => environmentSampleTarget = value; }
         /// <summary>Last accepted dynamic graph revision; zero means none in this runtime lifetime.</summary>
         public long LightingRevision => lightingRevision;
-        /// <summary>Last accepted terrain-independent baseline climate revision; zero means no baseline has been applied.</summary>
-        public long BaselineClimateRevision => baselineRevision;
+        /// <summary>Last accepted terrain-independent climate revision, including saved acceptance; zero means none has been applied.</summary>
+        public long BaselineClimateRevision => Math.Max(baselineRevision, savedClimateRevision);
         /// <summary>True while an explicitly requested environment candidate evaluates.</summary>
         public bool IsLightingRunning => lightingTask != null && !lightingTask.IsCompleted;
         /// <summary>Pending, running, accepted or failed environment execution status; authored edits remain unapplied.</summary>
@@ -114,13 +117,17 @@ namespace UniverseCreator.TerrainSystem
                     !ReferenceEquals(main, world.graph) || (usesGround && !chunks.AreGraphVegetationRegionsCurrent(results, run)) ||
                     (water != null && !water.IsCurrent()) || (environment != null && !environment.IsCurrent()))
                     throw new OperationCanceledException();
-                long next = checked((baseline ? baselineRevision : lightingRevision) + 1);
+                long next = checked((baseline ? BaselineClimateRevision : lightingRevision) + 1);
+                Weather.ClimateBaselineProduct.SavedState climateSave = null;
+                if (baseline) foreach (var result in results)
+                    if (result.Outputs.climateBaseline != null) { climateSave = result.Outputs.climateBaseline.SaveAccepted(); break; }
                 if (!world.GenerationScheduler.TryPublish(run, () =>
                 {
                     if (baseline)
                     {
                         DisposeEnvironmentFields(baselineFields); baselineLighting?.Release();
                         baselineFields = results; baselineLighting = candidate; baselineRun = run; baselineRevision = next;
+                        savedClimate = climateSave; savedClimateRevision = next; restoredClimate = null; // UC climate restore: pending authoring never overwrites this record.
                     }
                     else
                     {
@@ -135,6 +142,15 @@ namespace UniverseCreator.TerrainSystem
                     // UC-T08-04: accepted baseline edits affect placement; live/dynamic weather refreshes appearance only.
                     if (baseline) UCVegetationSystemManager.InvalidateForWorld(world.transform);
                 })) throw new OperationCanceledException();
+                // UC climate restore: cold-save preparation must participate in normal scene saving too.
+#if UNITY_EDITOR
+                if (baseline && !Application.isPlaying)
+                {
+                    UnityEditor.EditorUtility.SetDirty(this);
+                    if (gameObject.scene.IsValid() && gameObject.scene.isLoaded)
+                        UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(gameObject.scene);
+                }
+#endif
                 if (!baseline) UCVegetationSystemManager.ForWorld(world.transform)?.MarkAppearanceDirty(); // UC-T08-04: native appearance uploads stay outside the publication lock.
                 light?.RefreshAcceptedGraphEnvironment(); // UC-T05-04: native lighting work runs outside the short managed publication lock.
                 LightingStatus = baseline ? "Accepted baseline climate " + next + "; build terrain explicitly to use the new baseline." :
@@ -197,9 +213,34 @@ namespace UniverseCreator.TerrainSystem
         internal Weather.ClimateBaselineProduct CaptureClimateBaseline()
         {
             GraphExecutionGuard.RequireMainThread("Early climate baseline capture");
-            if (baselineFields == null || baselineRun.WorldId != Owner.GenerationScheduler.CurrentRun.WorldId) return null;
-            foreach (var field in baselineFields) if (field.Outputs.climateBaseline != null) return field.Outputs.climateBaseline;
-            return null;
+            if (baselineFields != null && baselineRun.WorldId == Owner.GenerationScheduler.CurrentRun.WorldId)
+                foreach (var field in baselineFields) if (field.Outputs.climateBaseline != null) return field.Outputs.climateBaseline;
+            if (savedClimate == null) return null;
+            if (restoredClimate == null)
+            {
+                restoredClimate = Weather.ClimateBaselineProduct.RestoreAccepted(savedClimate);
+                baselineRevision = Math.Max(1, savedClimateRevision);
+                LightingStatus = "Restored accepted early climate " + baselineRevision + "; authored edits remain pending.";
+            }
+            return restoredClimate;
+        }
+
+        // UC climate restore: a world bake prepares a missing strict prerequisite once; direct snapshot capture stays strict.
+        internal static bool RequiresTerrainClimate(Graph graph)
+        {
+            if (graph?.nodes == null) return false;
+            foreach (var node in graph.nodes)
+                if (node is Nodes.Biome.ClimateBaselineInputNode input && !input.allowMissingBaseline) return true;
+            return false;
+        }
+
+        internal async Task<bool> PrepareTerrainClimateAsync()
+        {
+            if (!RequiresTerrainClimate(Owner.graph) || CaptureClimateBaseline() != null) return true;
+            if (!await RunLightingAsync(true)) return false;
+            if (CaptureClimateBaseline() != null) return true;
+            LightingStatus = "Pending: connect Climate Baseline to Weather Output → Climate Baseline in the early Lighting stage.";
+            return false;
         }
 
         private void InvalidateLightingGround()
@@ -265,6 +306,7 @@ namespace UniverseCreator.TerrainSystem
         {
             CancelLighting(); DisposeEnvironmentFields(baselineFields); DisposeEnvironmentFields(lightingFields);
             baselineFields = null; lightingFields = null;
+            restoredClimate = null; // UC climate restore: serialized accepted values survive owner retirement; worker references remain independently pinned.
             baselineLighting?.Release(); acceptedLighting?.Release(); baselineLighting = null; acceptedLighting = null;
             if (lightingGroundPins != null) foreach (var pin in lightingGroundPins) pin.Dispose();
             lightingGroundPins = null;
