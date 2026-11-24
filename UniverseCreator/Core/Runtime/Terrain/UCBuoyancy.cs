@@ -101,6 +101,23 @@ namespace UniverseCreator.TerrainSystem
         private bool wasSubmerged;
         private float rippleTimer;
         private float lastVerticalSpeed;
+        private readonly WaterContactTracker waterContact = new WaterContactTracker(); // UC-T04-09A: sampled once by the existing physics owner.
+        /// <summary>UC-T04-09: optional water-world binding; a null field infers the nearest parent once in Awake, or uses standalone scene water.</summary>
+        [Tooltip("Optional UC world for water queries. Empty infers the nearest parent world; bind external vehicles explicitly when worlds overlap.")]
+        public UniverseCreatorObject waterWorld;
+
+        /// <summary>UC-T04-09A: latest local water/contact state; dry after disable or leaving the accepted footprint.</summary>
+        public WaterContactState Contact => waterContact.Current;
+
+        /// <summary>UC-T04-09A: bounded main-thread enter/exit/splash/wake notifications for optional audio/particle consumers.</summary>
+        public event System.Action<WaterContactEvent> ContactChanged;
+
+        private void OnDisable()
+        {
+            var change = waterContact.Reset();
+            SubmergedFraction = 0; Turbulence = 0; wasSubmerged = false; rippleTimer = 0;
+            if (change.Kind != WaterContactEventKind.None) ContactChanged?.Invoke(change);
+        }
 
         /// <summary>Fraction of the body under the surface last step, 0 to 1.</summary>
         public float SubmergedFraction { get; private set; }
@@ -121,6 +138,7 @@ namespace UniverseCreator.TerrainSystem
         private void Awake()
         {
             body = GetComponent<Rigidbody>();
+            if (waterWorld == null) waterWorld = GetComponentInParent<UniverseCreatorObject>(true); // UC-T04-09: cache scope outside the physics sample loop.
             Rebuild();
         }
 
@@ -227,11 +245,12 @@ namespace UniverseCreator.TerrainSystem
             float totalDepth = 0f;
             Vector3 waterVelocity = Vector3.zero;
             UCWaterVolume volumeHit = null;
+            WaterSample contactSample = default; // UC-T04-09A: reuse accepted physics samples, with no additional registry walk.
 
             for (int i = 0; i < samplePoints.Length; i++)
             {
                 Vector3 world = transform.TransformPoint(samplePoints[i]);
-                WaterSample s = UCWaterVolume.Sample(world, time);
+                WaterSample s = UCWaterVolume.Sample(world, time, waterWorld); // UC-T04-09: local ownership survives overlapping other worlds.
 
                 if (!s.submerged) continue;
 
@@ -239,12 +258,15 @@ namespace UniverseCreator.TerrainSystem
                 totalDepth += s.depth;
                 waterVelocity += s.velocity;
                 volumeHit = s.volume;
+                contactSample = s;
 
                 ApplyBuoyancy(world, s, dt);
             }
 
             float fraction = submergedSamples / (float)samplePoints.Length;
             SubmergedFraction = fraction;
+            var contactChange = waterContact.Step(contactSample, transform.position, body.linearVelocity, time, false, splashSpeed);
+            if (contactChange.Kind != WaterContactEventKind.None) ContactChanged?.Invoke(contactChange); // UC-T04-09A: one shared state/event source for hull and vehicle contact.
 
             if (submergedSamples == 0)
             {

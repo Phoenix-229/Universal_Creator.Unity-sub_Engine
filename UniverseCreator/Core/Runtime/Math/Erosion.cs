@@ -590,6 +590,17 @@ namespace UniverseCreator
             /// <summary>0-1. Fraction of the excess moved per pass.</summary>
             public float amount;
 
+            /// <summary>
+            /// Post-pass blur sigma, in pixels. Talus relaxation drives every steep
+            /// slope to EXACTLY the angle of repose, so at high iteration counts the
+            /// land breaks into flat plates meeting at hard creases - the "joined
+            /// stones" / faceted mountainside the author saw. This is the twin of the
+            /// hydraulic solver's own <see cref="HydraulicSettings.relax"/>: one light
+            /// blur after the talus passes rounds those creases without undoing the
+            /// scree fans. 0 disables it (the original behaviour).
+            /// </summary>
+            public float relax;
+
             public static ThermalSettings Default
             {
                 get
@@ -598,7 +609,8 @@ namespace UniverseCreator
                     {
                         iterations = 8,
                         talusAngle = 35f,
-                        amount = 0.5f
+                        amount = 0.5f,
+                        relax = 0.5f
                     };
                 }
             }
@@ -722,6 +734,18 @@ namespace UniverseCreator
                     heights.arr[i] += delta[i];
 
                 if (onProgress != null) onProgress((iter + 1) / (float)iterations);
+            }
+
+            // Take the edge off the talus facets. The passes above settle every steep
+            // slope onto the exact repose angle, which at high iteration counts reads as
+            // flat plates with hard creases between them - the faceted mountainside. One
+            // light blur rounds those creases the same way the hydraulic solver relaxes
+            // its cut faces, reusing the ONE shared GaussianBlur - no second smoother.
+            // 0 keeps the original hard-faceted output.
+            if (settings.relax > 0.01f)
+            {
+                Matrix relaxed = MatrixOperations.GaussianBlur(heights, settings.relax);
+                Array.Copy(relaxed.arr, heights.arr, heights.arr.Length);
             }
         }
 

@@ -66,7 +66,39 @@ namespace UniverseCreator.Nodes
         UV = 8,
 
         /// <summary>A water surface description, consumed by the water output.</summary>
-        Water = 9
+        Water = 9,
+
+        /// <summary>UC-T07-02: immutable CPU float RGBA pixels with explicit encoding, channels and dimensions.</summary>
+        Image = 10,
+        /// <summary>UC-T07-03: one finite four-component shader parameter, independent of colour encoding.</summary>
+        Vector = 11,
+        /// <summary>UC-T08-03: immutable early temperature/moisture/prevailing-wind and seasonal/regional climate recipe.</summary>
+        Climate = 12,
+        /// <summary>UC-T08-06: immutable bounded local weather overrides; consumed by this world's existing weather manager.</summary>
+        Weather = 13
+    }
+
+    /// <summary>
+    /// How a multi-input (fan-in) port folds its several incoming products into
+    /// one. Only meaningful on an INPUT port whose <see cref="Port.allowMultiple"/>
+    /// is true; single-connection ports ignore it. Every operation here is
+    /// commutative on purpose: <see cref="Graph.GetInputConnections"/> returns
+    /// edges in list order, which is not stable across a graph re-save, so a
+    /// fan-in must never depend on the order its wires happen to sit in.
+    /// </summary>
+    public enum MergeOp
+    {
+        /// <summary>Per-pixel maximum - the union of several shapes (the default).</summary>
+        Max = 0,
+
+        /// <summary>Per-pixel minimum - intersection / lowest-wins.</summary>
+        Min = 1,
+
+        /// <summary>Per-pixel arithmetic mean of every connected input.</summary>
+        Average = 2,
+
+        /// <summary>Per-pixel sum of every connected input.</summary>
+        Sum = 3
     }
 
     /// <summary>
@@ -91,6 +123,10 @@ namespace UniverseCreator.Nodes
                 case PortType.Texture:  return new UnityEngine.Color(0.70f, 0.60f, 0.95f); // periwinkle
                 case PortType.UV:       return new UnityEngine.Color(0.50f, 0.85f, 0.85f); // cyan
                 case PortType.Water:    return new UnityEngine.Color(0.35f, 0.65f, 0.90f); // deep sky
+                case PortType.Image:    return new UnityEngine.Color(0.90f, 0.65f, 0.75f); // UC-T07-02: separate pixel/texture-reference wires.
+                case PortType.Vector:   return new UnityEngine.Color(0.55f, 0.85f, 0.70f); // UC-T07-03: preserve all earlier serialized port values.
+                case PortType.Climate:  return new UnityEngine.Color(0.35f, 0.80f, 0.60f); // UC-T08-03: append, preserving existing saved wires.
+                case PortType.Weather:  return new UnityEngine.Color(0.45f, 0.70f, 0.90f); // UC-T08-06: typed region recipes have their own visible connection colour.
                 default:                return new UnityEngine.Color(0.70f, 0.70f, 0.70f);
             }
         }
@@ -157,10 +193,37 @@ namespace UniverseCreator.Nodes
             new Port("Mask",   PortType.Matrix, PortDirection.Input)
         };
 
+        // A third slot for the scatter nodes, and a separate array rather than a
+        // third entry in HeightMaskIn because the filter nodes share that one and
+        // would grow a Biome socket they cannot read. The Biome port is optional: a
+        // graph that leaves it unwired scatters exactly as it did before, since an
+        // absent classification withdraws every species' biome preference.
+        //
+        // Wired as a port instead of taken from the tile, because a port is what
+        // makes the classifier a dependency of the scatter node. The evaluator walks
+        // inputs to decide what to run first, so the biome field is guaranteed built
+        // before anything reads it - where a shared side-channel would work or not
+        // depending on the order nodes happen to sit in the list.
+        public static readonly Port[] HeightMaskBiomeIn =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            new Port("Mask",   PortType.Matrix, PortDirection.Input),
+            new Port("Biome",  PortType.Matrix, PortDirection.Input)
+        };
+
         public static readonly Port[] TwoHeightIn =
         {
             new Port("A", PortType.Matrix, PortDirection.Input),
             new Port("B", PortType.Matrix, PortDirection.Input)
+        };
+
+        // A single INPUT port that accepts MANY wires (fan-in), folded into one
+        // field by a MergeOp the consuming node chooses. allowMultiple = true is
+        // what tells Graph.AddConnection to accumulate edges here instead of
+        // evicting the previous one, and what the fan-in evaluator path keys on.
+        public static readonly Port[] ManyHeightIn =
+        {
+            new Port("Inputs", PortType.Matrix, PortDirection.Input, true)
         };
 
         public static readonly Port[] TwoHeightMaskIn =
@@ -216,6 +279,12 @@ namespace UniverseCreator.Nodes
         {
             new Port("Texture", PortType.Texture, PortDirection.Output, true)
         };
+
+        // UC-T07-02: conversion between CPU pixels and native references is explicit.
+        public static readonly Port[] ImageOut = { new Port("Image", PortType.Image, PortDirection.Output, true) };
+        public static readonly Port[] ImageIn = { new Port("Image", PortType.Image, PortDirection.Input) };
+        /// <summary>UC-T07-03: a constant four-component parameter, without colour decoding.</summary>
+        public static readonly Port[] VectorOut = { new Port("Vector", PortType.Vector, PortDirection.Output, true) };
 
         public static readonly Port[] UVOut =
         {

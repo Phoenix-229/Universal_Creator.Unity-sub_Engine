@@ -49,6 +49,7 @@ namespace UniverseCreator.Editor.Windows
         // for the same reason NodeGraphWindow's graph field does.
         [SerializeField] private Graph graph;
         [SerializeField] private UnityEngine.Terrain targetTerrain;
+        [SerializeField] private UniverseCreatorObject targetWorld; // UC-T05-06: inspector-opened texture work stays on the explicitly bound world.
         [SerializeField] private int bakeResolution = 257;
 
         private UCGraphView view;
@@ -56,6 +57,9 @@ namespace UniverseCreator.Editor.Windows
         private Label statusLabel;
         private Label nameLabel;
         private ObjectField terrainField;
+        private TextureGraphBake bake; // UC-T07-09: one explicit captured world run, yielding between graph outputs.
+        private readonly TextureBakeCache bakeCache = new TextureBakeCache();
+        internal bool IsBakeRunning => bake != null && !bake.IsComplete;
 
         /// <summary>
         /// Bake sizes offered in the toolbar. These are the heightmap-style
@@ -77,21 +81,37 @@ namespace UniverseCreator.Editor.Windows
         /// CreateGUI populates from the serialized field.</summary>
         public void SetGraph(Graph g)
         {
+            CancelBake(); bakeCache.Dispose(); // UC-T07-09: replacements retire the former graph's bake/cache owner.
             graph = g;
             if (view != null) view.Populate(graph);
             RefreshChrome();
         }
 
+        /// <summary>Selects the owning world for texture application without running a graph or changing terrain.</summary>
+        /// <param name="world">Target UC world, or null for explicit standalone terrain authoring.</param>
+        /// <remarks>A changed world clears a foreign terrain selection; Apply still validates the actual terrain owner.</remarks>
+        public void SetWorld(UniverseCreatorObject world)
+        {
+            CancelBake(); bakeCache.Dispose(); // UC-T07-09: a world switch cannot publish the former owner's staged material.
+            targetWorld = world;
+            if (targetTerrain != null && targetTerrain.GetComponentInParent<UniverseCreatorObject>(true) != world)
+            { targetTerrain = null; terrainField?.SetValueWithoutNotify(null); }
+        }
+
         private void CreateGUI()
         {
-            rootVisualElement.Add(BuildToolbar());
-
+            view?.Dispose(); rootVisualElement.Clear(); // UC-T05-02: retire a previous UI's resources before replacing it.
             view = new UCGraphView();
+            rootVisualElement.Add(BuildToolbar());
+            view.Controller.AutomaticGeneration = false; // UC-T05-02: authoring is pending until the explicit Apply button.
             view.style.flexGrow = 1f;
+            view.HostWindow = this;   // so the add-node picker opens over this window
+            // UC-T07-09: captured Apply yields between graph outputs; native dependencies still require their declared owner thread.
+            view.AllowedExecutionDomains = NodeExecutionDomain.Worker | NodeExecutionDomain.MainThread | NodeExecutionDomain.MainThreadGpu;
 
             // The one line that makes this a texture graph rather than a second
             // height graph. Everything else in this window is chrome.
-            view.CategoryFilter = NodeCategoryColors.IsTextureGraph;
+            view.EntryFilter = AcceptNode; // UC-T05-05: shared utilities/field combiners are available when supported by the explicit texture domain.
 
             view.StructureChanged += RefreshChrome;
             rootVisualElement.Add(view);
@@ -103,6 +123,12 @@ namespace UniverseCreator.Editor.Windows
             RefreshChrome();
         }
 
+        private void OnDisable()
+        {
+            CancelBake(); bakeCache.Dispose(); // UC-T07-09: no captured bake or retained texture products survive closing the window.
+            view?.Dispose(); view = null; // UC-T05-02: no retained provider or editor callbacks after window close.
+        }
+
         // ------------------------------------------------------------------
         //  Toolbar
         // ------------------------------------------------------------------
@@ -110,6 +136,7 @@ namespace UniverseCreator.Editor.Windows
         private VisualElement BuildToolbar()
         {
             Toolbar bar = new Toolbar();
+            bar.Add(view.CreateNavigationToolbar()); // UC-T08-15: shared hand/pointer navigation.
 
             bar.Add(new ToolbarButton(() => { if (graph != null) view.ShowAddNodeMenu(); })
             { text = "Add Node" });
@@ -160,6 +187,7 @@ namespace UniverseCreator.Editor.Windows
             terrainField.style.width = 180f;
             terrainField.RegisterValueChangedCallback(evt =>
             {
+                CancelBake(); bakeCache.Dispose(); // UC-T07-09: changing the target withdraws the former request and cache ownership.
                 targetTerrain = evt.newValue as UnityEngine.Terrain;
             });
             bar.Add(terrainField);
@@ -173,16 +201,17 @@ namespace UniverseCreator.Editor.Windows
                 v => "Bake " + v,
                 v => v + " x " + v);
             bakeField.tooltip = "Resolution used for baked maps (occlusion, snow traction). " +
-                                "Higher is sharper and slower; it does not affect the material itself.";
+                                "Image nodes declare their own dimensions and colour/data channels; Image to Texture uploads them for material use."; // UC-T07-02: distinguish CPU images from material parameters.
             bakeField.style.width = 90f;
-            bakeField.RegisterValueChangedCallback(evt => bakeResolution = evt.newValue);
+            bakeField.RegisterValueChangedCallback(evt => { CancelBake(); bakeResolution = evt.newValue; }); // UC-T07-09: changing size invalidates the pending request.
             bar.Add(bakeField);
 
             bar.Add(new ToolbarButton(ApplyToTerrain)
             {
-                text = "Apply to Terrain",
-                tooltip = "Evaluate the graph and write the Material, TerrainLayers and baked maps."
+                text = "Run / Apply",
+                tooltip = "Capture current graph/world inputs, bake incrementally, then apply each loaded terrain cell using its own accepted fields."
             });
+            bar.Add(new ToolbarButton(CancelBake) { text = "Cancel Bake" }); // UC-T07-09: cancellation is available while graph/pixel work is staged.
 
             nameLabel = new Label();
             nameLabel.style.unityTextAlign = TextAnchor.MiddleLeft;
@@ -198,6 +227,17 @@ namespace UniverseCreator.Editor.Windows
             statusLabel.style.marginRight = 8f;
             bar.Add(statusLabel);
 
+            // A narrow window used to crush this bar: each ToolbarButton shrank
+            // below its own label until the names collided and clipped into one
+            // another ("Add Node" reading as "dd No", overlapping "Frame All").
+            // Stop every control from shrinking below its content, and let the bar
+            // wrap onto a second row instead of overlapping when the width runs out.
+            // A wide window still lays out as one row, so its look is unchanged.
+            foreach (VisualElement child in bar.Children())
+                child.style.flexShrink = 0f;
+            bar.style.flexWrap = Wrap.Wrap;
+            bar.style.height = StyleKeyword.Auto;
+
             return bar;
         }
 
@@ -211,6 +251,8 @@ namespace UniverseCreator.Editor.Windows
         private void RefreshChrome()
         {
             bool loaded = graph != null;
+            if (view != null) view.CategoryFilter = loaded && graph.Domain == UCGraphDomain.LegacyMixed ?
+                (System.Func<NodeCategory, bool>)NodeCategoryColors.IsTextureGraph : null; // UC-T05-05: preserve the legacy palette until migration.
 
             if (emptyState != null)
                 emptyState.style.display = loaded ? DisplayStyle.None : DisplayStyle.Flex;
@@ -224,28 +266,48 @@ namespace UniverseCreator.Editor.Windows
             if (statusLabel != null)
             {
                 statusLabel.text = loaded
-                    ? graph.nodes.Count + " nodes  |  " + graph.connections.Count + " links"
+                    ? graph.nodes.Count + " nodes  |  " + graph.connections.Count + " links  |  " +
+                        (graph.Domain == UCGraphDomain.LegacyMixed ? "Legacy mixed graph — preserved for migration" :
+                         graph.Domain == UCGraphDomain.TextureMaterialShader ? "Textures / Materials / Shaders" : "Incompatible domain — preserved for inspection")
                     : string.Empty;
             }
         }
+
+        // UC-T05-05: metadata controls new authoring; loading another domain remains a non-destructive inspection.
+        private bool AcceptNode(NodeCatalogEntry entry) => graph != null && graph.HasSupportedDomainMetadata &&
+            (graph.Domain == UCGraphDomain.LegacyMixed ||
+             (graph.Domain == UCGraphDomain.TextureMaterialShader && GraphDomainRules.Supports(entry.graphDomains, UCGraphDomain.TextureMaterialShader)));
 
         // ------------------------------------------------------------------
         //  Apply
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Runs the graph once and commits the result.
-        ///
-        /// Synchronous and on the main thread, both deliberately. Texture nodes
-        /// hold Texture2D references and the terminal step writes assets, so this
-        /// is the one graph in the project that cannot go to a worker. The bake
-        /// resolution cap in the toolbar is what keeps that honest.
+        /// UC-T07-09: captures one explicit world texture run, yielding between bounded graph outputs before applying its regions.
         /// </summary>
         private void ApplyToTerrain()
         {
+            CancelBake();
             if (graph == null)
             {
                 ShowNotification(new GUIContent("No graph loaded."));
+                return;
+            }
+
+            if (!graph.HasSupportedDomainMetadata ||
+                (graph.Domain != UCGraphDomain.LegacyMixed && graph.Domain != UCGraphDomain.TextureMaterialShader))
+            {
+                ShowNotification(new GUIContent("Select a Texture Graph; this asset is preserved for inspection and migration."));
+                return; // UC-T05-05: inspecting a main/companion asset cannot accidentally run its outputs through texture Apply.
+            }
+
+            // UC-T01-09: analyze before evaluating any node or allocating/applying generated resources.
+            GraphValidationReport report = view != null ? view.RefreshValidation() : GraphValidationReport.Analyze(graph,
+                NodeExecutionDomain.Worker | NodeExecutionDomain.MainThread | NodeExecutionDomain.MainThreadGpu);
+            if (!report.IsValid)
+            {
+                Debug.LogError("Universe Creator: texture graph is invalid. " + string.Join("\n", graph.Validate()));
+                ShowNotification(new GUIContent("Fix the graph errors shown on its nodes before applying."));
                 return;
             }
 
@@ -262,58 +324,46 @@ namespace UniverseCreator.Editor.Windows
                 return;
             }
 
-            TerrainData data = terrain.terrainData;
-
-            // Tile geometry comes from the terrain the user pointed at. Texture
-            // nodes are position-independent - none of them read tile.worldPos -
-            // but the bakers read the Matrix a Terrain Height Source produced,
-            // which carries the terrain's own metres-per-pixel. Passing the same
-            // terrain's size here keeps the two consistent for anything added
-            // later that does sample by world position.
-            int res = Mathf.Clamp(bakeResolution, 33, 1025);
-            TileData tile = new TileData(
-                Coord.Zero,
-                new CoordRect(0, 0, res, res),
-                terrain.transform.position,
-                data.size,
-                data.size.y);
-            tile.SetFullWorld(terrain.transform.position, data.size);
-
-            StopToken stop = new StopToken();
-
             try
             {
-                new GraphEvaluator(graph).Evaluate(tile, stop);
+                bake = new TextureGraphBake(graph, terrain, targetWorld, BakeSizes[IndexOfBakeSize(bakeResolution)], bakeCache);
+                EditorApplication.update += PumpBake;
+                if (statusLabel != null) statusLabel.text = bake.Status;
             }
             catch (System.Exception ex)
             {
-                Debug.LogError("Universe Creator: texture graph evaluation failed - " + ex);
-                ShowNotification(new GUIContent("Evaluation failed. See the console."));
-                return;
+                Debug.LogError("Universe Creator: texture graph capture failed - " + ex.Message);
+                ShowNotification(new GUIContent(ex.Message));
             }
-
-            if (tile.outputs.surface == null)
-            {
-                // The single most common authoring mistake, and the one with the
-                // least obvious symptom: everything is wired but nothing happens.
-                ShowNotification(new GUIContent("Nothing to apply - the graph has no Shader Output."));
-                return;
-            }
-
-            if (!UCTextureGraphApplier.Apply(tile.outputs, terrain))
-            {
-                ShowNotification(new GUIContent("Apply failed. See the console."));
-                return;
-            }
-
-            int siblings = ShareWithSiblingChunks(terrain);
-
-            AssetDatabase.SaveAssets();
-
-            ShowNotification(new GUIContent(siblings > 0
-                ? "Applied to " + (siblings + 1) + " terrains"
-                : "Applied to " + terrain.name));
         }
+
+        internal void PumpBake()
+        {
+            if (bake == null) { EditorApplication.update -= PumpBake; return; }
+            bake.Pump(); if (statusLabel != null) statusLabel.text = bake.Status;
+            if (!bake.IsComplete) return;
+            string message = bake.Status; bool succeeded = bake.Succeeded;
+            bake.Dispose(); bake = null; EditorApplication.update -= PumpBake;
+            if (!succeeded) Debug.LogWarning("Universe Creator: " + message);
+            ShowNotification(new GUIContent(message));
+        }
+
+        private void CancelBake()
+        {
+            if (bake != null) { bake.Cancel(); bake.Dispose(); bake = null; }
+            EditorApplication.update -= PumpBake;
+            if (statusLabel != null) statusLabel.text = "Bake cancelled; Run / Apply publishes current settings.";
+        }
+
+        // Remembers the terrain we last announced an auto-resolve for, so the
+        // "using terrain X" notice fires once when the guess first lands (or when
+        // it lands on a DIFFERENT terrain), not on every Apply. Without this the
+        // same line prints on each evaluation and the console stops being read.
+        // A REFERENCE, not GetInstanceID(): that getter is CS0619-obsolete in
+        // Unity 6 (warnings are errors here), and reference identity is exactly
+        // what we want - a destroyed-and-recreated terrain becomes a different
+        // reference (the old one compares as fake-null), so it re-announces.
+        [System.NonSerialized] private static UnityEngine.Terrain s_lastAutoResolved;
 
         /// <summary>
         /// The terrain to write to: the field if set, otherwise the first chunk of
@@ -327,6 +377,13 @@ namespace UniverseCreator.Editor.Windows
         private UnityEngine.Terrain ResolveTerrain()
         {
             if (targetTerrain != null) return targetTerrain;
+
+            if (targetWorld != null) // UC-T05-06: an explicitly bound world never falls through to another world's terrain.
+            {
+                targetTerrain = targetWorld.GetComponentInChildren<UnityEngine.Terrain>(true);
+                terrainField?.SetValueWithoutNotify(targetTerrain);
+                return targetTerrain;
+            }
 
             UnityEngine.Terrain found = null;
 
@@ -352,69 +409,21 @@ namespace UniverseCreator.Editor.Windows
             {
                 targetTerrain = found;
                 if (terrainField != null) terrainField.SetValueWithoutNotify(found);
-                Debug.Log("Universe Creator: texture graph applied to '" + found.name +
-                          "'. Assign a different terrain in the Texture Graph toolbar to override.");
+
+                if (!ReferenceEquals(found, s_lastAutoResolved))
+                {
+                    s_lastAutoResolved = found;
+                    Debug.Log("Universe Creator: no terrain was set in the Texture Graph " +
+                              "toolbar, so it resolved to '" + found.name +
+                              "'. Assign a different terrain in the toolbar to override.");
+                }
             }
 
             return found;
         }
 
-        /// <summary>
-        /// Copies the finished material and layer set onto the other chunks of the
-        /// same world.
-        ///
-        /// WHY COPY RATHER THAN RE-APPLY
-        /// -----------------------------
-        /// Calling the applier once per chunk would work - every asset it touches
-        /// is found by path, so twenty-five passes produce one material, not
-        /// twenty-five. But it would also re-bake every map twenty-five times and
-        /// log the same batch of notices twenty-five times, which is how a console
-        /// stops being read. The chunks of one world are one surface; they need
-        /// the same two references, not the same computation.
-        /// </summary>
-        private int ShareWithSiblingChunks(UnityEngine.Terrain source)
-        {
-            UniverseCreatorObject world = source.GetComponentInParent<UniverseCreatorObject>(true);
-            if (world == null) return 0;
-
-            UnityEngine.Terrain[] all = world.GetComponentsInChildren<UnityEngine.Terrain>(true);
-            int shared = 0;
-
-            for (int i = 0; i < all.Length; i++)
-            {
-                UnityEngine.Terrain t = all[i];
-                if (t == null || t == source || t.terrainData == null) continue;
-
-                if (t.materialTemplate != source.materialTemplate)
-                {
-                    t.materialTemplate = source.materialTemplate;
-                    EditorUtility.SetDirty(t);
-                }
-
-                // Reference comparison, not element-by-element: the applier reuses
-                // one TerrainLayer asset per channel, so two chunks already in sync
-                // hold the same array contents and assigning again would dirty a
-                // TerrainData and force a basemap rebuild for no change.
-                if (!SameLayers(t.terrainData.terrainLayers, source.terrainData.terrainLayers))
-                {
-                    t.terrainData.terrainLayers = source.terrainData.terrainLayers;
-                    EditorUtility.SetDirty(t.terrainData);
-                }
-
-                shared++;
-            }
-
-            return shared;
-        }
-
-        private static bool SameLayers(TerrainLayer[] a, TerrainLayer[] b)
-        {
-            if (a == null || b == null) return a == b;
-            if (a.Length != b.Length) return false;
-            for (int i = 0; i < a.Length; i++)
-                if (a[i] != b[i]) return false;
-            return true;
-        }
+        // UC-T07-09: TextureGraphBake replaces the former single-cell sibling-copy path;
+        // spatially baked resources now belong to each accepted region instead of the final copied cell.
 
         // ------------------------------------------------------------------
         //  No-graph-loaded panel

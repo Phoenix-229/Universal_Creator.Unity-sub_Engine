@@ -22,6 +22,9 @@ namespace UniverseCreator.Nodes.Modifiers
 
         public float intensity = 1f;
 
+        /// <inheritdoc />
+        protected override int RequiredMargin(TileData tile) => Mathf.Clamp(radius, 0, 32); // UC-T02-08: both separable passes need the full authored radius.
+
         protected override void Modify(Matrix m, TileData tile, StopToken stop)
         {
             int r = Mathf.Clamp(radius, 0, 32);

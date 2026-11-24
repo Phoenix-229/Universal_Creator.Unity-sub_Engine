@@ -33,6 +33,7 @@
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
 #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareOpaqueTexture.hlsl"
 #include "UC_Underwater.hlsl"
+#include "UC_Lighting.hlsl"
 
 struct UCWaterAttributes
 {
@@ -40,6 +41,7 @@ struct UCWaterAttributes
     float3 normalOS     : NORMAL;
     float4 tangentOS    : TANGENT;
     float4 color        : COLOR;
+    float2 uv           : TEXCOORD0; // UC-T04-09: accepted physical depth limits surface displacement.
     UNITY_VERTEX_INPUT_INSTANCE_ID
 };
 
@@ -51,6 +53,7 @@ struct UCWaterVaryings
     float4 tangentWS    : TEXCOORD2;
     float4 screenPos    : TEXCOORD3;
     float4 flowAndMask  : TEXCOORD4;   // xy dir, z speed, w weight
+    float localDepth   : TEXCOORD6;   // UC-T04-08: accepted physical depth remains available without camera textures.
     half   fogCoord     : TEXCOORD5;
     UNITY_VERTEX_INPUT_INSTANCE_ID
     UNITY_VERTEX_OUTPUT_STEREO
@@ -99,7 +102,14 @@ UCWaterVaryings UCWaterVert(UCWaterAttributes input)
     float4 flow = UCDecodeWaterVertex(input.color);
 
     float3 positionWS = vp.positionWS;
-    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, flow.w);
+    // Both terms are taken from the UNDISPLACED xz so the vertical offset stays a
+    // line-for-line match for the C# buoyancy mirror (UCWaterSurface.WaveOffset); the
+    // Gerstner horizontal is applied after and is shader-only by design. The depth pass
+    // below MUST apply these two in the same order or the prepass surface drifts off the
+    // lit one and refraction/soft-edge sampling reads the wrong depth.
+    float4 motionFlow = flow; motionFlow.w *= step(0.0, input.uv.x); // UC-T04-09: negative whitewater sentinel quiets a junction without hiding it.
+    float vertexDepth = dot(input.color, 1.0) < 0.0001 ? 1000.0 : input.uv.y; // Legacy meshes with no water stream keep ambient motion.
+    positionWS = UCDisplacedWaterPosition(positionWS, _Time.y, motionFlow, vertexDepth); // UC-T04-09: identical physical-depth attenuation in both passes.
 
     output.positionWS = positionWS;
     output.positionCS = TransformWorldToHClip(positionWS);
@@ -107,6 +117,7 @@ UCWaterVaryings UCWaterVert(UCWaterAttributes input)
     output.tangentWS = float4(vn.tangentWS, input.tangentOS.w * GetOddNegativeScale());
     output.screenPos = ComputeScreenPos(output.positionCS);
     output.flowAndMask = flow;
+    output.localDepth = max(0.0, input.uv.y); // UC-T04-08: bathymetry supplements screen-space shore/obstacle contact.
     output.fogCoord = ComputeFogFactor(output.positionCS.z);
 
     return output;
@@ -115,6 +126,10 @@ UCWaterVaryings UCWaterVert(UCWaterAttributes input)
 // FRONT_FACE_TYPE / IS_FRONT_VFACE rather than a raw VFACE or SV_IsFrontFace:
 // the semantic and its sign differ between D3D, GL and Metal, and the macro is
 // the platform-portable spelling URP itself uses.
+// UC-T04-08: camera-scoped availability, set before URP renders each camera.
+float _UCWaterDepthAvailable;
+float _UCWaterOpaqueAvailable;
+
 half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEMANTIC) : SV_Target
 {
     UNITY_SETUP_INSTANCE_ID(input);
@@ -129,21 +144,27 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
     // Both depths are linearised to eye space before subtracting. Subtracting raw
     // depth buffer values instead gives a difference that is correct at the near
     // plane and wrong everywhere else, because the buffer is not linear.
+    float surfaceEye = LinearEyeDepth(input.positionCS.z, _ZBufferParams);
+    bool cameraDepth = _WaterScreenSpaceEffects > 0.5 && _UCWaterDepthAvailable > 0.5;
+    float waterMetres = input.localDepth > 0.0 ? input.localDepth : _DepthFadeMetres * 4.0;
+    if (cameraDepth)
+    {
     float rawSceneDepth = SampleSceneDepth(screenUV);
     float sceneEye = LinearEyeDepth(rawSceneDepth, _ZBufferParams);
-    float surfaceEye = LinearEyeDepth(input.positionCS.z, _ZBufferParams);
-
-    float waterMetres = max(0.0, sceneEye - surfaceEye);
+    waterMetres = max(0.0, sceneEye - surfaceEye);
 
     // A scene depth at the far plane means nothing opaque was drawn there - sky,
     // or the depth texture is switched off on the URP asset. Treat it as deep
     // rather than as zero, or every such pixel reads as a shoreline and the whole
     // ocean turns to foam.
     #if UNITY_REVERSED_Z
-        if (rawSceneDepth <= 1e-7) waterMetres = _DepthFadeMetres * 4.0;
+        if (rawSceneDepth <= 1e-7) waterMetres = input.localDepth > 0.0 ? input.localDepth : _DepthFadeMetres * 4.0;
     #else
-        if (rawSceneDepth >= 1.0 - 1e-7) waterMetres = _DepthFadeMetres * 4.0;
+        if (rawSceneDepth >= 1.0 - 1e-7) waterMetres = input.localDepth > 0.0 ? input.localDepth : _DepthFadeMetres * 4.0;
     #endif
+    }
+
+    if (input.localDepth > 0.0) waterMetres = min(waterMetres, input.localDepth); // UC-T04-08: accepted bank depth bounds shore colour/foam even when an opaque object is offscreen.
 
     float depthT = saturate(waterMetres / max(0.05, _DepthFadeMetres));
 
@@ -191,10 +212,13 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
 
     // And rejected outright if it sampled something in front of the water, which
     // is what happens when a rock or a boat stands proud of the surface.
-    float refractedEye = LinearEyeDepth(SampleSceneDepth(refractUV), _ZBufferParams);
-    if (refractedEye < surfaceEye) refractUV = screenUV;
-
-    half3 behind = SampleSceneColor(refractUV);
+    half3 behind = lerp(_ShallowColor.rgb, _DeepColor.rgb, depthT); // UC-T04-08: no black or stale camera texture on the cheaper path.
+    if (cameraDepth && _UCWaterOpaqueAvailable > 0.5)
+    {
+        float refractedEye = LinearEyeDepth(SampleSceneDepth(refractUV), _ZBufferParams);
+        if (refractedEye < surfaceEye) refractUV = screenUV;
+        behind = SampleSceneColor(refractUV);
+    }
 
     // ---- 4. absorption ----
     //
@@ -245,6 +269,38 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
         // which is where a wave breaks.
         half edge = 1.0h - saturate(waterMetres / max(0.01, _FoamEdgeWidth));
         edge = edge * edge;
+
+        // RIV-4 W1, the shore WAVE WASH. The term above is a band of FIXED width, so
+        // a beach reads as a painted white rim that never moves - which is the look-gap.
+        // Real surf runs up the sand and drains back, so what has to be animated is the
+        // band's REACH, not its brightness: brightening in place still reads as a rim.
+        //
+        // Three things make it read as water rather than a pulse:
+        //  - It TRAVELS along the wind axis (the same axis UCWindChopHeight and the wind
+        //    foam use), so a swell arrives from where the weather comes from instead of
+        //    the whole coastline flashing in unison.
+        //  - The envelope is ASYMMETRIC. A wave rushes up and drains slowly, so the 0..1
+        //    sine is raised to a power BELOW one: that makes the rise quick and the fall
+        //    long. A plain sine gives a symmetric throb that reads as breathing.
+        //  - It is combined with max, not added, for the reason the splash and wind foam
+        //    already are: foam saturates, and summing two whites just clips.
+        //
+        // Opt-in, and off by default, so an existing water material is untouched.
+        if (_ShoreWashEnabled > 0.5)
+        {
+            float travel = dot(input.positionWS.xz, _UCWindDirection.xz) * _ShoreWashTravel;
+            float phase = _Time.y * (6.2831853 / max(0.25, _ShoreWashPeriod)) - travel;
+
+            half swash = saturate(sin(phase) * 0.5h + 0.5h);
+            swash = pow(swash, 0.55h);
+
+            // At the top of the swash the sheet of water reaches further up the beach.
+            half reach = max(0.01h, _FoamEdgeWidth + swash * _ShoreWashReach);
+            half wash = 1.0h - saturate(waterMetres / reach);
+            wash = pow(saturate(wash), max(0.5h, _ShoreWashSharpness));
+
+            edge = max(edge, wash * _ShoreWashStrength);
+        }
 
         // Flow term: fast water is white water. Without this a river reads as a
         // still ribbon with foam only at the bank, which is backwards - the
@@ -351,6 +407,9 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
 
     inputData.fogCoord = InitializeInputDataFog(float4(input.positionWS, 1.0), input.fogCoord);
     inputData.bakedGI = SampleSH(normalWS);
+    // Water's ambient term reads the same grid the shore and its bed do, so a lake in a
+    // gorge is lit by the gorge, not by a flat sky it cannot see. No grid bound, no change.
+    inputData.bakedGI = UCGridAmbientOr(inputData.bakedGI, input.positionWS, normalWS);
     inputData.normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
     inputData.shadowMask = half4(1, 1, 1, 1);
 
@@ -367,6 +426,23 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
     surfaceData.alpha = 1.0h;
     surfaceData.clearCoatMask = 0.0h;
     surfaceData.clearCoatSmoothness = 0.0h;
+
+    // ---- 8c. ice ----
+    //
+    // Still water freezes from the surface down. The weather layer sets this per
+    // body and only ever on still water, so a lake whitens over while the river and
+    // the surf beside it keep running. Fresh cover is a matte white sheet: it lays
+    // the wave normal flat so the surface stops moving, whitens the albedo, and
+    // dulls the gloss to a wind-scoured snow-ice rather than a mirror. Melting it
+    // back to zero returns the open surface exactly.
+    half ice = saturate(_UCIce);
+    if (ice > 0.001h)
+    {
+        inputData.normalWS = SafeNormalize(lerp(inputData.normalWS, (half3)geomNormalWS, ice));
+        surfaceData.normalTS = lerp(surfaceData.normalTS, half3(0, 0, 1), ice);
+        surfaceData.albedo = lerp(surfaceData.albedo, half3(0.86h, 0.90h, 0.94h), ice);
+        surfaceData.smoothness = lerp(surfaceData.smoothness, 0.12h, ice);
+    }
 
     half4 color = UniversalFragmentPBR(inputData, surfaceData);
 
@@ -402,6 +478,10 @@ half4 UCWaterFrag(UCWaterVaryings input, FRONT_FACE_TYPE facing : FRONT_FACE_SEM
         alpha *= weight;
     }
 
+    // A frozen surface is a solid sheet, not a film: it hides the bed whatever the
+    // depth or view angle worked out above.
+    alpha = max(alpha, ice);
+
     color.rgb = MixFog(color.rgb, inputData.fogCoord);
 
     // The surface is at the far end of a ray through the medium like anything else,
@@ -421,6 +501,7 @@ struct UCWaterDepthAttributes
 {
     float4 positionOS : POSITION;
     float4 color      : COLOR;
+    float2 uv         : TEXCOORD0; // UC-T04-09: the forward stream's local depth also constrains the depth prepass.
     UNITY_VERTEX_INPUT_INSTANCE_ID
 };
 
@@ -442,9 +523,17 @@ UCWaterDepthVaryings UCWaterDepthVert(UCWaterDepthAttributes input)
     float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
 
     // Displaced by exactly what the forward pass displaces by. A depth pass that
-    // used the flat plane would z-fight the shaded surface by up to _WaveHeight.
-    float weight = dot(input.color, 1.0) > 0.0001 ? input.color.a : 1.0;
-    positionWS.y += UCWaveOffset(positionWS.xz, _Time.y, weight);
+    // used the flat plane would z-fight the shaded surface by up to _WaveHeight -
+    // and since a river advects its swell by the same flow the forward pass decodes,
+    // this decodes the full flow too rather than the weight alone, or the two passes
+    // would disagree wherever _WaveFlowAdvect is non-zero.
+    float4 flow = UCDecodeWaterVertex(input.color);
+    // Same two terms, same order as the forward pass (ForwardLitVertex): vertical from the
+    // undisplaced xz, then the Gerstner horizontal. Must stay identical or this prepass
+    // surface drifts off the shaded one.
+    float4 motionFlow = flow; motionFlow.w *= step(0.0, input.uv.x); // UC-T04-09: same independent junction motion mask as forward.
+    float vertexDepth = dot(input.color, 1.0) < 0.0001 ? 1000.0 : input.uv.y;
+    positionWS = UCDisplacedWaterPosition(positionWS, _Time.y, motionFlow, vertexDepth); // UC-T04-09: same function, inputs and ordering as forward.
 
     output.positionCS = TransformWorldToHClip(positionWS);
     return output;

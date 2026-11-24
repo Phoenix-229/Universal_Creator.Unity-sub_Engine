@@ -36,8 +36,10 @@ namespace UniverseCreator.Nodes.Modifiers
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
         public override string Tooltip { get { return "Cut a wave-notch terrace around sea level."; } }
 
-        /// <summary>Water plane, in normalised height.</summary>
-        public float seaLevel = 0.3f;
+        /// <summary>Water plane, in normalised height. The world's one waterline: the
+        /// same default Ocean Level, the Hydrology Spawner, Coastal Shelf Shaper and the
+        /// beach band carry, so the notch is cut where the water actually stands.</summary>
+        public float seaLevel = 0.35f;
 
         /// <summary>Half-width of the affected band.</summary>
         public float waveHeight = 0.02f;

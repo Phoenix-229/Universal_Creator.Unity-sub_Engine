@@ -226,6 +226,28 @@ namespace UniverseCreator.Editor
             return tex;
         }
 
+        /// <summary>
+        /// Loads the product's own brand mark, the 128 px square cut of the banner.
+        /// Skin-independent: the mark is artwork, not a glyph, so there is no light
+        /// and dark variant to choose between.
+        ///
+        /// Cached in the same dictionary as everything else under its own key. This
+        /// is loaded by an inspector header that repaints several times a second
+        /// while the mouse moves over it, and a Resources.Load per repaint is a cost
+        /// paid forever for a value that never changes. A null is cached too, so a
+        /// missing brand file costs one failed lookup rather than one per frame.
+        /// </summary>
+        public static Texture2D Brand()
+        {
+            const string key = "brand:UniverseCreator_Icon";
+            Texture2D tex;
+            if (cache.TryGetValue(key, out tex)) return tex;
+
+            tex = Resources.Load<Texture2D>(UCBrandImages.UniverseCreatorIconResourceName);
+            cache[key] = tex;
+            return tex;
+        }
+
         /// <summary>Loads a cursor texture. Skin-independent.</summary>
         public static Texture2D GetCursor(string cursorName)
         {

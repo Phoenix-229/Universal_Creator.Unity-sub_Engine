@@ -64,11 +64,12 @@ namespace UniverseCreator.Editor.Windows
             {
                 EditorGUILayout.LabelField("Modules", EditorStyles.boldLabel);
                 DrawModule("Terrain Core", true);
-                DrawModule("Texturing & Materials", false);
-                DrawModule("Vegetation & Props", false);
-                DrawModule("Weather & Atmosphere", false);
-                DrawModule("Lighting", false);
-                DrawModule("RoadMaster Bridge", false);
+                DrawModule("Texturing & Materials", true);
+                DrawModule("Vegetation & Props", true);
+                DrawModule("Weather & Atmosphere", true);
+                DrawModule("Lighting", true);
+                DrawModule("Geometry & Streaming", true);
+                DrawModule("Road & City Master Bridge", false);
             }
 
             EditorGUILayout.Space(14);

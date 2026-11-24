@@ -157,7 +157,9 @@ namespace UniverseCreator.Nodes.Texturing
         private static readonly Port[] Ins =
         {
             new Port("Surface", PortType.Surface, PortDirection.Input),
-            new Port("Height",  PortType.Matrix,  PortDirection.Input)
+            new Port("Height",  PortType.Matrix,  PortDirection.Input),
+            new Port("Coverage (0..1)", PortType.Scalar, PortDirection.Input), // UC-T07-11: append weather controls without moving saved height/surface wires.
+            new Port("Snowline (world metres)", PortType.Scalar, PortDirection.Input)
         };
 
         private static readonly Port[] Outs =
@@ -199,12 +201,22 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Depth of the snow normal map.")]
         public float normalStrength = 0.6f;
 
+        [Tooltip("How much of the ground's ambient occlusion the snow keeps. 0 is deep " +
+                 "fresh snow that fills every crevice and reads flat and bright; raise it " +
+                 "for thin, wind-scoured snow that still shows the rough surface beneath. " +
+                 "0 matches how snow rendered before this control existed.")]
+        public float occlusion = 0f;
+
         [Tooltip("World size of one snow tile, in metres. Snow is projected triplanar so it holds on cliffs.")]
         public float triplanarScaleMetres = 6f;
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             if (outputIndex == 1) return BuildTractionMask(tile, stop);
+
+            GraphExecutionGuard.Require(this, ExecutionDomain, HasCpuFallback); // UC-T07-11: surface texture references remain on their declared owner thread.
+            float cover = GetInputScalarOr(tile, 2, stop, coverage), snowline = GetInputScalarOr(tile, 3, stop, snowLineAltitude);
+            TextureImageSampling.RequireFinite(cover); TextureImageSampling.RequireFinite(snowline);
 
             SurfaceProduct upstream = GetInputSurface(tile, 0, stop);
             SurfaceProduct surface = upstream != null ? upstream.Copy() : new SurfaceProduct();
@@ -221,13 +233,14 @@ namespace UniverseCreator.Nodes.Texturing
                 surface.SetTexture(UCShaderProps.SnowNormal, new TextureRef(snowNormal));
 
             surface.SetColor(UCShaderProps.SnowColor, snowColor);
-            surface.SetFloat(UCShaderProps.SnowAltitude, snowLineAltitude);
+            surface.SetFloat(UCShaderProps.SnowAltitude, snowline);
             surface.SetFloat(UCShaderProps.SnowFalloff, Mathf.Max(1f, falloffMetres));
             surface.SetFloat(UCShaderProps.SnowSlopeLimit, Mathf.Clamp(slopeLimitDegrees, 0f, 90f));
             surface.SetFloat(UCShaderProps.SnowSlopeFalloff, Mathf.Max(0.5f, slopeFalloffDegrees));
-            surface.SetFloat(UCShaderProps.SnowCoverage, Mathf.Clamp01(coverage));
+            surface.SetFloat(UCShaderProps.SnowCoverage, Mathf.Clamp01(cover));
             surface.SetFloat(UCShaderProps.SnowSmoothness, Mathf.Clamp01(smoothness));
             surface.SetFloat(UCShaderProps.SnowNormalStrength, Mathf.Clamp(normalStrength, 0f, 4f));
+            surface.SetFloat(UCShaderProps.SnowOcclusion, Mathf.Clamp01(occlusion));
             surface.SetFloat(UCShaderProps.SnowTriplanarScale, Mathf.Max(0.01f, triplanarScaleMetres));
 
             if (snowTexture == null)
@@ -259,7 +272,8 @@ namespace UniverseCreator.Nodes.Texturing
             float fall = Mathf.Max(1f, falloffMetres);
             float slopeLimit = Mathf.Clamp(slopeLimitDegrees, 0f, 90f);
             float slopeFall = Mathf.Max(0.5f, slopeFalloffDegrees);
-            float cover = Mathf.Clamp01(coverage);
+            float cover = GetInputScalarOr(tile, 2, stop, coverage), snowline = GetInputScalarOr(tile, 3, stop, snowLineAltitude);
+            TextureImageSampling.RequireFinite(cover); TextureImageSampling.RequireFinite(snowline); cover = Mathf.Clamp01(cover);
 
             for (int z = 0; z < h; z++)
             {
@@ -299,7 +313,7 @@ namespace UniverseCreator.Nodes.Texturing
                     float slopeDeg = Mathf.Atan(Mathf.Sqrt(gx * gx + gz * gz)) * Mathf.Rad2Deg;
 
                     float alt = InterpolationMath.Clamp01(
-                        (worldY - snowLineAltitude + fall) / (2f * fall));
+                        (worldY - snowline + fall) / (2f * fall));
 
                     float slopeTerm = 1f - InterpolationMath.SmoothStep(
                         slopeLimit - slopeFall, slopeLimit + slopeFall, slopeDeg);
@@ -339,6 +353,12 @@ namespace UniverseCreator.Nodes.Texturing
     [System.Serializable]
     public class WetnessNode : SurfaceFeatureNode
     {
+        private static readonly Port[] WeatherInputs =
+        {
+            new Port("Surface", PortType.Surface, PortDirection.Input),
+            new Port("Wetness (0..1)", PortType.Scalar, PortDirection.Input) // UC-T07-11: real weather parameters can update appearance without height/image generation.
+        };
+        public override Port[] GetInputs() => WeatherInputs;
         public override string NodeName { get { return "Wetness"; } }
         public override string Tooltip
         {
@@ -368,8 +388,9 @@ namespace UniverseCreator.Nodes.Texturing
 
         protected override void Apply(SurfaceProduct surface, TileData tile, StopToken stop)
         {
+            float wet = GetInputScalarOr(tile, 1, stop, wetnessAmount); TextureImageSampling.RequireFinite(wet);
             surface.EnableFeature(UCShaderProps.EnableWetness);
-            surface.SetFloat(UCShaderProps.WetnessAmount, Mathf.Clamp01(wetnessAmount));
+            surface.SetFloat(UCShaderProps.WetnessAmount, Mathf.Clamp01(wet));
             surface.SetFloat(UCShaderProps.WetDarkening, Mathf.Clamp01(darkening));
             surface.SetFloat(UCShaderProps.WetSmoothness, Mathf.Clamp01(wetSmoothness));
             surface.SetFloat(UCShaderProps.WetSpecBoost, Mathf.Clamp01(specularBoost));

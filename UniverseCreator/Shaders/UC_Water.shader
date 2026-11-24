@@ -25,10 +25,9 @@
 //
 //  REQUIREMENTS
 //  ------------
-//  Opaque Texture and Depth Texture must be enabled on the URP asset. Without
-//  them the shader falls back to a flat deep colour - legible, but wrong.
-//  UCWaterApplier turns both on when it builds the material and
-//  UCShaderDiagnostics reports it if they were switched off afterwards.
+//  UC-T04-08: camera depth and opaque textures enrich refraction/contact when
+//  enabled. Missing textures or Low quality use accepted local bathymetry,
+//  depth colour and ordinary transparency. Camera availability is checked per draw.
 //
 //  The properties here mirror WaterProduct field for field, because
 //  UCWaterApplier copies one onto the other and a name that exists on only one
@@ -55,6 +54,8 @@ Shader "UniverseCreator/Water"
         _FlowSpeed          ("Uniform Flow (m/s XZ)", Vector) = (0.06, 0.03, 0, 0)
         _SecondaryScale     ("Secondary Tile Ratio", Range(0.05, 1.0)) = 0.37
         _Refraction         ("Refraction", Range(0.0, 0.2)) = 0.03
+        // UC-T04-08: local bathymetry remains usable without camera texture copies.
+        [ToggleUI] _WaterScreenSpaceEffects ("Camera Depth and Refraction", Float) = 1.0
         [ToggleUI] _UseVertexFlow ("Use Mesh Flow", Float) = 1.0
         _FlowStrength       ("Mesh Flow Scale", Range(0.0, 8.0)) = 1.0
 
@@ -67,6 +68,14 @@ Shader "UniverseCreator/Water"
         _FoamScrollSpeed    ("Foam Scroll", Range(0.0, 2.0)) = 0.15
         _FoamTileMetres     ("Foam Tile (m)", Range(0.1, 40.0)) = 4.0
         _FlowFoam           ("Whitewater From Flow", Range(0.0, 2.0)) = 1.0
+
+        [Header(Shore Wave Wash)]
+        [ToggleUI] _ShoreWashEnabled ("Shore Wave Wash", Float) = 0.0
+        _ShoreWashPeriod    ("Wash Period (s)", Range(1.0, 24.0)) = 7.0
+        _ShoreWashReach     ("Wash Reach (m)", Range(0.0, 20.0)) = 3.0
+        _ShoreWashSharpness ("Wash Edge", Range(0.25, 8.0)) = 1.6
+        _ShoreWashStrength  ("Wash Foam", Range(0.0, 2.0)) = 1.0
+        _ShoreWashTravel    ("Wash Travel (phase per m)", Range(0.0, 0.5)) = 0.02
 
         [Header(Caustics)]
         [ToggleUI] _CausticsEnabled ("Caustics", Float) = 0.0
@@ -81,6 +90,11 @@ Shader "UniverseCreator/Water"
         _WaveHeight         ("Vertex Wave Height (m)", Range(0.0, 4.0)) = 0.12
         _WaveLength         ("Vertex Wave Length (m)", Range(0.5, 200.0)) = 26.0
         _WaveSpeed          ("Vertex Wave Speed", Range(0.0, 4.0)) = 0.6
+        // Active wave-train count and weather scale. Set per body kind / by the weather
+        // layer, not hand-tuned; defaults reproduce the original three-octave calm swell.
+        _WaveOctaves        ("Wave Octaves", Range(1.0, 4.0)) = 3.0
+        _WaveStormAmp       ("Storm Swell x", Range(1.0, 4.0)) = 1.0
+        _WaveFlowAdvect     ("Swell Flow Advection", Range(0.0, 2.0)) = 0.0
 
         [Header(Shore)]
         _EdgeSoftenMetres   ("Shoreline Soften (m)", Range(0.0, 8.0)) = 0.6
@@ -93,6 +107,10 @@ Shader "UniverseCreator/Water"
         _WindRipple         ("Wind Chop", Range(0.0, 4.0)) = 1.0
         _WindChopLength     ("Wind Chop Length (m)", Range(0.15, 6.0)) = 0.9
         _WindFoam           ("Wind Whitecaps", Range(0.0, 2.0)) = 0.35
+
+        // Frozen fraction, set by the weather layer per body and only on still water.
+        // Authored default is open water; it is not a tuning control.
+        [HideInInspector] _UCIce ("Ice Cover", Range(0.0, 1.0)) = 0.0
     }
 
     SubShader

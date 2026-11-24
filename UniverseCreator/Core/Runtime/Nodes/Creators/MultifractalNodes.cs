@@ -194,7 +194,8 @@ namespace UniverseCreator.Nodes.Creators
         /// <summary>Warp feature size in world metres.</summary>
         public float size = 400f;
 
-        /// <summary>Displacement in world metres at full strength.</summary>
+        /// <summary>UC-T03-03: recursive input displacement in world metres; unused when recursive is false.</summary>
+        [Tooltip("Recursive input displacement in world metres. Used only when Recursive is enabled; Domain Warp Apply sets the final terrain displacement.")]
         public float intensity = 60f;
 
         public int octaves = 3;
@@ -250,8 +251,8 @@ namespace UniverseCreator.Nodes.Creators
                 }
             }
 
-            // Metres-per-unit is carried on the node, not the matrix, so the applier
-            // needs it too. Exposed as a field rather than packed into the data.
+            // UC-T03-03: this output is normalized; recursive displacement and the
+            // applier's final displacement are separate authored controls.
             return m;
         }
     }

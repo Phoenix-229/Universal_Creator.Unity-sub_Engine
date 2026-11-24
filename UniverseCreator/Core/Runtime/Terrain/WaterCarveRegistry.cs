@@ -37,7 +37,7 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>The world whose chunks this carver may dig, or null for none.</summary>
         UniverseCreatorObject CarveWorld { get; }
 
-        /// <summary>The dig itself, or null when this carver is switched off.</summary>
+        /// <summary>The terrain excavation request, or null when disabled or fitting a read-only surface profile.</summary>
         WaterCarveLayer CarveLayer { get; }
     }
 
@@ -116,7 +116,7 @@ namespace UniverseCreator.TerrainSystem
                 if (c == null) continue;
 
                 WaterCarveLayer layer = c.CarveLayer;
-                if (layer != null && layer.AffectsRegion(chunkWorldBounds)) n++;
+                if (layer != null && !layer.followOnly && layer.AffectsRegion(chunkWorldBounds)) n++; // UC-T04-02: fitting a read profile is not an affecting excavation.
             }
 
             return n;
@@ -149,7 +149,7 @@ namespace UniverseCreator.TerrainSystem
                 if (c == null) continue;
 
                 WaterCarveLayer layer = c.CarveLayer;
-                if (layer == null || !layer.enabled || !layer.HasShape) continue;
+                if (layer == null || layer.followOnly || !layer.enabled || !layer.HasShape) continue; // UC-T04-02: enforce read authority even for external carvers.
                 if (!layer.AffectsRegion(chunkWorldBounds)) continue;
 
                 layer.ApplyTo(heights, chunkWorldBounds, metresPerSample, maxHeight);

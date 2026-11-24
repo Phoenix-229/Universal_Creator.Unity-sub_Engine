@@ -40,6 +40,8 @@ namespace UniverseCreator.Nodes
         public const string FlowSpeed = "_FlowSpeed";
         public const string SecondaryScale = "_SecondaryScale";
         public const string Refraction = "_Refraction";
+        /// <summary>UC-T04-08: permits optional camera depth/refraction when both the tier and camera support it.</summary>
+        public const string ScreenSpaceEffects = "_WaterScreenSpaceEffects";
         public const string UseVertexFlow = "_UseVertexFlow";
         public const string FlowStrength = "_FlowStrength";
 
@@ -67,11 +69,22 @@ namespace UniverseCreator.Nodes
         public const string WaveLength = "_WaveLength";
         public const string WaveSpeed = "_WaveSpeed";
 
+        /// <summary>Active wave-train count 1..4 - spectral richness, set per body kind.</summary>
+        public const string WaveOctaves = "_WaveOctaves";
+        /// <summary>Storm swell multiplier, 1 calm; the weather layer drives it.</summary>
+        public const string WaveStormAmp = "_WaveStormAmp";
+        /// <summary>Downstream advection of the swell, rivers only (0 on still water).</summary>
+        public const string WaveFlowAdvect = "_WaveFlowAdvect";
+
         // -- shore -----------------------------------------------------------
         public const string EdgeSoftenMetres = "_EdgeSoftenMetres";
 
         // -- interactive ripples ---------------------------------------------
         public const string RippleStrength = "_RippleStrength";
         public const string RippleFoam = "_RippleFoam";
+
+        // -- weather ---------------------------------------------------------
+        /// <summary>Frozen fraction of a still body, 0 open to 1 fully iced over.</summary>
+        public const string Ice = "_UCIce";
     }
 }

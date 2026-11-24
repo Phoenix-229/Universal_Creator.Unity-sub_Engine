@@ -142,12 +142,53 @@ if (Test-Path $lock) {
     }
 }
 
+# A Unity editor open on ANOTHER project is the dangerous case, and the lock
+# check above cannot see it - that lock is per project. Two editors on a 16 GB
+# machine is roughly 3-4 GB each plus asset import workers and a shader
+# compiler, and the loser of that race is whichever one asks for memory next.
+# It is not always this one: a batch editor started here has killed a person's
+# unrelated editor session mid-edit. So this refuses to start rather than
+# gamble with work that is not ours.
+$others = @()
+try {
+    $others = @(Get-Process Unity -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -and $_.Path -like '*\Editor\Unity.exe' })
+}
+catch { }
+
+if ($others.Count -gt 0) {
+    Bad "A Unity editor is already running ($($others.Count) process(es))."
+    foreach ($o in $others) {
+        # The project is on the editor's own command line, so it can be named
+        # instead of leaving the user to guess which window is at risk.
+        $proj = ''
+        try {
+            $cl = (Get-CimInstance Win32_Process -Filter "ProcessId=$($o.Id)").CommandLine
+            if ($cl -match '-projectpath\s+"?([^"]+?)"?(\s+-|\s*$)') { $proj = $Matches[1].Trim() }
+        }
+        catch { }
+        if (-not $proj) { $proj = '(project unknown)' }
+        Say "        pid $($o.Id)  $proj"
+    }
+    Say ''
+    Say '        A batch editor started now competes with that session for RAM,'
+    Say '        and the one that dies may be the editor you have open - not this test.'
+    Say '        Close it and run again, or pass -Force to accept that risk.'
+    if (-not $Force) { exit 3 }
+    Warn 'continuing anyway because -Force was passed'
+}
+
 # A mid-test crash on a busy machine is a memory problem, not a code problem.
+# This aborts rather than warns: an out-of-memory kill part way through looks
+# exactly like a failing check, and the log it leaves behind is misleading.
 try {
     $freeGb = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB, 1)
     if ($freeGb -lt 3.0) {
-        Warn "only $freeGb GB RAM free - a batch editor needs roughly 3-4 GB"
-        Warn 'close other Unity instances first, or expect an out-of-memory abort mid-test'
+        Bad "only $freeGb GB RAM free - a batch editor needs roughly 3-4 GB"
+        Say '        Close other applications and run again, or pass -Force.'
+        Say '        Starting anyway usually ends in an abort that reads as a test failure.'
+        if (-not $Force) { exit 3 }
+        Warn 'continuing anyway because -Force was passed'
     }
     else { Ok "memory     $freeGb GB free" }
 }
@@ -196,10 +237,44 @@ $log = Get-Content -LiteralPath $LogFile
 
 $csErrors = @($log | Where-Object { $_ -match 'error CS[0-9]{4}' })
 if ($csErrors.Count -gt 0) {
-    Bad "COMPILE ERROR - $($csErrors.Count) C# error line(s). The test never ran."
+    # WHICH ASSET IS BROKEN MATTERS MORE THAN HOW MANY ERRORS THERE ARE.
+    # Unity compiles the whole project, so ONE broken script anywhere stops this
+    # test from running at all. Reported as a flat list, that reads as "Universe
+    # Creator does not compile" even when every error is in an unrelated asset -
+    # and the reader then spends their time on the wrong folder. So the lines are
+    # split by whose file they are in before anything is said about the cause.
+    $ours   = @($csErrors | Where-Object { $_ -match 'Assets[\\/]UniverseCreator[\\/]' })
+    $theirs = @($csErrors | Where-Object { $_ -notmatch 'Assets[\\/]UniverseCreator[\\/]' })
+
+    if ($ours.Count -eq 0) {
+        Bad "COMPILE ERROR - but NOT in Universe Creator. The test never ran."
+        Say ''
+        Say '    Every C# error is in another script in this project. Unity compiles'
+        Say '    everything together, so one broken file anywhere stops this test.'
+        Say '    Nothing here points at Universe Creator.'
+        Say ''
+        $theirs | Select-Object -First 20 | ForEach-Object { Say "    $_" }
+        if ($theirs.Count -gt 20) { Say "    ... and $($theirs.Count - 20) more (see the log)" }
+        Say ''
+        Say '    Fix those scripts (or remove them) and run this again.'
+        Say ''
+        Say "Log: $LogFile"
+        exit 2
+    }
+
+    Bad "COMPILE ERROR - $($ours.Count) in Universe Creator, $($theirs.Count) elsewhere. The test never ran."
     Say ''
-    $csErrors | Select-Object -First 20 | ForEach-Object { Say "    $_" }
-    if ($csErrors.Count -gt 20) { Say "    ... and $($csErrors.Count - 20) more (see the log)" }
+    Say '    In Universe Creator:'
+    $ours | Select-Object -First 20 | ForEach-Object { Say "    $_" }
+    if ($ours.Count -gt 20) { Say "    ... and $($ours.Count - 20) more (see the log)" }
+
+    if ($theirs.Count -gt 0) {
+        Say ''
+        Say '    In other assets (listed so they are not mistaken for ours):'
+        $theirs | Select-Object -First 10 | ForEach-Object { Say "    $_" }
+        if ($theirs.Count -gt 10) { Say "    ... and $($theirs.Count - 10) more (see the log)" }
+    }
+
     Say ''
     Say 'What this usually means:'
     Say '  - Another asset in the project declares a type this package also uses.'
@@ -210,6 +285,27 @@ if ($csErrors.Count -gt 0) {
     exit 2
 }
 Ok 'compile    no C# errors'
+
+# Two lines in every batch log read like faults and are not. Naming them here
+# stops a clean run from looking broken, and stops a real fault from hiding
+# behind "oh, that one is normal".
+$transport = @($log | Where-Object { $_ -match 'OnTransportError' })
+if ($transport.Count -gt 0) {
+    $closing = @($log | Where-Object { $_ -match 'Editor is closing down|requested this worker to shutdown' })
+    if ($closing.Count -gt 0) {
+        Ok 'workers    import worker transport error is the normal shutdown handshake'
+    }
+    else {
+        Warn 'an import worker reported a transport error with no shutdown request before it'
+        Warn 'that one is real - the worker died rather than being asked to stop'
+    }
+}
+
+$accel = @($log | Where-Object { $_ -match 'AcceleratorClientConnectionCallback|Curl error 3' })
+if ($accel.Count -gt 0) {
+    Warn 'the asset cache server is set to "use preferences" with no endpoint configured'
+    Warn 'set Editor Settings > Cache Server to Disabled to silence it (it caches nothing as is)'
+}
 
 # The verdict block RunBatch writes: header, checks run, failures, then any
 # failure lines. Print it verbatim - it is the artefact support asks for.

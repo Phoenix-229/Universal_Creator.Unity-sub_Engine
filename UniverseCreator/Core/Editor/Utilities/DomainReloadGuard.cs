@@ -23,6 +23,7 @@
 // -----------------------------------------------------------------------------
 
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UniverseCreator.TerrainSystem;
 
@@ -39,6 +40,8 @@ namespace UniverseCreator.Editor.Utilities
         {
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
+            EditorApplication.quitting += DrainAll; // UC-T07-10: final native preview inputs retire before editor shutdown.
+            EditorSceneManager.sceneClosing += (scene, removing) => { TextureGraphBake.CancelAll(); GraphPreviewScheduler.CancelScenePreviews(); }; // UC-T07-10: workers retain their immutable scene inputs until exit.
         }
 
         private static void OnBeforeAssemblyReload()
@@ -57,6 +60,9 @@ namespace UniverseCreator.Editor.Utilities
 
         private static void DrainAll()
         {
+            TextureGraphBake.CancelAll(); // UC-T07-10: prepared main-thread bakes have no in-flight GPU readback to wait for.
+            if (!GraphPreviewScheduler.CancelAndDrain(DrainTimeoutMs))
+                Debug.LogError("UC-T07-10: a preview worker did not retire within the two-second reload/shutdown drain; its input/resource pins remain owned until it exits.");
             // Inactive included: a disabled world can still hold threads that were
             // dispatched while it was enabled, and those read the same managed heap.
             ChunkManager[] managers =

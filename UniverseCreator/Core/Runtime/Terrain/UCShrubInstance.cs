@@ -51,6 +51,10 @@ namespace UniverseCreator.TerrainSystem
         private static readonly int IdFlutter  = Shader.PropertyToID("_Flutter");
         private static readonly int IdPivotH   = Shader.PropertyToID("_PivotHeight");
         private static readonly int IdTouch    = Shader.PropertyToID("_TouchResponse");
+        private Renderer[] appearanceRenderers; // UC-T06-09: cache native consumers once at configuration, not on every appearance refresh.
+        private MaterialPropertyBlock appearanceBlock;
+        private ShrubPrototypeDef appearanceDefinition;
+        private float appearanceScale;
 
         [Tooltip("How much this shrub slows something moving through it, 0-1. "
                + "Read by gameplay; this component does not move the character itself.")]
@@ -73,24 +77,45 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Configures a freshly spawned shrub from its prototype: the trigger volume
         /// it reports through, and the per-instance wind properties its renderers use.
+        /// wantsTrigger comes from the envelope's collider policy, resolved once in
+        /// ScatterApplier against the chunk's collider budget - a shrub past the budget
+        /// keeps its wind and drops its trigger.
+        /// UC-T06-08: trigger dimensions are prefab-local metres; root scale is applied once.
+        /// A false request disables/removes inherited colliders as well as omitting new shapes.
         /// </summary>
-        public void Configure(ShrubPrototypeDef def, float scale)
+        /// <param name="def">Borrowed prototype; null leaves the instance unchanged. Active trigger dimensions must be positive finite prefab-local metres.</param>
+        /// <param name="scale">Positive finite unitless instance size; the transform owns scaling and shader height remains in authored mesh-local metres.</param>
+        /// <param name="wantsTrigger">Whether to retain/build trigger collision; false removes all inherited shapes.</param>
+        /// <exception cref="System.ArgumentOutOfRangeException">Invalid scale, material inputs or requested trigger dimensions; nothing is changed.</exception>
+        public void Configure(ShrubPrototypeDef def, float scale, bool wantsTrigger)
         {
             if (def == null) return;
 
+            // UC-T06-08: reject invalid native/shader inputs before changing a renderer or collider.
+            if (!ScatterApplier.Finite(scale) || scale <= 0f || !ScatterApplier.Finite(def.meshHeight) || def.meshHeight <= 0f ||
+                !ScatterApplier.Finite(def.meshHeight * scale) || !ScatterApplier.Finite(def.windResponse) ||
+                !ScatterApplier.Finite(def.flutter) || !ScatterApplier.Finite(def.squeeze))
+                throw new System.ArgumentOutOfRangeException(nameof(scale), "Shrub scale and mesh height must be positive finite values; wind/touch inputs must be finite.");
+            if (wantsTrigger && (!ScatterApplier.Finite(def.colliderRadius) || def.colliderRadius <= 0f ||
+                !ScatterApplier.Finite(def.colliderHeight) || def.colliderHeight <= 0f || !ScatterApplier.Finite(def.colliderRadius * 2f)))
+                throw new System.ArgumentOutOfRangeException(nameof(def), "Requested shrub trigger dimensions must be positive finite prefab-local metres.");
+
             traversalDrag = Mathf.Clamp01(def.squeeze * 0.45f);
 
-            if (def.spawnCollider) BuildTrigger(def, scale);
-            ApplyMaterialBlock(def, scale);
+            if (wantsTrigger) BuildTrigger(def);
+            else ScatterApplier.ApplyColliderParts(gameObject, Ecology.ColliderPolicy.None); // UC-T06-08: inherited shapes cannot escape the budget.
+            appearanceDefinition = def; appearanceScale = scale; // UC-T06-09: borrow the authored prototype without modifying transforms/collision on a later refresh.
+            ApplyMaterialBlock(def); // UC-T06-09: shader height is authored mesh-local data.
         }
 
-        private void BuildTrigger(ShrubPrototypeDef def, float scale)
+        private void BuildTrigger(ShrubPrototypeDef def)
         {
             CapsuleCollider capsule = GetComponent<CapsuleCollider>();
             if (capsule == null) capsule = gameObject.AddComponent<CapsuleCollider>();
 
-            float r = Mathf.Max(0.02f, def.colliderRadius * scale);
-            float h = Mathf.Max(r * 2f, def.colliderHeight * scale);
+            // UC-T06-08: multiplying local dimensions by instance scale here would make world collision grow quadratically.
+            float r = Mathf.Max(0.02f, def.colliderRadius);
+            float h = Mathf.Max(r * 2f, def.colliderHeight);
 
             capsule.radius = r;
             capsule.height = h;
@@ -105,19 +130,21 @@ namespace UniverseCreator.TerrainSystem
                 gameObject.layer = def.colliderLayer;
         }
 
-        private void ApplyMaterialBlock(ShrubPrototypeDef def, float scale)
+        private void ApplyMaterialBlock(ShrubPrototypeDef def)
         {
-            Renderer[] renderers = GetComponentsInChildren<Renderer>();
+            if (appearanceRenderers == null) appearanceRenderers = GetComponentsInChildren<Renderer>(true); // UC-T06-09
+            Renderer[] renderers = appearanceRenderers;
             if (renderers == null || renderers.Length == 0) return;
 
-            MaterialPropertyBlock block = new MaterialPropertyBlock();
+            if (appearanceBlock == null) appearanceBlock = new MaterialPropertyBlock(); // UC-T06-09: reuse the native upload block.
+            MaterialPropertyBlock block = appearanceBlock;
 
             // Shrub class, not grass. This single value is the difference between a
             // bush that holds its base and a bush that lies over like a lawn.
             block.SetFloat(IdVegClass, (float)VegetationClass.Shrub);
             block.SetFloat(IdResponse, Mathf.Max(0f, def.windResponse));
             block.SetFloat(IdFlutter, Mathf.Max(0f, def.flutter));
-            block.SetFloat(IdPivotH, Mathf.Max(0.05f, def.meshHeight * scale));
+            block.SetFloat(IdPivotH, Mathf.Max(0.05f, def.meshHeight)); // UC-T06-09: shipped shaders divide positionOS.y by this mesh-local height; matrix scale applies once.
             block.SetFloat(IdTouch, Mathf.Max(0f, def.squeeze));
 
             for (int i = 0; i < renderers.Length; i++)
@@ -125,6 +152,17 @@ namespace UniverseCreator.TerrainSystem
                 if (renderers[i] == null) continue;
                 renderers[i].SetPropertyBlock(block);
             }
+        }
+
+        // UC-T06-09: update only cached renderer parameters; collider identity/dimensions and transforms are retained.
+        internal void RefreshAppearance()
+        {
+            var def = appearanceDefinition;
+            if (def == null) return;
+            if (!ScatterApplier.Finite(def.windResponse) || !ScatterApplier.Finite(def.flutter) || !ScatterApplier.Finite(def.squeeze) ||
+                !ScatterApplier.Finite(def.meshHeight) || def.meshHeight <= 0 || !ScatterApplier.Finite(def.meshHeight * appearanceScale))
+                throw new System.ArgumentOutOfRangeException(nameof(def), "Shrub appearance inputs must be finite and mesh height positive.");
+            ApplyMaterialBlock(def);
         }
 
         private void OnTriggerEnter(Collider other)

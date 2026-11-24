@@ -176,6 +176,8 @@ namespace UniverseCreator.Editor.Drawing
 
         private static bool IsSupportedType(Type t)
         {
+            if (t == typeof(UniverseCreator.TerrainSystem.RiverHierarchyTargets) ||
+                t == typeof(UniverseCreator.TerrainSystem.LakeDistributionSettings)) return true; // UC-T03-08: grouped lake criteria share the existing drawer.
             if (IsScalarType(t)) return true;
 
             // A List<T> is drawable when its element is: either a scalar the
@@ -250,6 +252,22 @@ namespace UniverseCreator.Editor.Drawing
             string label = Prettify(info.Name);
             string tooltip = ReadTooltip(info);
             Type t = info.FieldType;
+
+            // UC-T03-05: the inspector and Node Graph edit the same serialized target object.
+            if (t == typeof(UniverseCreator.TerrainSystem.RiverHierarchyTargets) || t == typeof(UniverseCreator.TerrainSystem.LakeDistributionSettings))
+            {
+                object settings = info.GetValue(node) ?? Activator.CreateInstance(t); // UC-T03-08: materialize either supported setting only on edit.
+                bool changed = false;
+                foreach (FieldInfo member in t.GetFields(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    object value = member.GetValue(settings);
+                    if (!DrawScalar(member.FieldType, member.Name, Prettify(member.Name), key + "." + member.Name,
+                        ReadTooltip(member), ref value, fields)) continue;
+                    member.SetValue(settings, value); changed = true;
+                }
+                if (changed) info.SetValue(node, settings);
+                return changed;
+            }
 
             Type element = ListElementType(t);
             if (element != null)

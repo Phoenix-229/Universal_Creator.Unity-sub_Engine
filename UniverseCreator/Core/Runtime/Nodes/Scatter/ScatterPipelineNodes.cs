@@ -30,7 +30,7 @@ namespace UniverseCreator.Nodes.Scatter
     /// time the classifier gains a class.
     /// </summary>
     [System.Serializable]
-    public class BiomeDensityTableNode : Generator
+    public class BiomeDensityTableNode : Generator, IPreparedGraphInputHash
     {
         public override string NodeName { get { return "Biome Density Table"; } }
         public override NodeCategory Category { get { return NodeCategory.Scatter; } }
@@ -62,6 +62,10 @@ namespace UniverseCreator.Nodes.Scatter
         // AnimationCurve.Evaluate is main-thread only, so it is baked here and the
         // worker reads the table. Same pattern as Slope Remap Curve.
         [System.NonSerialized] private float[] lut;
+
+        /// <summary>UC-T01-07: fingerprints the prepared biome-density lookup used by workers.</summary>
+        /// <returns>Deterministic fingerprint; call after main-thread preparation.</returns>
+        public ulong GetPreparedInputHash() { return PreparedRasterInputs.Hash(256, 1, lut); }
 
         public override void PrepareMainThread()
         {

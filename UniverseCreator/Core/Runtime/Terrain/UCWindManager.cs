@@ -41,6 +41,26 @@
 //
 //  The sway maps baked by the Wind Sway Parameter Bake node are uploaded here as
 //  a texture, which is what finally connects that node to something visible.
+//
+//  EDIT MODE RESOLVES ONCE
+//  -----------------------
+//  This component is [ExecuteAlways], so its Update ran on every editor tick -
+//  and an editor tick is not a frame. Unity pumps it far faster than a frame rate
+//  while the mouse moves, and each pass wrote a transform rotation, wrote every
+//  terrain's waving-grass settings, and asked Unity for Terrain.activeTerrains,
+//  which hands back a freshly allocated array every single call. A still scene
+//  nobody was playing therefore ran a garbage treadmill and kept the scene and
+//  the terrain asset permanently dirty.
+//
+//  So edit mode now resolves once: on enable, and again on each edit through
+//  OnValidate. Nothing recomputes until something changes. Authors who want a
+//  breathing Scene view opt in with animateInEditMode, and even then it is capped
+//  rather than run once per tick.
+//
+//  Play mode still updates every frame - it has to, gusts move - but the two
+//  writes that are not shader uniforms are gated behind a change check, so the
+//  per-frame cost is four shader globals and one small array upload and nothing
+//  that allocates.
 // -----------------------------------------------------------------------------
 
 using System.Collections.Generic;
@@ -157,7 +177,36 @@ namespace UniverseCreator.TerrainSystem
                + "the WindZone and nothing else can stand in for it.")]
         public bool driveWindZone = true;
 
+        [Tooltip("Animate wind in the Scene view. Off by default, because edit mode is not a game loop: "
+               + "wind resolves once when this component is enabled and once per edit, and the Scene view "
+               + "holds that still frame. Turning this on drives it continuously at a capped rate, which "
+               + "costs editor CPU for as long as it is on. Play mode is unaffected either way.")]
+        public bool animateInEditMode;
+
         // ---- runtime state ---------------------------------------------------
+
+        // Edit-mode pacing. Unity pumps the editor's update far faster than a frame
+        // rate while the mouse is moving, so even the opt-in animated path is capped
+        // instead of running once per tick.
+        private const float EditModeApplyHz = 30f;
+        private float lastEditApplyTime = float.NegativeInfinity;
+
+        // Integration gate. Rotating the WindZone is a scene write and setting
+        // wavingGrass* is an asset write; both are skipped unless the wind that
+        // feeds them has actually moved. A quantum of 1/64 is finer than the 8-bit
+        // value these end up driving, so nothing visible is lost.
+        private const float StrengthQuantum = 1f / 64f;
+        private int integrationSignature;
+        private bool hasIntegrationSignature;
+        private UniverseCreatorObject integrationWorld; // UC-T08-05: native grass writes stay in this world's terrain hierarchy.
+
+        // The terrain sync runs on its own slow clock rather than off the signature.
+        // Four times a second is enough to pick up a terrain that appeared after the
+        // last wind change, and it turns the one call here that allocates - Unity
+        // hands back a fresh array for activeTerrains every time it is asked - from a
+        // per-frame cost into a rounding error.
+        private const float GrassSyncHz = 4f;
+        private float lastGrassSyncTime = float.NegativeInfinity;
 
         // Guarded because WindZone lives in Unity's optional Wind module. Our own
         // manifest requires it, but a buyer who strips built-in modules to shrink a
@@ -171,63 +220,132 @@ namespace UniverseCreator.TerrainSystem
         private Texture2D swayMap;
         private Vector4 swayWindow = new Vector4(0f, 0f, 1f, 1f);
         private bool hasSwayMap;
+        private bool hasRuntimeWeatherWind; // UC-T08-05: one upload owner, with saved authoring independent of transient weather.
+        private Vector2 runtimeWeatherDirection;
+        private float runtimeWeatherSpeed;
+        private UCWeatherSystemManager weatherClock; // UC-T08-06: cached shared clock; standalone legacy wind retains its previous time source.
 
         /// <summary>Unit vector the wind blows towards, in world XZ.</summary>
         public Vector2 DirectionXZ
         {
             get
             {
+                if (hasRuntimeWeatherWind) return runtimeWeatherDirection;
                 float r = directionDegrees * Mathf.Deg2Rad;
                 return new Vector2(Mathf.Sin(r), Mathf.Cos(r));
             }
         }
 
         /// <summary>
-        /// Current gust multiplier, 0.. ~2. Time-varying, so this is the value that
-        /// makes a still scene breathe rather than hold one constant strength.
+        /// Current gust multiplier, zero through two; owned worlds use their shared clock, including pause and seek.
         /// </summary>
         public float CurrentGust
         {
             get
             {
-                float t = CurrentTime();
-                float period = Mathf.Max(0.01f, gustPeriodSeconds);
-
-                // Two waves at incommensurate rates, so the pattern does not repeat
-                // on an obvious beat the way a single sine does.
-                float a = Mathf.Sin(t * (Mathf.PI * 2f / period));
-                float b = Mathf.Sin(t * (Mathf.PI * 2f / (period * 0.37f)));
-                float pulse = (a * 0.7f + b * 0.3f);
-
-                return 1f + pulse * Mathf.Clamp01(gustiness);
+                return GustAtWorldInstant(weatherClock != null ? weatherClock.WorldInstantSeconds : CurrentTime());
             }
+        }
+
+        // UC-T08-06: reduce each phase in double before the sine so distant years do not freeze gusts through float precision loss.
+        internal float GustAtWorldInstant(double seconds)
+        {
+            double period = Weather.ClimateBaselineProduct.Finite(gustPeriodSeconds) ? System.Math.Max(0.01, gustPeriodSeconds) : 8;
+            double secondPeriod = period * 0.37;
+            float a = Mathf.Sin((float)(seconds % period / period * System.Math.PI * 2));
+            float b = Mathf.Sin((float)(seconds % secondPeriod / secondPeriod * System.Math.PI * 2));
+            return 1 + (a * 0.7f + b * 0.3f) * (Weather.ClimateBaselineProduct.Finite(gustiness) ? Mathf.Clamp01(gustiness) : 0);
         }
 
         /// <summary>Wind speed including the current gust, in metres per second.</summary>
         public float CurrentSpeed
         {
-            get { return Mathf.Max(0f, speedMetresPerSecond) * Mathf.Max(0f, CurrentGust); }
+            get { return Mathf.Max(0f, hasRuntimeWeatherWind ? runtimeWeatherSpeed : speedMetresPerSecond) * Mathf.Max(0f, CurrentGust); }
         }
+
+        /// <summary>
+        /// Hands the wind over to the weather layer without opening a second wind
+        /// source. It writes the same <c>directionDegrees</c> and
+        /// <c>speedMetresPerSecond</c> the author's own values feed, so every
+        /// consumer - the shader upload, the WindZone, the built-in grass - keeps
+        /// following this one manager, and this stays the only thing that writes a
+        /// wind direction anywhere. The per-frame <c>Update</c> uploads the result;
+        /// nothing here touches the shader itself.
+        ///
+        /// A near-zero vector carries no bearing, so the direction is left as it was
+        /// rather than snapped to north by an atan2 of two zeros. The compass is the
+        /// one the getter inverts: 0 deg is +Z, 90 deg is +X.
+        /// </summary>
+        /// <param name="directionXZ">World XZ the wind blows towards; magnitude ignored.</param>
+        /// <param name="speedMPerS">Sustained wind speed in metres per second.</param>
+        public void SetWeatherWind(Vector2 directionXZ, float speedMPerS)
+        {
+            if (directionXZ.sqrMagnitude > 0f)
+            {
+                directionDegrees =
+                    Mathf.Atan2(directionXZ.x, directionXZ.y) * Mathf.Rad2Deg;
+            }
+
+            speedMetresPerSecond = Mathf.Max(0f, speedMPerS);
+        }
+
+        /// <summary>UC-T08-05: applies transient weather wind through existing consumers while preserving saved authored direction/speed.</summary>
+        /// <param name="directionXZ">Finite world XZ direction; magnitude is ignored, zero retains the previous effective bearing.</param>
+        /// <param name="speedMPerS">Finite nonnegative sustained speed in metres per second, clamped to 100.</param>
+        /// <exception cref="System.ArgumentOutOfRangeException">Direction or speed is nonfinite.</exception>
+        public void SetRuntimeWeatherWind(Vector2 directionXZ, float speedMPerS)
+        {
+            if (!Weather.ClimateBaselineProduct.Finite(directionXZ.x) || !Weather.ClimateBaselineProduct.Finite(directionXZ.y) || !Weather.ClimateBaselineProduct.Finite(speedMPerS))
+                throw new System.ArgumentOutOfRangeException(nameof(directionXZ));
+            float largest = Mathf.Max(Mathf.Abs(directionXZ.x), Mathf.Abs(directionXZ.y));
+            runtimeWeatherDirection = largest > 0 ? (directionXZ / largest).normalized : DirectionXZ; // UC-T08-05: finite extreme vectors must not overflow normalization.
+            runtimeWeatherSpeed = Mathf.Clamp(speedMPerS, 0, 100); hasRuntimeWeatherWind = true;
+        }
+        /// <summary>Restores the saved authored wind without altering its settings or adding another upload owner.</summary>
+        public void ClearRuntimeWeatherWind() => hasRuntimeWeatherWind = false;
 
         private void OnEnable()
         {
+            integrationWorld = GetComponentInParent<UniverseCreatorObject>(true);
+            weatherClock = UCWeatherSystemManager.FindForWorld(transform);
             Apply();
         }
 
         private void OnDisable()
         {
+            ClearRuntimeWeatherWind(); // UC-T08-05: a retired weather/wind binding cannot retain a transient override.
             // Leave nothing behind that would make an unrelated scene wave.
             Shader.SetGlobalFloat(IdSwayEnabled, 0f);
         }
 
         private void Update()
         {
+            if (!Application.isPlaying)
+            {
+                // Edit mode resolved once already, on enable, and resolves again on
+                // every edit through OnValidate. Recomputing here as well would be
+                // work nobody asked for on a scene nobody is playing.
+                if (!animateInEditMode) return;
+
+                float now = Time.realtimeSinceStartup;
+                if (now - lastEditApplyTime < 1f / EditModeApplyHz) return;
+                lastEditApplyTime = now;
+            }
+
             Apply();
         }
 
         private void OnValidate()
         {
-            if (isActiveAndEnabled) Apply();
+            if (!isActiveAndEnabled) return;
+
+            // An edit has to show at once, so neither gate is allowed to hold it
+            // back: both are there to suppress repeated identical work, not to
+            // delay a change the author just made.
+            hasIntegrationSignature = false;
+            lastGrassSyncTime = float.NegativeInfinity;
+
+            Apply();
         }
 
         /// <summary>
@@ -244,10 +362,36 @@ namespace UniverseCreator.TerrainSystem
             // by 25 puts the useful range in 0..1 without clipping a storm to flat.
             float strength01 = Mathf.Clamp01(speed / 25f);
 
+            PublishWind(dir, speed, gust); // UC-T08-05: the same uploader serves an explicitly owned camera view.
+            UploadInteractors();
+            ApplyIntegrations(strength01);
+        }
+
+        internal void PublishEnvironmentWind(in Weather.WeatherState weather, bool drivesWind, bool enabled)
+        {
+            float bearing = weather.windDirectionDeg * Mathf.Deg2Rad;
+            PublishWind(drivesWind ? new Vector2(Mathf.Sin(bearing), Mathf.Cos(bearing)) : DirectionXZ,
+                enabled ? (drivesWind ? weather.gustSpeed : CurrentSpeed) : 0,
+                drivesWind && weather.windSpeed > 0 ? weather.gustSpeed / weather.windSpeed : CurrentGust);
+            Shader.SetGlobalTexture(IdSwayTex, swayMap);
+            Shader.SetGlobalVector(IdSwayWindow, swayWindow);
+            Shader.SetGlobalFloat(IdSwayEnabled, enabled && hasSwayMap ? 1 : 0);
+        }
+
+        internal static void ClearEnvironmentWind()
+        {
+            Shader.SetGlobalVector(IdWindDir, new Vector4(0, 0, 1, 0));
+            Shader.SetGlobalVector(IdWindParams, Vector4.zero); Shader.SetGlobalVector(IdWindGust, Vector4.zero);
+            Shader.SetGlobalVector(IdResponse, Vector4.zero); Shader.SetGlobalFloat(IdSwayEnabled, 0);
+        }
+
+        private void PublishWind(Vector2 dir, float speed, float gust)
+        {
+
             Shader.SetGlobalVector(IdWindDir, new Vector4(dir.x, 0f, dir.y, 0f));
 
             Shader.SetGlobalVector(IdWindParams, new Vector4(
-                strength01,                              // x: normalised strength
+                Mathf.Clamp01(speed / 25f),               // x: normalised strength
                 Mathf.Max(0.01f, gustSizeMetres),        // y: gust cell size, metres
                 Mathf.Max(0f, gustTravelSpeed),          // z: gust travel, m/s
                 CurrentTime()));                         // w: wind time
@@ -267,10 +411,74 @@ namespace UniverseCreator.TerrainSystem
                 Mathf.Max(0f, treeResponse),
                 Mathf.Max(0f, waterResponse)));
 
-            UploadInteractors();
+        }
 
-            if (driveWindZone) ApplyWindZone(strength01);
-            if (driveBuiltInGrass) ApplyBuiltInGrass(strength01);
+        /// <summary>
+        /// The half of Apply that writes to the scene and to assets rather than to
+        /// shader uniforms, and so the half that is rationed.
+        ///
+        /// WHY THIS IS RATIONED AND THE SHADER UNIFORMS ARE NOT
+        /// ---------------------------------------------------
+        /// Setting a global shader vector is a cheap, side-effect-free upload. The
+        /// two calls below are neither: rotating the transform marks the scene
+        /// dirty, writing wavingGrass* marks the terrain asset dirty, and reading
+        /// Terrain.activeTerrains allocates an array on every call. Per frame that
+        /// is a save prompt that never clears and a steady drip of garbage, for a
+        /// value that is quantised to eight bits by the time anything renders it.
+        ///
+        /// The two are rationed differently because they fail differently. The
+        /// WindZone is a pure function of the fields, so a signature comparison
+        /// covers it exactly. The terrain write is not - the set of terrains can
+        /// change with no field touched at all - so that one runs on a slow clock
+        /// instead, which no stale signature can outlast.
+        /// </summary>
+        private void ApplyIntegrations(float strength01)
+        {
+            int signature = BuildIntegrationSignature(strength01);
+
+            if (!hasIntegrationSignature || signature != integrationSignature)
+            {
+                integrationSignature = signature;
+                hasIntegrationSignature = true;
+
+                if (driveWindZone) ApplyWindZone(strength01);
+            }
+
+            // Not signature-gated. A terrain that appeared after the last wind
+            // change would otherwise keep waving on Unity's own defaults until
+            // somebody happened to touch a wind field, so this one is on a clock.
+            if (driveBuiltInGrass) SyncBuiltInGrass(strength01);
+        }
+
+        private void SyncBuiltInGrass(float strength01)
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now - lastGrassSyncTime < 1f / GrassSyncHz) return;
+            lastGrassSyncTime = now;
+
+            ApplyBuiltInGrass(strength01);
+        }
+
+        /// <summary>
+        /// Everything the WindZone reads, folded into one comparable value.
+        /// </summary>
+        private int BuildIntegrationSignature(float strength01)
+        {
+            // Unchecked because this is an identity rather than an arithmetic
+            // result: wrapping is harmless, and throwing on overflow here would
+            // mean an ordinary set of wind settings could crash a build.
+            unchecked
+            {
+                int h = 17;
+                h = h * 31 + Mathf.RoundToInt(strength01 / StrengthQuantum);
+                Vector2 direction = DirectionXZ; // UC-T08-05: built-in terrain grass observes the same effective weather bearing as shaders/WindZone.
+                h = h * 31 + Mathf.RoundToInt(Mathf.Atan2(direction.x, direction.y) * Mathf.Rad2Deg * 4f);
+                h = h * 31 + Mathf.RoundToInt(gustiness * 255f);
+                h = h * 31 + Mathf.RoundToInt(gustPeriodSeconds * 16f);
+                h = h * 31 + Mathf.RoundToInt(treeResponse * 255f);
+                h = h * 31 + (driveWindZone ? 1 : 0);
+                return h;
+            }
         }
 
         /// <summary>
@@ -331,9 +539,13 @@ namespace UniverseCreator.TerrainSystem
             zone.mode = WindZoneMode.Directional;
 
             // The WindZone blows along its own forward axis, so the transform has
-            // to point where the wind goes.
+            // to point where the wind goes. Compared before assigning: writing an
+            // identical rotation still marks the scene dirty, which in edit mode is
+            // a save prompt the author can never clear.
             Vector2 d = DirectionXZ;
-            transform.rotation = Quaternion.LookRotation(new Vector3(d.x, 0f, d.y), Vector3.up);
+            Quaternion facing = Quaternion.LookRotation(new Vector3(d.x, 0f, d.y), Vector3.up);
+            if (Quaternion.Angle(transform.rotation, facing) > 0.01f)
+                transform.rotation = facing;
 
             // Scaled down hard on purpose. Unity's tree bending at main = 1 looks
             // like a storm; a tree in a real breeze barely moves.
@@ -345,8 +557,8 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Mirrors the wind into Unity's built-in waving-grass settings on every
-        /// terrain in the scene, so a project that has not adopted our detail
+        /// Mirrors the wind into Unity's built-in waving-grass settings on this world's
+        /// owned terrains (or standalone terrains for loose wind), so a project that has not adopted our detail
         /// shader still responds to the same controls.
         /// </summary>
         private void ApplyBuiltInGrass(float strength01)
@@ -360,6 +572,7 @@ namespace UniverseCreator.TerrainSystem
             {
                 UnityEngine.Terrain t = terrains[i];
                 if (t == null || t.terrainData == null) continue;
+                if (!ReferenceEquals(t.GetComponentInParent<UniverseCreatorObject>(true), integrationWorld)) continue;
 
                 TerrainData d = t.terrainData;
 
@@ -565,12 +778,16 @@ namespace UniverseCreator.TerrainSystem
             return baseStrength * Mathf.Clamp01(swayMap.GetPixel(x, y).r);
         }
 
-        private static float CurrentTime()
+        private float CurrentTime()
         {
+            if (weatherClock != null) return (float)weatherClock.WorldInstantSeconds; // UC-T08-06: shader motion observes pause/seek too; shader time retains float precision limits.
 #if UNITY_EDITOR
-            // Application.time does not advance in edit mode, so wind would freeze
-            // in the Scene view. realtimeSinceStartup keeps it alive there.
-            if (!Application.isPlaying) return Time.realtimeSinceStartup;
+            // Edit mode has no game clock. When animation has not been asked for,
+            // the wind field resolves at a fixed phase, so the still Scene view is
+            // the same still Scene view every time the project is opened rather
+            // than whatever the editor's uptime happened to be at that moment.
+            if (!Application.isPlaying)
+                return animateInEditMode ? Time.realtimeSinceStartup : 0f;
 #endif
             return Time.time;
         }

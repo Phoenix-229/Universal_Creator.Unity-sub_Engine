@@ -1,0 +1,215 @@
+// -----------------------------------------------------------------------------
+//  Universe Creator - UC_DropletErosion.compute   (RIV-1b, the GPU half)
+//
+//  One thread per droplet. Mirrors DropletErosion.Simulate on the CPU EXACTLY -
+//  the same 32-bit hash, the same one-cell spawn inset, the same analytic bilinear
+//  gradient, the same capacity law, the same corrected speed sign (a DESCENDING
+//  droplet accelerates), and the same brush weights normalised to sum 1. Any drift
+//  between the two makes the GPU path a different feature wearing the same name.
+//
+//  WHY THIS IS NOT BIT-REPRODUCIBLE, AND WHY THAT IS ACCEPTABLE HERE
+//  ----------------------------------------------------------------
+//  Droplets write back into a SHARED height field, so thousands of threads
+//  read-modify-write the same cells with no ordering. That is a benign race: the
+//  result is erosion of the right character but NOT identical run to run, and NOT
+//  identical to the CPU path. This is the one place the project's determinism rule is
+//  relaxed on purpose, because making it exact needs atomics on fixed-point ints and
+//  costs more than the pass saves. The CPU path stays the deterministic one and
+//  remains the default; its RIV-ERO2 gate still pins bit-reproducibility there.
+//  Therefore: compare the two by CHARACTER within a tolerance, never by equality.
+//
+//  MAIN THREAD ONLY. Dispatch is a graphics call. A node's Generate runs on a worker
+//  Task (ChunkManager.cs:23 "Generation runs on Task.Run (worker)"), so this must
+//  never be called from inside the node graph - see DropletErosionGPU for the guard.
+// -----------------------------------------------------------------------------
+
+#pragma kernel CSDroplet
+
+RWStructuredBuffer<float>   _Heights;      // row-major, width*height, normalised 0..1
+StructuredBuffer<int>       _BrushX;
+StructuredBuffer<int>       _BrushZ;
+StructuredBuffer<float>     _BrushW;
+
+int   _Width;
+int   _Height;
+int   _BrushCount;
+int   _DropletCount;
+int   _MaxLifetime;
+int   _Seed;
+
+float _Inertia;
+float _CapacityFactor;
+float _MinCapacity;
+float _DepositSpeed;
+float _ErodeSpeed;
+float _EvaporateSpeed;
+float _Gravity;
+float _StartWater;
+float _StartSpeed;
+
+// The CPU's DropletErosion.Hash, operator for operator.
+uint UCHash(uint x)
+{
+    x ^= 2747636419u;
+    x *= 2654435769u;
+    x ^= x >> 16;
+    x *= 2654435769u;
+    x ^= x >> 16;
+    x *= 2654435769u;
+    return x;
+}
+
+// The CPU's Hash01: 24 bits -> [0,1).
+float UCHash01(int seed, int index, int salt)
+{
+    uint h = UCHash((uint)seed * 747796405u + (uint)index * 2891336453u + (uint)salt * 283923481u);
+    return (h & 0xFFFFFF) / 16777216.0;
+}
+
+// Analytic derivative of the bilinear patch - NOT a finite difference of neighbours.
+// Mixing the two is what makes droplets jitter across cell boundaries.
+void SampleHeightAndGradient(int nodeX, int nodeZ, float offX, float offZ,
+                             out float outHeight, out float gradX, out float gradZ)
+{
+    int i = nodeZ * _Width + nodeX;
+    float h00 = _Heights[i];
+    float h10 = _Heights[i + 1];
+    float h01 = _Heights[i + _Width];
+    float h11 = _Heights[i + _Width + 1];
+
+    gradX = (h10 - h00) * (1.0 - offZ) + (h11 - h01) * offZ;
+    gradZ = (h01 - h00) * (1.0 - offX) + (h11 - h10) * offX;
+
+    outHeight = h00 * (1.0 - offX) * (1.0 - offZ)
+              + h10 * offX * (1.0 - offZ)
+              + h01 * (1.0 - offX) * offZ
+              + h11 * offX * offZ;
+}
+
+float SampleHeight(float x, float z)
+{
+    int nx = (int)x;
+    int nz = (int)z;
+    float fx = x - nx;
+    float fz = z - nz;
+
+    int i = nz * _Width + nx;
+    float h00 = _Heights[i];
+    float h10 = _Heights[i + 1];
+    float h01 = _Heights[i + _Width];
+    float h11 = _Heights[i + _Width + 1];
+
+    return h00 * (1.0 - fx) * (1.0 - fz)
+         + h10 * fx * (1.0 - fz)
+         + h01 * (1.0 - fx) * fz
+         + h11 * fx * fz;
+}
+
+void DepositBilinear(int nodeX, int nodeZ, float offX, float offZ, float amount)
+{
+    int i = nodeZ * _Width + nodeX;
+    _Heights[i]                  += amount * (1.0 - offX) * (1.0 - offZ);
+    _Heights[i + 1]              += amount * offX * (1.0 - offZ);
+    _Heights[i + _Width]         += amount * (1.0 - offX) * offZ;
+    _Heights[i + _Width + 1]     += amount * offX * offZ;
+}
+
+// Returns what was ACTUALLY removed, which can be less than requested near a border
+// where part of the brush falls outside the field.
+float ErodeBrush(int nodeX, int nodeZ, float amount)
+{
+    float removed = 0.0;
+    for (int b = 0; b < _BrushCount; b++)
+    {
+        int bx = nodeX + _BrushX[b];
+        int bz = nodeZ + _BrushZ[b];
+        if (bx < 0 || bx >= _Width || bz < 0 || bz >= _Height) continue;
+
+        int bi = bz * _Width + bx;
+        float want = amount * _BrushW[b];
+        float have = _Heights[bi];
+        float take = min(have, want);     // never dig a cell below zero
+        _Heights[bi] = have - take;
+        removed += take;
+    }
+    return removed;
+}
+
+[numthreads(64, 1, 1)]
+void CSDroplet(uint3 id : SV_DispatchThreadID)
+{
+    int d = (int)id.x;
+    if (d >= _DropletCount) return;
+    if (_Width < 3 || _Height < 3) return;
+
+    // Hashed spawn, inset by one cell so the first bilinear read is in bounds.
+    float posX = 1.0 + UCHash01(_Seed, d, 1) * (_Width - 3.0);
+    float posZ = 1.0 + UCHash01(_Seed, d, 2) * (_Height - 3.0);
+
+    float dirX = 0.0;
+    float dirZ = 0.0;
+    float speed = max(0.0, _StartSpeed);
+    float water = max(0.0, _StartWater);
+    float sediment = 0.0;
+
+    for (int step = 0; step < _MaxLifetime; step++)
+    {
+        int nodeX = (int)posX;
+        int nodeZ = (int)posZ;
+        float offX = posX - nodeX;
+        float offZ = posZ - nodeZ;
+
+        float oldHeight, gradX, gradZ;
+        SampleHeightAndGradient(nodeX, nodeZ, offX, offZ, oldHeight, gradX, gradZ);
+
+        dirX = dirX * _Inertia - gradX * (1.0 - _Inertia);
+        dirZ = dirZ * _Inertia - gradZ * (1.0 - _Inertia);
+
+        float len = sqrt(dirX * dirX + dirZ * dirZ);
+        if (len < 1e-6) break;            // flat pit, no momentum: done
+        dirX /= len;
+        dirZ /= len;
+
+        posX += dirX;
+        posZ += dirZ;
+
+        // Left the field, or reached the border where a bilinear read would be out of
+        // bounds: retire and drop nothing, so a border row cannot grow a sediment ridge.
+        if (posX < 1.0 || posX >= _Width - 2.0 || posZ < 1.0 || posZ >= _Height - 2.0) break;
+
+        float newHeight = SampleHeight(posX, posZ);
+        float deltaHeight = newHeight - oldHeight;
+
+        float capacity = max(-deltaHeight * speed * water * _CapacityFactor, _MinCapacity);
+
+        if (sediment > capacity || deltaHeight > 0.0)
+        {
+            // Running uphill deposits at most the step it is climbing - that is what
+            // forms a fan at the foot of a slope instead of a bump on the far side.
+            float amount = (deltaHeight > 0.0) ? min(deltaHeight, sediment)
+                                               : (sediment - capacity) * _DepositSpeed;
+            if (amount > 0.0)
+            {
+                sediment -= amount;
+                DepositBilinear(nodeX, nodeZ, offX, offZ, amount);
+            }
+        }
+        else
+        {
+            // Never take more than the height step itself, so a droplet cannot dig a
+            // hole deeper than the descent that fed it.
+            float amount = min((capacity - sediment) * _ErodeSpeed, -deltaHeight);
+            if (amount > 0.0)
+            {
+                amount = ErodeBrush(nodeX, nodeZ, amount);
+                sediment += amount;
+            }
+        }
+
+        // CORRECTION 1: descending (deltaHeight < 0) ACCELERATES the droplet. Clamped
+        // before the root so a climb cannot produce a NaN.
+        speed = sqrt(max(0.0, speed * speed + (-deltaHeight) * _Gravity));
+        water *= (1.0 - _EvaporateSpeed);
+        if (water <= 1e-5) break;
+    }
+}

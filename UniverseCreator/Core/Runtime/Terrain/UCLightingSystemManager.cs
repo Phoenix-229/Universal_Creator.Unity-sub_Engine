@@ -2,15 +2,32 @@
 //  Universe Creator - Procedural Content Generation Toolkit
 //
 //  File:    UCLightingSystemManager.cs
-//  Purpose: The LightingSystem child's control surface. DECLARED ONLY - no field
-//           here is read by anything yet.
+//  Purpose: The LightingSystem child's control surface. Time of Day is live and read
+//           from the weather clock; the render dials live in an authored settings block,
+//           the performance envelope in a resolved product tier, and the physics owns
+//           every value neither of those sets.
 //
-//  WHY A FILE THAT DOES NOTHING
-//  ----------------------------
-//  The lighting and time-of-day module is not written. This component exists so
-//  that when it is written it has an agreed shape to fill, and so it inherits the
-//  constraints the rest of the system already imposes:
+//  WHAT THIS COMPONENT OWNS, AND WHAT IT DOES NOT
+//  ----------------------------------------------
+//  Time of Day is read, never authored here. It owns the day half of the world clock
+//  and the site geometry - latitude, north bearing, axial tilt - that solar position
+//  follows from. The accessors at the bottom of this file turn those three authored
+//  numbers into solar declination, day length and the daily radiation total, and the
+//  ecology layer derives the world's climate from them. That is the point: climate is
+//  computed from astronomy, not authored twice.
 //
+//  The render look is a LightingSettings block of biases and trims - the numbers an
+//  author is allowed to turn. The performance envelope (cascades, shadow distance,
+//  screen-space budgets, probe spacing scale) is a LightingTierSettings resolved from
+//  the one product tier, not a second set of dials. Everything else - sun intensity and
+//  colour across the day, ambient, exposure - is computed by the atmosphere physics from
+//  the sun's position and the air, so it is not restated as a field here. The fields the
+//  retired build declared for those were placeholders; they are gone, not migrated,
+//  because a dial that shadows a physical value is the lie that costs someone an
+//  afternoon.
+//
+//  THE CONSTRAINTS THE RENDERING PASS INHERITS
+//  -------------------------------------------
 //   - URP only. Every shader and every render feature the toolkit ships targets
 //     the Universal Render Pipeline. A lighting pass must not reach for built-in
 //     or HDRP-only API.
@@ -20,159 +37,394 @@
 //     reopened at the same time of day looks the same.
 //   - Weather owns cloud and fog. Lighting reads them. Overcast dimming belongs to
 //     whichever of the two runs later, not to both.
-//
-//  Nothing acts on these fields. A stub that half-worked would be worse than one
-//  that does nothing: it would look implemented.
 // -----------------------------------------------------------------------------
 
 using UnityEngine;
+using UniverseCreator.Ecology;
+using UniverseCreator.Optimization;
+using UniverseCreator.TerrainSystem.Lighting;
+using UniverseCreator.Weather;
 
 namespace UniverseCreator.TerrainSystem
 {
     /// <summary>
-    /// World-level lighting and time-of-day control. Declared for a later module;
-    /// no field here is read by anything yet.
+    /// World-level lighting and time-of-day control. Time of Day is live and owns
+    /// the world's site geometry; the rendering groups are declared for a later
+    /// module.
     /// </summary>
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Lighting System Manager")]
     [DisallowMultipleComponent]
-    public class UCLightingSystemManager : MonoBehaviour
+    public partial class UCLightingSystemManager : MonoBehaviour
     {
         // =====================================================================
-        //  TIME OF DAY
+        //  TIME OF DAY  -  RESOLVED, NOT AUTHORED  (W-04)
+        //
+        //  This group used to author the day: hour, day length, latitude, north
+        //  bearing and axial tilt all lived here, on the reasoning that the sun
+        //  rig is what consumes them. That was the wrong owner, and it is worth
+        //  recording why so it is not put back.
+        //
+        //  Latitude is not a lighting property. It sets the Coriolis sign, the
+        //  temperature gradient toward the pole, and which way a warm hillside
+        //  faces. Two copies of it give a world with a northern-hemisphere sun
+        //  over southern-hemisphere forest, and nothing in the scene says why.
+        //  The same goes for the hour: two components advancing time means two
+        //  clocks, and the moment they differ by a frame the sky and the
+        //  phenology are in different hours.
+        //
+        //  So UCWeatherSystemManager owns the clock and the site, and this
+        //  component reads it. The properties below are get-only on purpose: an
+        //  author edits them on the WeatherSystem child, and there is no second
+        //  place where a stale value can hide.
         // =====================================================================
 
-        [Header("Time of Day  (declared, not implemented)")]
+        [Header("Time of Day  (read from the weather system's clock)")]
 
-        [Tooltip("PLACEHOLDER. Master switch for the lighting pass.")]
+        [Tooltip("Master switch for the lighting pass.")]
         public bool lightingEnabled = true;
 
-        [Tooltip("PLACEHOLDER. Hour of the day, 0 to 24. 12 is solar noon.")]
-        [Range(0f, 24f)]
-        public float timeOfDayHours = 12f;
+        /// <summary>
+        /// The world clock. The weather manager's if this world has one, otherwise
+        /// the documented default of latitude 45, longitude 0, midsummer noon - and
+        /// the inspector says which. (W-04)
+        /// </summary>
+        public ClockState Clock
+        {
+            get { return UCWeatherSystemManager.ResolveClockFor(transform); }
+        }
 
-        [Tooltip("PLACEHOLDER. Time advances by itself.")]
-        public bool advanceTime;
+        /// <summary>
+        /// True when this world has a weather system to read the clock from. False
+        /// means every value below is the documented fallback.
+        /// </summary>
+        public bool HasClockSource
+        {
+            get { return UCWeatherSystemManager.FindForWorld(transform) != null; }
+        }
 
-        [Tooltip("PLACEHOLDER. Real minutes one in-world day takes.")]
-        public float dayLengthMinutes = 20f;
+        /// <summary>h. Clock hour, 0 to 24. Resolved, not authored.</summary>
+        public float TimeOfDayHours
+        {
+            get { return Clock.localHour; }
+        }
 
-        [Tooltip("PLACEHOLDER. Latitude in degrees. Decides how high the sun climbs " +
-                 "and how long twilight lasts - the difference between a tropical " +
-                 "world and a polar one.")]
-        [Range(-90f, 90f)]
-        public float latitudeDegrees = 45f;
+        /// <summary>
+        /// deg. Latitude of this world, negative south. Resolved from the weather
+        /// system, which is its only owner.
+        /// </summary>
+        public float LatitudeDegrees
+        {
+            get { return Clock.latitudeDeg; }
+        }
 
-        [Tooltip("PLACEHOLDER. Compass bearing of world north, in degrees, so the " +
-                 "sun rises where the world says east is.")]
-        [Range(0f, 360f)]
-        public float northBearingDegrees;
+        /// <summary>deg. Axial tilt of this world. Resolved, not authored.</summary>
+        public float AxialTiltDegrees
+        {
+            get { return UCWeatherSystemManager.ResolveAxialTiltDeg(transform); }
+        }
+
+        /// <summary>deg. Compass bearing of world north. Resolved, not authored.</summary>
+        public float NorthBearingDegrees
+        {
+            get { return UCWeatherSystemManager.ResolveNorthBearingDeg(transform); }
+        }
 
         // =====================================================================
         //  SUN AND MOON
+        //
+        //  The one directional light, and whether the moon lights the night. The
+        //  sun's intensity and colour across the day are not fields: they are the
+        //  atmosphere physics reading the sun's own position and the air, so a value
+        //  here would only ever disagree with the sky. The moon's authored trim
+        //  lives on the settings block below, with the rest of the render dials.
         // =====================================================================
 
-        [Header("Sun and Moon  (declared, not implemented)")]
+        [Header("Sun and Moon")]
 
-        [Tooltip("PLACEHOLDER. The one directional light this world is lit by. Left " +
-                 "empty, the module will adopt the scene's sun rather than add a " +
-                 "second one.")]
+        [Tooltip("The one directional light this world is lit by. Left empty, the module " +
+                 "adopts the scene's sun rather than adding a second one.")]
         public Light sun;
 
-        [Tooltip("PLACEHOLDER. Sun intensity at noon.")]
-        public float sunIntensity = 1.2f;
-
-        [Tooltip("PLACEHOLDER. Sun colour across the day: left is dawn, middle is " +
-                 "noon, right is dusk.")]
-        public Gradient sunColour = new Gradient();
-
-        [Tooltip("PLACEHOLDER. The moon lights the world after sunset.")]
+        [Tooltip("The moon lights the world after sunset. Its brightness is the moonIntensity " +
+                 "trim on the lighting settings below, on the physical full-moon reference.")]
         public bool moonEnabled = true;
 
-        [Tooltip("PLACEHOLDER. Moon intensity at its height.")]
-        public float moonIntensity = 0.08f;
-
         // =====================================================================
-        //  AMBIENT AND SKY
-        // =====================================================================
-
-        [Header("Ambient and Sky  (declared, not implemented)")]
-
-        [Tooltip("PLACEHOLDER. Ambient light at noon.")]
-        [Range(0f, 4f)]
-        public float ambientIntensity = 1f;
-
-        [Tooltip("PLACEHOLDER. Sky tint across the day.")]
-        public Gradient skyColour = new Gradient();
-
-        [Tooltip("PLACEHOLDER. Ground bounce colour across the day.")]
-        public Gradient groundColour = new Gradient();
-
-        [Tooltip("PLACEHOLDER. The skybox is re-rendered as the sun moves, rather " +
-                 "than baked once. Off is cheaper and static.")]
-        public bool dynamicSkybox = true;
-
-        [Tooltip("PLACEHOLDER. Weather's cloud coverage dims the sun and lifts the " +
-                 "ambient. Off keeps lighting independent of weather.")]
-        public bool respondToWeather = true;
-
-        // =====================================================================
-        //  SHADOWS
+        //  LIGHTING SETTINGS  -  THE AUTHORED DIALS
+        //
+        //  Every render value an author is allowed to turn, in one serialised block
+        //  whose defaults track the physical constants. The driver reads it and pushes
+        //  each dial to the sky model, the probe grid and the screen-space features.
         // =====================================================================
 
-        [Header("Shadows  (declared, not implemented)")]
+        [Header("Lighting Settings")]
 
-        [Tooltip("PLACEHOLDER. Metres from the camera at which shadows stop. On a " +
-                 "world this size this is the setting that decides the frame cost.")]
-        public float shadowDistanceMetres = 250f;
-
-        [Tooltip("PLACEHOLDER. Shadow cascade count. URP allows 1 to 4.")]
-        [Range(1, 4)]
-        public int shadowCascades = 4;
-
-        [Tooltip("PLACEHOLDER. Shadow strength, 0 none to 1 black.")]
-        [Range(0f, 1f)]
-        public float shadowStrength = 0.8f;
-
-        [Tooltip("PLACEHOLDER. Terrain cells cast shadows on each other. Off saves a " +
-                 "pass over a large grid and flattens distant relief.")]
-        public bool terrainCastsShadows = true;
+        [Tooltip("The authored render dials - sky, moon trim, irradiance grid, screen-space, " +
+                 "clouds, discs, night floor and exposure mode. Each is a bias or trim on a " +
+                 "value the physics already computed, never a replacement for it.")]
+        public Lighting.LightingSettings settings = new Lighting.LightingSettings();
 
         // =====================================================================
-        //  ATMOSPHERE
+        //  TIER AND PERFORMANCE
+        //
+        //  The performance envelope is one product tier, not a second set of dials.
+        //  Follow the world's AdaptiveQuality so lighting scales with everything
+        //  else, or pin a tier for a fixed target. LightingTier resolves either to
+        //  the cascades, shadow distance, screen-space budgets and probe spacing the
+        //  frame is actually built with.
         // =====================================================================
 
-        [Header("Atmosphere  (declared, not implemented)")]
+        [Header("Tier and Performance")]
 
-        [Tooltip("PLACEHOLDER. Distant terrain fades toward the sky colour, which is " +
-                 "what gives a large world its sense of scale.")]
-        public bool aerialPerspective = true;
+        [Tooltip("Resolve the lighting tier from the world's AdaptiveQuality, so lighting " +
+                 "scales with vegetation, props and effects. Off pins the override below.")]
+        public bool followAdaptiveQuality = true;
 
-        [Tooltip("PLACEHOLDER. Metres at which aerial perspective is fully applied.")]
-        public float aerialPerspectiveMetres = 4000f;
+        [Tooltip("The tier used when not following AdaptiveQuality. Ultra is the richest, " +
+                 "Low the cheapest.")]
+        public AdaptiveQuality.QualityTier lightingTierOverride = AdaptiveQuality.QualityTier.High;
 
-        [Tooltip("PLACEHOLDER. Strength of the light shafts around the sun.")]
-        [Range(0f, 1f)]
-        public float lightShaftStrength = 0.25f;
+        // =====================================================================
+        //  DEBUG VIEWS  (S-53)
+        // =====================================================================
 
-        [Tooltip("PLACEHOLDER. Exposure applied to the whole world, in stops.")]
-        [Range(-4f, 4f)]
-        public float exposureStops;
+        [Header("Debug Views")]
 
-        /// <summary>The world this lighting belongs to, or null when loose in a scene.</summary>
+        [Tooltip("Off ships the lit world. The other modes visualise one term - probe " +
+                 "positions or colours, ambient, direct, AO, SSGI, cloud shadow, exposure, or " +
+                 "the tier in force - for diagnosis, never for a shipped frame.")]
+        public LightingDebug.DebugMode debugView = LightingDebug.DebugMode.Off;
+
+        /// <summary>The owning world, including an inactive parent during authoring/loading; null when loose in a scene.</summary>
         public UniverseCreatorObject World
         {
-            get { return GetComponentInParent<UniverseCreatorObject>(); }
+            get { return GetComponentInParent<UniverseCreatorObject>(true); } // UC-T08-14: ownership survives inactive authoring roots, as it does for weather.
+        }
+
+        // =====================================================================
+        //  RESOLVED TIER AND IRRADIANCE COST
+        //
+        //  Read-only, deterministic, and derived on demand - no cached state, so the
+        //  inspector shows what the frame would actually build.
+        // =====================================================================
+
+        /// <summary>
+        /// The product tier lighting resolves to right now: the world's AdaptiveQuality
+        /// tier when following it, otherwise the pinned override. Falls back to the
+        /// override when no AdaptiveQuality is present, so a loose scene still resolves.
+        /// </summary>
+        public AdaptiveQuality.QualityTier ResolvedTier
+        {
+            get
+            {
+                if (followAdaptiveQuality)
+                {
+                    AdaptiveQuality aq = GetComponentInParent<AdaptiveQuality>();
+                    if (aq != null) return aq.CurrentTier;
+                }
+                return lightingTierOverride;
+            }
+        }
+
+        /// <summary>The full tier envelope for <see cref="ResolvedTier"/> - cascades,
+        /// shadow distance, screen-space budgets and probe spacing scale.</summary>
+        public LightingTierSettings ResolvedTierSettings
+        {
+            get { return LightingTier.Resolve(ResolvedTier); }
+        }
+
+        /// <summary>
+        /// Probes the irradiance grid would allocate over this world, at the authored
+        /// horizontal spacing scaled by the resolved tier, times the fixed vertical
+        /// levels. A pure function of the world size and those two numbers - no bake,
+        /// no random - so the count is exact before a probe is filled. Zero when the
+        /// component is loose in a scene with no world to size against or inputs are invalid; extreme finite counts saturate at long.MaxValue. (§8.8)
+        /// </summary>
+        public long EstimatedProbeCount
+        {
+            get
+            {
+                UniverseCreatorObject w = World;
+                if (w == null) return 0L;
+
+                Vector3 size = w.GetWorldSize();
+                float spacing = settings.probeSpacing * ResolvedTierSettings.probeSpacingScale;
+
+                if (!RiverChannelSnapshot.Finite(size.x) || !RiverChannelSnapshot.Finite(size.z) || !RiverChannelSnapshot.Finite(spacing) ||
+                    size.x <= 0 || size.z <= 0 || spacing <= 0) return 0;
+                spacing = Mathf.Max(1, spacing);
+                double count = (System.Math.Floor((double)size.x / spacing) + 1) * (System.Math.Floor((double)size.z / spacing) + 1) * LightingConstants.IrradianceVerticalLevels;
+                return count >= long.MaxValue ? long.MaxValue : (long)count; // UC-T08-12: previews must not wrap while the runtime rejects huge grids.
+            }
+        }
+
+        /// <summary>
+        /// GPU bytes the irradiance grid would upload for this world - <see
+        /// cref="EstimatedProbeCount"/> priced by the upload format's own per-probe cost,
+        /// so the driver's packing and this preview can never disagree on the figure. Extreme estimates saturate at long.MaxValue.
+        /// </summary>
+        public long EstimatedIrradianceBytes
+        {
+            get { long count = EstimatedProbeCount; return count > long.MaxValue / IrradianceUpload.GpuBytes(1) ? long.MaxValue : IrradianceUpload.GpuBytes(count); }
         }
 
         private void OnValidate()
         {
-            timeOfDayHours = Mathf.Repeat(timeOfDayHours, 24f);
-            dayLengthMinutes = Mathf.Max(0.1f, dayLengthMinutes);
-            sunIntensity = Mathf.Max(0f, sunIntensity);
-            moonIntensity = Mathf.Max(0f, moonIntensity);
-            shadowDistanceMetres = Mathf.Max(0f, shadowDistanceMetres);
-            aerialPerspectiveMetres = Mathf.Max(1f, aerialPerspectiveMetres);
+            // The render dials clamp themselves to the ranges their tooltips promise.
+            settings.ClampToValidRanges();
+
+            // Latitude, tilt and the hour are clamped where they are authored, on
+            // the weather system. Clamping a copy of them here is what a second
+            // owner looks like before anyone notices.
+
+            // UC-T08-07: render settings refresh appearance; the weather clock/climate retain placement authority.
+            UCVegetationSystemManager.ForWorld(transform)?.MarkAppearanceDirty();
+            ResetEnvironmentLighting();
+
+            // Republish the one shader global on an inspector change. Update() no longer
+            // ticks it every frame in edit mode (§36), so OnEnable + OnValidate are what
+            // keep _UCEnvReflectionStrength correct in the scene view when the tier moves.
+            if (isActiveAndEnabled)
+            {
+                PublishEnvReflectionStrength();
+                // Re-light on an inspector change so the scene view updates at once. Never
+                // create objects here - Unity forbids creating a GameObject during
+                // OnValidate - so the moon is ensured only from OnEnable; existing lights
+                // are re-aimed and re-coloured. (§33)
+                ApplyLighting(allowCreate: false, animate: false);
+            }
+        }
+
+        // =====================================================================
+        //  THE ONE SHADER GLOBAL THIS MANAGER PUBLISHES  (S-82)
+        //
+        //  The quality ladder resolves how strongly the ray-free wet-sky reflection
+        //  (S-79/S-81) contributes, and the shaders read it from _UCEnvReflectionStrength.
+        //  This component owns the tier, so it is the single publisher of that value: 0
+        //  on the T0/T1 rung (Low / Mobile Low) leaves the term off, and the T1.5 rung and
+        //  up (Mobile High and up) scale it in. Reset to 0 when the manager is disabled so
+        //  a torn-down world never leaves a stale reflection lit on the next scene.
+        // =====================================================================
+
+        private static readonly int s_EnvReflectionStrengthId =
+            Shader.PropertyToID("_UCEnvReflectionStrength");
+
+        private void OnEnable()
+        {
+            CaptureInitialLighting(); // UC-T08-07: remember incoming bindings before this owner's first publication.
+            BindEnvironmentGraph(GetComponentInParent<UCWorldGraphBindings>(true)); // UC-T05-04: resolve the graph owner once for existing runtime drivers.
+            PublishEnvReflectionStrength();
+            // Event-driven: light the world ONCE so the scene view shows it without a
+            // per-frame edit-mode loop. This path may create the moon light; OnValidate
+            // must not, so object creation lives here. (§33)
+            ApplyLighting(allowCreate: true, animate: false);
+        }
+
+        // Play mode only. This is [ExecuteAlways], so an ungated Update() ran on every
+        // scene-view repaint in edit mode - forbidden by the author ("in sceneview which
+        // is the edit mode never run execute always"). The value only changes when the
+        // tier changes, so OnEnable/OnValidate publish it once and it stays correct
+        // across a domain reload without a per-frame heartbeat keeping the editor update
+        // loop hot. (§36)
+        private void Update()
+        {
+            if (!Application.isPlaying) return;
+            PublishEnvReflectionStrength();
+            // Play mode only: per-frame so the day cycle animates and eye adaptation is live. (§33)
+            ApplyLighting(allowCreate: true, animate: true);
+        }
+
+        private void OnDisable()
+        {
+            ReleaseEnvironmentLighting(); // UC-T08-07: unwind owned views and retire resources without clearing another world's bindings.
+        }
+
+        private void OnDestroy() => ReleaseEnvironmentLighting(); // UC-T08-07: idempotent retirement also covers externally destroyed owners.
+
+        /// <summary>
+        /// Push the resolved tier's reflection strength to the shader global, or 0 when the
+        /// lighting pass is switched off. Reads the tier through <see cref="ResolvedTierSettings"/>,
+        /// so it can never disagree with what the inspector and the self-test report.
+        /// </summary>
+        private void PublishEnvReflectionStrength()
+        {
+            float strength = lightingEnabled ? ResolvedTierSettings.envReflectionStrength : 0f;
+            Shader.SetGlobalFloat(s_EnvReflectionStrengthId, strength);
+        }
+
+        // =====================================================================
+        //  RESOLVED SOLAR GEOMETRY
+        //
+        //  Pure functions of latitude, axial tilt and the point in the year. No
+        //  frame time, no random source, no cached state - so a world's climate,
+        //  and the vegetation derived from it, comes out identical on every
+        //  machine and after every reload.
+        //
+        //  The season phase argument is the weather manager's, on the same
+        //  convention: 0 is northern midwinter, 0.5 northern midsummer.
+        // =====================================================================
+
+        /// <summary>
+        /// deg. Solar declination - the latitude the sun stands directly over at
+        /// this point in the year. Runs from minus the axial tilt at midwinter to
+        /// plus it at midsummer, which is the entire mechanism of the seasons. A
+        /// world with no tilt holds this at zero and has none. (L-01)
+        ///
+        /// The formula lives in ClockMath (W-02), not here. It used to be written out
+        /// twice - once in this file and once in the weather layer - and two copies
+        /// of one formula is not redundancy: one of them eventually gets a fix the
+        /// other does not, and then the sky and the vegetation disagree about what
+        /// season it is. This forwards.
+        /// </summary>
+        public float SolarDeclinationDegrees(float seasonPhase)
+        {
+            return ClockMath.DeclinationDegFromWinterPhase01(seasonPhase, AxialTiltDegrees);
+        }
+
+        /// <summary>
+        /// h. Hours between sunrise and sunset at this latitude and season. Returns a
+        /// full 24 in polar day and 0 in polar night rather than failing, because
+        /// beyond the circles the sun genuinely does not set or rise. (L-03)
+        ///
+        /// Forwards to ClockMath for the same single-owner reason as the declination
+        /// above, and gains its polar-latitude tan guard by doing so.
+        /// </summary>
+        public float DayLengthHours(float seasonPhase)
+        {
+            return ClockMath.DayLengthHours(LatitudeDegrees, SolarDeclinationDegrees(seasonPhase));
+        }
+
+        /// <summary>
+        /// MJ/m2/day arriving at the top of the atmosphere. The evapotranspiration
+        /// law reads this, which is what lets a world's water balance follow from
+        /// its astronomy instead of from an authored guess: the same annual
+        /// rainfall is a desert at one latitude and a wetland at another because
+        /// this number differs. (L-13)
+        ///
+        /// The FAO-56 formula lives in ClockMath (W-05), not here, for the same
+        /// single-owner reason as the declination and day length above - and because
+        /// a world that spans latitude re-derives this on a worker thread, which
+        /// cannot reach a component at all. This forwards.
+        /// </summary>
+        public float ExtraterrestrialRadiationMjPerM2Day(float seasonPhase)
+        {
+            return ClockMath.ExtraterrestrialRadiationMjPerM2Day(
+                LatitudeDegrees,
+                SolarDeclinationDegrees(seasonPhase),
+                seasonPhase);
+        }
+
+        /// <summary>
+        /// deg. Compass azimuth of the warm slope here. The warm slope is the one
+        /// facing the equator, so it is south-facing in the northern hemisphere
+        /// and north-facing in the southern. Reading it from latitude rather than
+        /// hard-coding south is what keeps every hillside in a southern world from
+        /// coming out inverted.
+        /// </summary>
+        public float WarmAspectDegrees
+        {
+            get { return TopographyMath.WarmAspectDegFor(LatitudeDegrees); }
         }
     }
 }

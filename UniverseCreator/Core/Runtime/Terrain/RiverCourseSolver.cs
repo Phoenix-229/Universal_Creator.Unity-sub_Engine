@@ -2,48 +2,35 @@
 //  Universe Creator - Procedural Content Generation Toolkit
 //
 //  File:    RiverCourseSolver.cs
-//  Purpose: Turns a course somebody dragged roughly across a landscape into one
-//           water could actually follow.
+//  Purpose: Step 4 of the river rebuild - the longitudinal profile. Turns a drawn
+//           course (its nodes carrying the ground height under them) into a bed
+//           elevation that only ever descends from head to mouth. This is the
+//           fix for the fought "river climbs uphill" bug, done at the root: an
+//           uphill step is not representable in the output, so no later pass has
+//           to detect and undo one.
 //
-//  THE PROBLEM THIS SOLVES
-//  -----------------------
-//  Drawing a spline by eye in a scene view gets the intent right and the metres
-//  wrong. The line reads as being in the valley from the camera angle it was
-//  drawn from and is twenty metres up the side of it from anywhere else, and it
-//  crosses two spurs on the way because the ground it crosses is not visible
-//  from above. Dig a channel along that line and you get a trench cut across
-//  hillsides with water climbing them.
+//  THE MATH (grounded in RiverBuilder, Pasternack-Lab; adapted, not copied)
+//  ------------------------------------------------------------------------
+//  G-A1  Sinuosity-corrected slope.  A meander lengthens the path, so the true
+//        along-channel slope is the valley slope scaled down by sinuosity:
+//            S_channel = S_valley / sinuosity,   sinuosity = channelArc / valleyLength
+//        A straightened reach is therefore steeper, a meandering one gentler -
+//        the physically real relationship, not a tuned feel.
+//  G-A2  Monotonic thalweg by cumulative descent.  Walking head -> mouth, each
+//        node's bed is the LOWER of (a) the ground minus the channel depth, and
+//        (b) the previous node's bed minus a guaranteed drop (slopeFloor * ds).
+//        Because (b) is always strictly below the previous bed, the result can
+//        only descend: where the ground rises into a hill, the bed holds the
+//        descending line and cuts through it; where the ground falls, the bed
+//        follows it down. An uphill bed step cannot be produced.
 //
-//  So the drawn line is treated as intent, not as geometry. Build time runs it
-//  through three passes:
+//  No invented grades: the slope floor is the reach's own valley slope (or a
+//  gentle real-river minimum so a dead-flat reach still drains). Width/depth
+//  derivation from discharge (Leopold) lives with step 5, where the along-course
+//  discharge is actually accumulated; this file owns only the vertical profile.
 //
-//    1. VALLEY SEEK    slide each point sideways to the low ground it is near
-//    2. DESCENT WALK   from the head down, never accept a step that climbs;
-//                      where the direct step would, swing round the obstacle
-//                      into whatever adjacent low ground does descend
-//    3. TERMINATION    if the walk runs into ground with no way down and no
-//                      water nearby, it stops there rather than climbing out
-//
-//  WHY THE WALK BEATS "JUST LOWER THE HEIGHTS"
-//  -------------------------------------------
-//  Forcing the surface profile monotonically downhill along a fixed line makes
-//  the water stop climbing, but it does it by cutting the terrain deeper and
-//  deeper to keep up - a hundred-metre-deep slot through the hill the line
-//  happened to cross. Moving the line instead keeps the cut shallow, because
-//  the line now goes round the hill the way water does.
-//
-//  HIGH GROUND IS THE ONLY THING THAT MATTERS
-//  ------------------------------------------
-//  On flat ground every direction descends about equally, so the walk barely
-//  moves the line and the drawn course is honoured almost exactly. It is only
-//  where the ground rises that the search has anything to choose between, which
-//  is why a river drawn across a plain stays where it was put and one drawn
-//  across a ridge visibly bends around it.
-//
-//  NO ALLOCATION IN THE INNER LOOPS
-//  --------------------------------
-//  Everything works in place on the caller's list. The passes run once per
-//  build, on the main thread, over a few hundred points.
+//  Pure managed C#: arrays and Mathf, no Unity scene access, so it runs on a
+//  worker and is exercised headless by the self test.
 // -----------------------------------------------------------------------------
 
 using System.Collections.Generic;
@@ -51,310 +38,276 @@ using UnityEngine;
 
 namespace UniverseCreator.TerrainSystem
 {
+    /// <summary>The solved vertical profile of a river course: a bed that only descends.</summary>
+    public struct SolvedRiverBed
+    {
+        /// <summary>Bed (thalweg) elevation in world metres, per course node. Monotonically non-increasing.</summary>
+        public float[] bedElevationM;
+
+        /// <summary>Cumulative plan (XZ) arc length in metres, per course node.</summary>
+        public float[] arcM;
+
+        /// <summary>True when the mouth's ground sits at or above the head's - the course was drawn uphill
+        /// overall. The bed is still forced to descend; step 5 surfaces this to the author as a warning.</summary>
+        public bool drawnUphill;
+
+        /// <summary>Channel arc length divided by straight head-to-mouth distance (>= 1).</summary>
+        public float sinuosity;
+
+        /// <summary>The along-channel slope used, in metres per metre (S_valley / sinuosity, floored).</summary>
+        public float channelSlope;
+
+        /// <summary>True once the solve produced a usable 2+ node profile.</summary>
+        public bool valid;
+    }
+
     /// <summary>
-    /// Build-time course fitting for rivers. Stateless: every method takes the
-    /// points and a ground sampler and returns what it worked out.
+    /// Solves a river course's longitudinal (vertical) profile: a monotonically
+    /// descending bed, from the drawn nodes and the ground height under each.
     /// </summary>
     public static class RiverCourseSolver
     {
-        /// <summary>Reads world ground elevation at a world XZ. Supplied by the caller
-        /// so this file never needs to know what a Terrain is.</summary>
-        public delegate float GroundSampler(float worldX, float worldZ);
+        // A gentle lowland river still falls on the order of a few tenths of a metre
+        // per kilometre. This floor keeps the bed descending across a dead-flat reach
+        // so water never ponds in a level channel, without asserting a grade steeper
+        // than a real river would cut. Metres per metre.
+        public const float AbsoluteMinSlope = 0.0002f;   // ~0.2 m per km
 
         /// <summary>
-        /// Slides each point sideways onto the lowest ground within reach, across the
-        /// course rather than along it.
-        ///
-        /// Across, not in a disc, for a specific reason: a disc search on a sloping
-        /// valley floor walks every point downstream until they all pile up at the
-        /// lowest point in the search radius, and the course collapses. Searching
-        /// perpendicular to the direction of travel can only ever move a point to the
-        /// side, so the course keeps its length and its shape and simply finds the
-        /// bottom of the trench it is near.
+        /// Builds the descending bed profile. <paramref name="courseWorld"/> are the
+        /// course nodes in world space, each Y holding the GROUND height under that
+        /// node (the caller samples terrain first). <paramref name="depthM"/> is the
+        /// per-node channel depth (0 or null entries fall back to
+        /// <paramref name="defaultDepthM"/>). Returns an invalid result for a course
+        /// of fewer than two nodes.
         /// </summary>
-        public static void SnapToValley(List<Vector3> points, GroundSampler ground,
-                                        float searchMetres, float strength, int samples)
+        public static SolvedRiverBed SolveBedProfile(IList<Vector3> courseWorld,
+                                                     IList<float> depthM,
+                                                     float defaultDepthM)
         {
-            if (points == null || points.Count < 2 || ground == null) return;
+            SolvedRiverBed r = new SolvedRiverBed();
+            if (courseWorld == null || courseWorld.Count < 2) return r;
 
-            float reach = Mathf.Max(0f, searchMetres);
-            if (reach < 0.25f) return;
+            int n = courseWorld.Count;
+            float[] arc = new float[n];
+            float[] bed = new float[n];
 
-            float pull = Mathf.Clamp01(strength);
-            if (pull <= 1e-4f) return;
-
-            int half = Mathf.Clamp(samples, 2, 32);
-            int n = points.Count;
-
-            // Written to a second list so every point is judged against the original
-            // course. Updating in place would let point i be pulled toward where
-            // point i-1 has already moved to, which drags the whole course sideways.
-            Vector3[] moved = new Vector3[n];
-
-            for (int i = 0; i < n; i++)
+            // Plan (XZ) arc length: slope is drop over distance-across-the-ground, so
+            // the vertical component must not inflate the run.
+            arc[0] = 0f;
+            for (int i = 1; i < n; i++)
             {
-                Vector3 p = points[i];
-
-                int prev = Mathf.Max(0, i - 1);
-                int next = Mathf.Min(n - 1, i + 1);
-
-                Vector2 dir = new Vector2(points[next].x - points[prev].x,
-                                          points[next].z - points[prev].z);
-
-                if (dir.sqrMagnitude < 1e-8f) { moved[i] = p; continue; }
-
-                dir.Normalize();
-                Vector2 side = new Vector2(-dir.y, dir.x);
-
-                float bestOffset = 0f;
-                float bestHeight = ground(p.x, p.z);
-
-                for (int s = -half; s <= half; s++)
-                {
-                    if (s == 0) continue;
-
-                    float offset = reach * (s / (float)half);
-                    float h = ground(p.x + side.x * offset, p.z + side.y * offset);
-
-                    // Ties go to the smaller offset, because a flat valley floor
-                    // should leave the drawn line where it is rather than jumping it
-                    // to whichever end of the search the loop happened to reach last.
-                    if (h < bestHeight - 1e-4f ||
-                        (h < bestHeight + 1e-4f && Mathf.Abs(offset) < Mathf.Abs(bestOffset)))
-                    {
-                        bestHeight = h;
-                        bestOffset = offset;
-                    }
-                }
-
-                float take = bestOffset * pull;
-                moved[i] = new Vector3(p.x + side.x * take, p.y, p.z + side.y * take);
+                float dx = courseWorld[i].x - courseWorld[i - 1].x;
+                float dz = courseWorld[i].z - courseWorld[i - 1].z;
+                arc[i] = arc[i - 1] + Mathf.Sqrt(dx * dx + dz * dz);
             }
 
-            for (int i = 0; i < n; i++) points[i] = moved[i];
+            float channelArc = arc[n - 1];
+
+            float vdx = courseWorld[n - 1].x - courseWorld[0].x;
+            float vdz = courseWorld[n - 1].z - courseWorld[0].z;
+            float valleyLength = Mathf.Sqrt(vdx * vdx + vdz * vdz);
+
+            float sinuosity = valleyLength > 1e-3f ? channelArc / valleyLength : 1f;
+            if (sinuosity < 1f) sinuosity = 1f;   // numerical floor; a path cannot be shorter than its chord
+
+            float headGround = courseWorld[0].y;
+            float mouthGround = courseWorld[n - 1].y;
+            float totalDrop = headGround - mouthGround;
+
+            r.drawnUphill = totalDrop <= 0f;
+
+            // G-A1: valley slope reduced by sinuosity, then floored so even a flat or
+            // uphill-drawn reach still drains.
+            float sValley = (valleyLength > 1e-3f && totalDrop > 0f) ? totalDrop / valleyLength : 0f;
+            float sChannel = sValley / sinuosity;
+            float slopeFloor = Mathf.Max(sChannel, AbsoluteMinSlope);
+
+            // G-A2: cumulative descent. bed[i] is the lower of (ground - depth) and
+            // (previous bed - guaranteed drop), so it can only ever go down.
+            bed[0] = headGround - DepthAt(depthM, 0, defaultDepthM);
+            for (int i = 1; i < n; i++)
+            {
+                float ds = arc[i] - arc[i - 1];
+                float cap = courseWorld[i].y - DepthAt(depthM, i, defaultDepthM);
+                float descend = bed[i - 1] - slopeFloor * ds;
+                bed[i] = Mathf.Min(cap, descend);
+            }
+
+            r.bedElevationM = bed;
+            r.arcM = arc;
+            r.sinuosity = sinuosity;
+            r.channelSlope = slopeFloor;
+            r.valid = true;
+            return r;
         }
 
         /// <summary>
-        /// Light XZ smoothing. The valley seek judges each point on its own, so a
-        /// noisy valley floor can leave the course visibly serrated even though every
-        /// individual point found real low ground.
+        /// Signed per-node curvature of the course in plan (XZ), 1/metre-ish. Positive =
+        /// the course turns LEFT of the flow direction at that node, negative = right,
+        /// zero on a straight reach. This is what G-X1 keys the asymmetric cross-section
+        /// on: the pool deepens on the OUTER bank of a bend and the inner bank shallows
+        /// into a point-bar. Endpoints inherit their neighbour so the ends are not flat
+        /// by accident.
         /// </summary>
-        public static void Relax(List<Vector3> points, int passes)
+        public static float[] SignedCurvature(IList<Vector3> courseWorld)
         {
-            if (points == null || points.Count < 3) return;
+            int n = courseWorld != null ? courseWorld.Count : 0;
+            float[] cur = new float[n];
+            if (n < 3) return cur;
 
-            int n = points.Count;
-
-            for (int pass = 0; pass < passes; pass++)
+            for (int i = 1; i < n - 1; i++)
             {
-                // Ends held: they are the mouth and the head, and those are the two
-                // places a designer is most likely to have meant exactly what they drew.
-                for (int i = 1; i < n - 1; i++)
-                {
-                    Vector3 a = points[i - 1];
-                    Vector3 b = points[i];
-                    Vector3 c = points[i + 1];
+                Vector3 a = courseWorld[i - 1], b = courseWorld[i], c = courseWorld[i + 1];
+                Vector2 t0 = new Vector2(b.x - a.x, b.z - a.z);
+                Vector2 t1 = new Vector2(c.x - b.x, c.z - b.z);
+                float l0 = t0.magnitude, l1 = t1.magnitude;
+                if (l0 < 1e-4f || l1 < 1e-4f) continue;
+                t0 /= l0; t1 /= l1;
 
-                    points[i] = new Vector3((a.x + b.x * 2f + c.x) * 0.25f,
-                                            b.y,
-                                            (a.z + b.z * 2f + c.z) * 0.25f);
-                }
+                float cross = t0.x * t1.y - t0.y * t1.x;          // + = left turn (CCW in XZ)
+                float dot = Mathf.Clamp(t0.x * t1.x + t0.y * t1.y, -1f, 1f);
+                float angle = Mathf.Acos(dot);                    // unsigned turn magnitude
+                float meanLen = 0.5f * (l0 + l1);
+                cur[i] = (cross >= 0f ? 1f : -1f) * angle / Mathf.Max(1e-3f, meanLen);
             }
+
+            cur[0] = cur[1];
+            cur[n - 1] = cur[n - 2];
+            return cur;
         }
 
-        // =====================================================================
-        //  THE DESCENT WALK
-        // =====================================================================
-
-        /// <summary>Why a descent walk stopped where it did.</summary>
-        public enum DescentEnding
+        private static float DepthAt(IList<float> depthM, int i, float fallback)
         {
-            /// <summary>It ran the whole drawn course and never had to give up.</summary>
-            ReachedEnd = 0,
-
-            /// <summary>It arrived at a body of water it could join.</summary>
-            ReachedWater = 1,
-
-            /// <summary>Every direction climbed. The river sinks here.</summary>
-            NoWayDown = 2
+            float d = (depthM != null && i < depthM.Count) ? depthM[i] : 0f;
+            return d > 0f ? d : Mathf.Max(0f, fallback);
         }
+
+        // --- G-C1 / Guarantee C: hydraulic geometry (shape follows flow) --------------
+        //
+        //  Leopold & Maddock (1953): at-a-station and downstream, bankfull WIDTH grows
+        //  as about the square root of discharge, w = a*Q^0.5; DEPTH grows more slowly,
+        //  d proportional to w^0.8 (the Flow Depth Exponent the manual documents). The
+        //  width is clamped to the real-world band (a stream floors at ~4 m, a trunk tops
+        //  out ~80 m) that HydrologyGenerator.WidthAreaExponent's own band uses. Shields
+        //  gives the grain-stability floor: a channel on a gentle slope must be at least
+        //  this deep for its bed grains to sit still, h = tau*c*(s-1)*d50 / S.
+
+        /// <summary>Leopold-Maddock bankfull-width coefficient, w = a*Q^0.5 (SI, metres & m^3/s).</summary>
+        public const float WidthDischargeCoeff = 2.3f;
+        public const float WidthDischargeExponent = 0.5f;
+
+        /// <summary>Depth grows as width^0.8 (the documented Flow Depth Exponent); the
+        /// coefficient seats a 10 m-wide channel at ~1 m deep (an alluvial w/d ~10).</summary>
+        public const float DepthWidthExponent = 0.8f;
+        public const float DepthWidthCoeff = 0.158f;     // 1 / 10^0.8
+
+        // FIX 2026-10-19: the floor was 4 m, so the SMALLEST water in the world was already a
+        // 4 m-wide channel and a headwater could not be a stream. The band now spans the whole
+        // hierarchy: a trickle of a stream at the source up to a big river at the mouth.
+        public const float MinChannelWidthM = 1.5f;
+        public const float MaxChannelWidthM = 120f;
+
+        /// <summary>The river size hierarchy, smallest to largest, by bankfull width.</summary>
+        public enum RiverSizeClass { Stream = 0, SmallRiver = 1, River = 2, BigRiver = 3 }
+
+        /// <summary>Upper bankfull width of each class, in metres: Stream under 4, Small river under
+        /// 12, River under 40, anything wider is a Big river.</summary>
+        public const float StreamMaxWidthM = 4f;
+        public const float SmallRiverMaxWidthM = 12f;
+        public const float RiverMaxWidthM = 40f;
+
+        public static RiverSizeClass ClassifyWidth(float bankfullWidthM)
+        {
+            if (bankfullWidthM < StreamMaxWidthM) return RiverSizeClass.Stream;
+            if (bankfullWidthM < SmallRiverMaxWidthM) return RiverSizeClass.SmallRiver;
+            if (bankfullWidthM < RiverMaxWidthM) return RiverSizeClass.River;
+            return RiverSizeClass.BigRiver;
+        }
+
+        /// <summary>Width of a freshly-sprung headwater stream, metres. Never zero.</summary>
+        public const float HeadwaterWidthM = 0.3f;
 
         /// <summary>
-        /// Rewrites the course as a path that never climbs.
-        ///
-        /// It walks from the head, one step at a time, each step aiming at the next
-        /// drawn point. If the direct step descends, it is taken and the drawn line is
-        /// followed exactly - which is why a river drawn along a valley or across a
-        /// plain comes out almost precisely where it was put. If the direct step
-        /// climbs, the walk fans out sideways and takes the best descending direction
-        /// it can find while still making progress toward the target. That is the
-        /// swing round the spur.
-        ///
-        /// If nothing within the fan descends, the walk stops and reports NoWayDown,
-        /// and the caller decides how the river ends there.
+        /// A natural channel for a river whose width and depth were not typed and which does not sit
+        /// on a procedural trench: it STARTS as a stream (never zero width or depth) and GROWS
+        /// downstream toward <paramref name="mouthWidthM"/>, by the same width-to-depth law the
+        /// hydraulic geometry uses. <paramref name="t01"/> is the position along the course, 0 at the
+        /// source and 1 at the mouth. Width never decreases downstream.
         /// </summary>
-        /// <param name="drawn">The course as authored, world space, head first.</param>
-        /// <param name="result">Receives the fitted course. Cleared first.</param>
-        /// <param name="ground">Ground elevation sampler.</param>
-        /// <param name="stepMetres">Distance per step. The authored point spacing.</param>
-        /// <param name="fanDegrees">How far off the direct heading the walk may swing.</param>
-        /// <param name="climbToleranceMetres">Rise accepted as level. A real river bed
-        /// is not monotonic to the millimetre, and a zero tolerance makes the walk
-        /// zig-zag across every one-centimetre bump in the heightfield.</param>
-        /// <param name="water">Optional test for arriving at joinable water; null for none.</param>
-        public static DescentEnding WalkDownhill(List<Vector3> drawn, List<Vector3> result,
-                                                 GroundSampler ground,
-                                                 float stepMetres, float fanDegrees,
-                                                 float climbToleranceMetres,
-                                                 System.Func<Vector3, bool> water)
+        public static void GrowthSection(float t01, float mouthWidthM, out float halfWidthM, out float depthM)
         {
-            if (result == null) return DescentEnding.ReachedEnd;
-            result.Clear();
-
-            if (drawn == null || drawn.Count < 2 || ground == null)
-            {
-                if (drawn != null) result.AddRange(drawn);
-                return DescentEnding.ReachedEnd;
-            }
-
-            float step = Mathf.Max(0.5f, stepMetres);
-            float fan = Mathf.Clamp(fanDegrees, 0f, 170f);
-            float tolerance = Mathf.Max(0f, climbToleranceMetres);
-
-            Vector3 at = drawn[0];
-            at.y = ground(at.x, at.z);
-            result.Add(at);
-
-            // Every step must be shorter than the whole drawn course by construction,
-            // so this bounds the walk at a generous multiple of the point count and
-            // can only be hit by a genuine loop.
-            int budget = drawn.Count * 8 + 64;
-
-            int target = 1;
-
-            while (target < drawn.Count && budget-- > 0)
-            {
-                Vector2 toTarget = new Vector2(drawn[target].x - at.x, drawn[target].z - at.z);
-
-                // Close enough - move the aim to the next drawn point. Half a step
-                // rather than a fixed epsilon, so a tight meander does not leave the
-                // walk circling a target it keeps overshooting.
-                if (toTarget.magnitude < step * 0.5f) { target++; continue; }
-
-                Vector2 heading = toTarget.normalized;
-
-                float here = ground(at.x, at.z);
-
-                Vector2 bestDir = Vector2.zero;
-                float bestScore = float.MinValue;
-                float bestHeight = 0f;
-                bool found = false;
-
-                // 0 first, so a direct step that descends is always the one taken and
-                // the drawn line is honoured wherever it is already valid.
-                int rays = fan > 1f ? 12 : 0;
-
-                for (int r = 0; r <= rays; r++)
-                {
-                    // Alternating out from centre: 0, +1, -1, +2, -2 ... Ties then go
-                    // to the smaller deviation without needing a second comparison.
-                    int signed = (r + 1) / 2 * ((r % 2 == 0) ? 1 : -1);
-                    float angle = rays > 0 ? fan * signed / (rays * 0.5f) : 0f;
-                    if (Mathf.Abs(angle) > fan) continue;
-
-                    float rad = angle * Mathf.Deg2Rad;
-                    float cos = Mathf.Cos(rad);
-                    float sin = Mathf.Sin(rad);
-
-                    Vector2 dir = new Vector2(heading.x * cos - heading.y * sin,
-                                              heading.x * sin + heading.y * cos);
-
-                    float nx = at.x + dir.x * step;
-                    float nz = at.z + dir.y * step;
-                    float h = ground(nx, nz);
-
-                    if (h > here + tolerance) continue;
-
-                    // Drop is what the water wants; alignment is what the designer
-                    // wants. Weighting drop by the step keeps the two in the same
-                    // units, so neither silently dominates at a different scale.
-                    float drop = (here - h) / step;
-                    float alignment = Vector2.Dot(dir, heading);
-                    float score = drop * 2f + alignment;
-
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestDir = dir;
-                        bestHeight = h;
-                        found = true;
-                    }
-                }
-
-                if (!found)
-                {
-                    // Nowhere in the fan goes down. A real river here either ponds and
-                    // spills over the lowest lip, or sinks. Finding the spill would
-                    // mean flooding a basin, which the graph's Lake Fill already does
-                    // properly; here the honest answer is to stop.
-                    return DescentEnding.NoWayDown;
-                }
-
-                at = new Vector3(at.x + bestDir.x * step, bestHeight, at.z + bestDir.y * step);
-                result.Add(at);
-
-                if (water != null && water(at)) return DescentEnding.ReachedWater;
-            }
-
-            return DescentEnding.ReachedEnd;
+            float t = Mathf.Clamp01(t01);
+            float mouth = Mathf.Clamp(mouthWidthM, HeadwaterWidthM * 1.5f, MaxChannelWidthM);
+            // Eased so the stream stays a stream for a while, then widens as tributaries would add flow.
+            float g = Mathf.SmoothStep(0f, 1f, Mathf.Pow(t, 0.8f));
+            float w = Mathf.Lerp(HeadwaterWidthM, mouth, g);
+            halfWidthM = 0.5f * w;
+            depthM = Mathf.Max(0.2f, DepthWidthCoeff * Mathf.Pow(w, DepthWidthExponent));
         }
 
+        // Shields grain-stability floor constants.
+        public const float ShieldsCritical = 0.047f;     // dimensionless critical shear for sand/gravel
+        public const float SedimentSpecificGravity = 2.65f;
+        public const float DefaultGrainD50M = 0.03f;      // coarse gravel bed, metres
+
         /// <summary>
-        /// Tapers the last stretch of a course that ended with nowhere to go.
-        ///
-        /// This is the river disappearing: the channel narrows and shallows over the
-        /// final run, so it reads as water sinking into the ground rather than as a
-        /// channel that was cut and then stopped mid-hillside with a wall at the end.
-        /// Real rivers do exactly this in karst and in desert - they run out.
+        /// Channel half-width and depth from discharge and slope, by Leopold-Maddock with
+        /// a Shields grain-stability depth floor. Q in m^3/s, slope in m/m. Returns a
+        /// width clamped to the real-world band and a depth that is the larger of the
+        /// Leopold regime depth and the (slope-capped) Shields floor.
         /// </summary>
-        public static void TaperSink(List<Vector3> points, List<float> widths,
-                                     List<float> depths, float sinkMetres)
+        public static void HydraulicGeometry(float dischargeM3PerS, float slope,
+                                             out float halfWidthM, out float depthM)
         {
-            if (points == null || widths == null || depths == null) return;
-            if (points.Count < 2) return;
+            float q = Mathf.Max(0.01f, dischargeM3PerS);
+            float w = WidthDischargeCoeff * Mathf.Pow(q, WidthDischargeExponent);
+            w = Mathf.Clamp(w, MinChannelWidthM, MaxChannelWidthM);
 
-            float totalLength = 0f;
-            for (int i = 0; i < points.Count - 1; i++) 
+            float dLeopold = DepthWidthCoeff * Mathf.Pow(w, DepthWidthExponent);
+
+            // Shields floor, with the slope floored so a near-flat reach does not drive
+            // the grain-stability depth to infinity; capped so it is a floor, not a runaway.
+            float s = Mathf.Max(1e-4f, slope);
+            float dShields = ShieldsCritical * (SedimentSpecificGravity - 1f) * DefaultGrainD50M / s;
+            dShields = Mathf.Min(dShields, dLeopold * 2f);
+
+            halfWidthM = 0.5f * w;
+            depthM = Mathf.Max(dLeopold, dShields);
+        }
+
+        /// <summary>Fraction of the course length over which the mouth blends to a joined body.</summary>
+        public const float EstuaryFraction = 0.15f;
+
+        /// <summary>
+        /// Step 7, the mouth blend: where the river joins a lake or ocean, the bed must
+        /// not sit ABOVE the body's water surface (that was the §38 "raised bed at the
+        /// mouth" seam). Over the last <see cref="EstuaryFraction"/> of the course the
+        /// bed is pulled DOWN toward <paramref name="targetSurfaceY"/> by a Min-blend:
+        /// each node's bed becomes the lower of what it was and the eased target, so the
+        /// mouth meets the still water flush and the bed is never raised (descent and
+        /// the deepening-only contract are both preserved). Mutates and returns bed.
+        /// </summary>
+        public static float[] BlendMouthToSurface(float[] bed, float[] arc,
+                                                  float targetSurfaceY, float estuaryFraction)
+        {
+            if (bed == null || arc == null || bed.Length != arc.Length || bed.Length < 2) return bed;
+
+            float mouthArc = arc[arc.Length - 1];
+            float frac = Mathf.Clamp01(estuaryFraction);
+            float blendStart = mouthArc * (1f - frac);
+            float span = mouthArc - blendStart;
+            if (span <= 1e-4f) return bed;
+
+            for (int i = 0; i < bed.Length; i++)
             {
-                Vector3 a = points[i];
-                Vector3 b = points[i + 1];
-                totalLength += new Vector2(b.x - a.x, b.z - a.z).magnitude;
+                if (arc[i] < blendStart) continue;
+                float t = Mathf.Clamp01((arc[i] - blendStart) / span);
+                float eased = Mathf.Lerp(bed[i], targetSurfaceY, t);
+                // Min only: pull the bed down to meet the water, never raise it.
+                bed[i] = Mathf.Min(bed[i], eased);
             }
-            float run = Mathf.Min(Mathf.Max(0.5f, sinkMetres), totalLength * 0.5f);
-
-            int n = points.Count;
-            float travelled = 0f;
-
-            for (int i = n - 1; i > 0; i--)
-            {
-                if (i < n - 1)
-                {
-                    Vector3 a = points[i];
-                    Vector3 b = points[i + 1];
-                    travelled += new Vector2(b.x - a.x, b.z - a.z).magnitude;
-                }
-
-                if (travelled > run) break;
-                if (i >= widths.Count || i >= depths.Count) continue;
-
-                // Squared, so the taper is gentle where it starts and closes quickly
-                // at the very end. A linear taper reads as a wedge.
-                float t = Mathf.Clamp01(travelled / run);
-                float k = t * t;
-
-                widths[i] *= Mathf.Max(0.08f, k);
-                depths[i] *= Mathf.Max(0.05f, k);
-            }
+            return bed;
         }
     }
 }

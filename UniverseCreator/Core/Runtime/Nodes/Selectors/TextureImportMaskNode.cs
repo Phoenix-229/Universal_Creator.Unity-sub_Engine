@@ -12,7 +12,7 @@ using UnityEngine;
 namespace UniverseCreator.Nodes.Selectors
 {
     [System.Serializable]
-    public class TextureImportMaskNode : SelectorNode
+    public class TextureImportMaskNode : SelectorNode, IPreparedGraphInputs, IPreparedGraphInputHash
     {
         public override string NodeName { get { return "Texture Import Mask"; } }
         public override NodeCategory Category { get { return NodeCategory.Selector; } }
@@ -27,6 +27,24 @@ namespace UniverseCreator.Nodes.Selectors
         private float[] _pixels;
         private int _width;
         private int _height;
+        private PreparedRasterInputs _preparedHashInputs;
+
+        /// <summary>UC-T01-07: exposes the captured mask texel dimensions and grayscale pixels for dependency hashing.</summary>
+        /// <returns>Plain prepared raster data; an absent mask has zero dimensions and null pixels.</returns>
+        /// <remarks>Main thread, after PrepareMainThread; the worker consumes the same captured array.</remarks>
+        public object GetPreparedInputsForHash()
+        {
+            if (_preparedHashInputs == null) _preparedHashInputs = new PreparedRasterInputs();
+            _preparedHashInputs.width = _width;
+            _preparedHashInputs.height = _height;
+            _preparedHashInputs.pixels = _pixels;
+            return _preparedHashInputs;
+        }
+
+        /// <summary>UC-T01-07: fingerprints captured mask dimensions and every ordered sample without JSON allocation.</summary>
+        /// <returns>Stable 64-bit hash, including absence and canonical zero/NaN samples.</returns>
+        /// <remarks>Main thread after PrepareMainThread; does not read the texture or change prepared data.</remarks>
+        public ulong GetPreparedInputHash() => PreparedRasterInputs.Hash(_width, _height, _pixels);
 
         public override void PrepareMainThread()
         {

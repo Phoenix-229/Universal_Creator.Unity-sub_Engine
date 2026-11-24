@@ -1,11 +1,20 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 1: Terrain Core
 //                     Module 2: per-type rules implemented
+//                     Module 3: routed through the one deposit model (V-44)
 //  File:    RockScatterNode.cs
-//  Purpose: Places rock/boulder prefabs, biased toward steep and exposed ground.
-//           The base solver handles placement and normal alignment; this node
-//           adds the random tilt and the embed offset that stop a boulder from
-//           reading as a decal sitting on the surface.
+//  Purpose: Places rock and boulder prefabs. With ecology present the deposit model
+//           decides where stone rests, how it grades and how deep it sits; without
+//           it, the authored tilt and embed depth below do.
+//
+//  THIS NODE NO LONGER HAS ITS OWN OPINION ABOUT HOW STONE SITS. It used to: a
+//  hand-authored randomTilt and embedDepth applied to every rock equally, which is a
+//  second implementation of what DebrisShaping now does by process - and a worse one,
+//  because a constant tilt cannot know that talus lies with the slope while a
+//  frost-split block does not, and a constant embed depth cannot know that a boulder
+//  weathered in place sits deeper than one that fell last winter. Both fields are
+//  kept because they are serialised graph data and they remain the answer for a world
+//  with no ecology context, but they are the fallback now and not the model (C-15).
 // -----------------------------------------------------------------------------
 
 using System.Collections.Generic;
@@ -17,17 +26,24 @@ namespace UniverseCreator.Nodes.Scatter
     public class RockScatterNode : ScatterNodeBase
     {
         public override string NodeName { get { return "Rock Scatter"; } }
-        public override string Tooltip { get { return "Places boulders on steep ground, embedded and tilted."; } }
+        public override string Tooltip { get { return "Places boulders by deposit process, embedded and tilted."; } }
         public override string Channel { get { return "rocks"; } }
 
-        /// <summary>Sink each rock this far into the surface so it reads as embedded.</summary>
+        /// <summary>Fallback sink depth, used only when no ecology context is present.</summary>
         public float embedDepth = 0.2f;
 
-        /// <summary>Random tilt away from surface normal, in degrees.</summary>
+        /// <summary>Fallback random tilt away from surface normal, in degrees.</summary>
         public float randomTilt = 15f;
 
         /// <summary>Align the rock's up axis to the terrain normal before tilting.</summary>
         public bool alignToNormal = true;
+
+        /// <summary>
+        /// Which prototype represents each DebrisKind, indexed by the enum; -1 means
+        /// unbound and nothing is placed for that kind. Asset binding, not placement
+        /// authoring - see DebrisShaping.
+        /// </summary>
+        public int[] debrisPrototypes;
 
         // Feeds the existing serialized bool into the base solver's 0-1 alignment
         // so the base builds the aligned rotation directly, instead of this node
@@ -42,6 +58,26 @@ namespace UniverseCreator.Nodes.Scatter
         {
             if (instances.Count == 0) return;
 
+            // The one stone path. Null binding is passed deliberately when the author
+            // has not bound kinds: the deposit model still decides where rock rests and
+            // how it grades and lies, and each instance keeps whatever prototype the
+            // solver gave it. That is strictly better than the authored constants, and
+            // it needs no binding to be an improvement.
+            if (DebrisShaping.Apply(tile, height, seed, instances,
+                                    HasBinding() ? debrisPrototypes : null, stop))
+                return;
+
+            ApplyAuthoredTiltAndEmbed(instances, stop);
+        }
+
+        private bool HasBinding()
+        {
+            return debrisPrototypes != null && debrisPrototypes.Length > 0;
+        }
+
+        // The pre-Module-3 behaviour, reached only without an ecology context.
+        private void ApplyAuthoredTiltAndEmbed(List<ScatterInstance> instances, StopToken stop)
+        {
             // Own hash stream, offset from the base solver's so tilt does not
             // correlate with the scale and yaw it already assigned.
             Noise tiltNoise = new Noise(seed + 32452843);

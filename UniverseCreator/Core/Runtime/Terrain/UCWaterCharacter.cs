@@ -212,10 +212,29 @@ namespace UniverseCreator.TerrainSystem
 
         private bool wasWet;
         private float lastVerticalSpeed;
+        private readonly WaterContactTracker waterContact = new WaterContactTracker(); // UC-T04-09A: reuse the existing accepted feet sample.
+        /// <summary>UC-T04-09: optional UC world for accepted water queries; null infers the nearest parent on enable.</summary>
+        [Tooltip("Optional UC world for water queries. Empty infers the nearest parent; bind external characters explicitly when worlds overlap.")]
+        public UniverseCreatorObject waterWorld;
+        private WaterSample contactSample;
+
+        /// <summary>UC-T04-09A: local body kind/depth/current and swimming state, dry after owner retirement.</summary>
+        public WaterContactState Contact => waterContact.Current;
+
+        /// <summary>UC-T04-09A: bounded main-thread water transition/wake notifications for optional sound/particles.</summary>
+        public event System.Action<WaterContactEvent> ContactChanged;
+
+        private void OnDisable()
+        {
+            var change = waterContact.Reset();
+            wasWet = false; rippleTimer = 0; Volume = null; Current = Vector3.zero; SubmergedFraction = 0; State = WaterState.Dry;
+            if (change.Kind != WaterContactEventKind.None) ContactChanged?.Invoke(change);
+        }
 
         private void OnEnable()
         {
             controller = GetComponent<CharacterController>();
+            if (waterWorld == null) waterWorld = GetComponentInParent<UniverseCreatorObject>(true); // UC-T04-09: cache the actor's scope once.
             Rebuild();
             SpeedMultiplier = 1f;
         }
@@ -300,6 +319,9 @@ namespace UniverseCreator.TerrainSystem
             else velocity = Vector3.zero;
 
             UpdateRipples(dt);
+            var contactChange = waterContact.Step(contactSample, transform.position, driveMovement ? velocity : controller.velocity,
+                time, State == WaterState.Swimming || State == WaterState.Submerged, 1.5f); // UC-T04-09A: preserve this controller's movement/drag ownership.
+            if (contactChange.Kind != WaterContactEventKind.None) ContactChanged?.Invoke(contactChange);
 
             wasWet = State != WaterState.Dry;
             lastVerticalSpeed = driveMovement ? velocity.y : controller.velocity.y;
@@ -321,7 +343,8 @@ namespace UniverseCreator.TerrainSystem
             Vector3 head = centre + up * (h * 0.5f);
             Vector3 eyes = head - up * eyeDepthFromTop;
 
-            WaterSample sFeet = UCWaterVolume.Sample(feet, time);
+            WaterSample sFeet = UCWaterVolume.Sample(feet, time, waterWorld); // UC-T04-09: footprint, movement and sound use one world scope.
+            contactSample = sFeet; // UC-T04-09A: sound/contact reads the same local footprint as swimming.
 
             if (!sFeet.submerged)
             {
@@ -355,7 +378,7 @@ namespace UniverseCreator.TerrainSystem
             float span = Mathf.Abs(bodyY) > 0.05f ? Mathf.Abs(bodyY) : h;
             SubmergedFraction = Mathf.Clamp01((SurfaceY - feet.y) / span);
 
-            WaterSample sEyes = UCWaterVolume.Sample(eyes, time);
+            WaterSample sEyes = UCWaterVolume.Sample(eyes, time, waterWorld);
             bool headUnder = sEyes.submerged;
 
             State = headUnder ? WaterState.Submerged

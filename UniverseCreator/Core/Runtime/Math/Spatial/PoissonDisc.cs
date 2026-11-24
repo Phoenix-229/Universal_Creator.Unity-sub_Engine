@@ -86,6 +86,10 @@ namespace UniverseCreator
         /// <summary>Hard cap on accepted points, guarding against a runaway density.</summary>
         public int maxPoints;
 
+        /// <summary>UC-T06-05: use a cap-independent world lattice and bounded local-priority spacing. False preserves the serialized legacy distribution.</summary>
+        /// <remarks>One candidate per spacing cell; attemptsPerCell is a legacy-only setting. Caps select a stable ranked subset. Very large requests fail rather than coarsen the lattice silently.</remarks>
+        public bool stableWorldGrid;
+
         public static PoissonSettings Default
         {
             get
@@ -96,6 +100,7 @@ namespace UniverseCreator
                 s.jitter = 1f;
                 s.seed = 1000;
                 s.maxPoints = 100000;
+                s.stableWorldGrid = false;
                 return s;
             }
         }
@@ -121,17 +126,24 @@ namespace UniverseCreator
         /// cutting it off with a hard edge. Called on the worker thread, so it
         /// must not touch the Unity API.
         /// </param>
+        /// <param name="report">Optional worker callback, called once after a successful sampling pass with immutable work/rejection counts.</param>
         /// <param name="isCancelled">
-        /// Optional cancellation probe, checked once per grid row. Returning true
-        /// stops the solve and returns whatever was accepted so far.
+        /// Optional cancellation probe, checked once per grid row and again every
+        /// 4096 cells within a row. Returning true stops the solve and returns
+        /// whatever was accepted so far.
         /// </param>
+        /// <returns>Accepted candidates in deterministic order; the stable mode returns an empty list on cancellation.</returns>
+        /// <exception cref="ArgumentException">Stable mode receives nonfinite or nonpositive world dimensions/spacing, or nonfinite jitter.</exception>
+        /// <exception cref="InvalidOperationException">Stable mode exceeds its fixed 262144-cell work limit, signed world-cell range or float-coordinate precision envelope.</exception>
         public static List<ScatterCandidate> Solve(
             PoissonSettings settings,
             float worldMinX, float worldMinZ,
             float worldWidth, float worldDepth,
             Func<float, float, float> accept,
-            Func<bool> isCancelled = null)
+            Func<bool> isCancelled = null, Action<PoissonSamplingReport> report = null)
         {
+            if (settings.stableWorldGrid)
+                return SolveStable(settings, worldMinX, worldMinZ, worldWidth, worldDepth, accept, isCancelled, report); // UC-T06-05: preserve the old path for saved graphs.
             List<ScatterCandidate> results = new List<ScatterCandidate>();
 
             float spacing = Mathf.Max(0.01f, settings.minSpacing);
@@ -146,6 +158,31 @@ namespace UniverseCreator
             // from its side neighbour, so rejection still has to run - but the
             // count of tests per candidate stays at a handful.
             float cellSize = spacing;
+
+            // Runaway guard (P-HANG root cause). The grid iterates one cell at a
+            // time and each cell can contribute at most one accepted point, while
+            // the whole solve accepts at most maxPoints. So a grid finer than what
+            // maxPoints points could ever fill is pure wasted iteration: at the
+            // 0.01 m spacing floor a 256 m tile is ~6.5e8 cells, and when the
+            // accept predicate rejects nearly all of them - a species pinned to a
+            // narrow height or slope band - the loop scans every one of those cells
+            // to accept a handful, which is the "stuck on chunk 1 at 0 %" hang.
+            //
+            // Bound the cell to the finest USEFUL size, sqrt(tileArea / maxPoints),
+            // so the grid never holds materially more than maxPoints cells. This is
+            // a no-op at every realistic density (spacing is already coarser than
+            // this floor until roughly 1.8 M instances per km^2), so normal scatter
+            // results are byte-identical. It bites only in the pathological regime
+            // that used to hang, and even there the total is still capped at
+            // maxPoints, unchanged - only the wasted empty-cell scan is removed.
+            //
+            // tileArea and maxPoints are identical for every chunk of a species, so
+            // cellSize is identical across a seam and the absolute-world cell grid
+            // (Floor(worldMinX / cellSize)) stays aligned. Spacing rejection below
+            // keeps using the true `spacing`, so the requested minimum distance is
+            // never loosened by this clamp.
+            float usefulCell = Mathf.Sqrt((worldWidth * worldDepth) / maxPoints);
+            if (usefulCell > cellSize) cellSize = usefulCell;
 
             // Integer cell coordinates in ABSOLUTE world space. Deriving them
             // from the world origin rather than the tile origin is what makes a
@@ -178,6 +215,15 @@ namespace UniverseCreator
             float worldMaxX = worldMinX + worldWidth;
             float worldMaxZ = worldMinZ + worldDepth;
 
+            // Scanned-cell counter drives an in-row cancellation probe. The
+            // per-row check below is already responsive once the runaway guard
+            // has bounded a row to ~sqrt(maxPoints) cells, but a very large
+            // maxPoints can still make a single row long, so also probe every
+            // 4096 cells. The mask is cheap and the probe itself is only called
+            // when a delegate was supplied.
+            long cellsScanned = 0;
+            int attempted = 0, spacingRejected = 0, densityRejected = 0, invalidDensity = 0; // UC-T06-05: no per-point diagnostic allocation.
+
             for (int cz = cellMinZ; cz <= cellMaxZ; cz++)
             {
                 if (isCancelled != null && isCancelled()) return results;
@@ -186,6 +232,8 @@ namespace UniverseCreator
                 for (int cx = cellMinX; cx <= cellMaxX; cx++)
                 {
                     if (results.Count >= maxPoints) break;
+                    if ((++cellsScanned & 4095L) == 0L &&
+                        isCancelled != null && isCancelled()) return results;
 
                     for (int a = 0; a < attempts; a++)
                     {
@@ -206,10 +254,10 @@ namespace UniverseCreator
 
                         // Spacing is enforced over the margin ring too, so this
                         // runs before the footprint test rather than after.
-                        if (index.HasNeighbourWithin(px, pz, spacing)) continue;
-
                         bool inside = px >= worldMinX && px < worldMaxX &&
                                       pz >= worldMinZ && pz < worldMaxZ;
+                        if (inside) attempted++;
+                        if (index.HasNeighbourWithin(px, pz, spacing)) { if (inside) spacingRejected++; continue; }
 
                         // Margin points are indexed but never evaluated or
                         // emitted: the accept predicate samples this tile's
@@ -221,12 +269,13 @@ namespace UniverseCreator
                         }
 
                         float weight = accept != null ? accept(px, pz) : 1f;
-                        if (weight <= 0f) continue;
+                        if (!Finite(weight)) { invalidDensity++; continue; } // UC-T06-05: invalid masks cannot bypass probability checks.
+                        if (weight <= 0f) { densityRejected++; continue; }
 
                         // Fractional weight thins probabilistically. Using the
                         // same deterministic hash rather than a live RNG keeps
                         // the result stable across regenerations.
-                        if (weight < 1f && rv > weight) continue;
+                        if (weight < 1f && rv > weight) { densityRejected++; continue; }
 
                         index.Insert(px, pz);
 
@@ -246,8 +295,134 @@ namespace UniverseCreator
                 }
             }
 
+            report?.Invoke(new PoissonSamplingReport(false, cellsScanned, attempted, spacingRejected, densityRejected, invalidDensity, 0, results.Count));
             return results;
         }
+
+        // UC-T06-05: every cell competes against the same finite neighbourhood, including cells outside the demand rectangle.
+        // A rival veto is independent of its own admission and of masks/budgets: two close points cannot both beat each other.
+        // This is a sparse, non-maximal distribution. Geometry/quality are measured separately; it is not a promise of authored stem density.
+        private static List<ScatterCandidate> SolveStable(PoissonSettings settings, float minX, float minZ,
+            float width, float depth, Func<float, float, float> accept, Func<bool> cancelled, Action<PoissonSamplingReport> report)
+        {
+            if (!Finite(minX) || !Finite(minZ) || !Finite(width) || !Finite(depth) || width <= 0 || depth <= 0 ||
+                !Finite(settings.minSpacing) || settings.minSpacing <= 0 || !Finite(settings.jitter))
+                throw new ArgumentException("Stable scatter requires finite world bounds, positive dimensions/spacing and finite jitter.");
+            float spacing = Mathf.Max(0.01f, settings.minSpacing), jitter = Mathf.Clamp01(settings.jitter);
+            double maxX = (double)minX + width, maxZ = (double)minZ + depth;
+            double firstX = Math.Floor((double)minX / spacing), firstZ = Math.Floor((double)minZ / spacing);
+            double lastX = Math.Floor(maxX / spacing), lastZ = Math.Floor(maxZ / spacing);
+            const int workLimit = 262144;
+            // UC-T06-05: float positions must resolve sub-cell offsets. Beyond 2^21 cells,
+            // rounding can collapse distant cells and invalidate the finite spacing halo.
+            const double precisionCells = 2097152;
+            if (Math.Max(Math.Max(Math.Abs(firstX), Math.Abs(firstZ)), Math.Max(Math.Abs(lastX), Math.Abs(lastZ))) > precisionCells)
+                throw new InvalidOperationException("Stable scatter exceeds float world-position precision for this spacing. Rebase the world or increase authored spacing; no candidates were emitted.");
+            if (firstX < int.MinValue + 2 || firstZ < int.MinValue + 2 || lastX > int.MaxValue - 2 || lastZ > int.MaxValue - 2 ||
+                (lastX - firstX + 1) * (lastZ - firstZ + 1) > workLimit)
+                throw new InvalidOperationException("Stable scatter exceeds its 262144-cell work limit or world-coordinate range. Increase authored spacing or request a smaller region; the candidate lattice was preserved.");
+            int cap = settings.maxPoints > 0 ? Math.Min(settings.maxPoints, workLimit) : 100000;
+            var kept = new List<ScatterCandidate>(Math.Min(cap, 1024));
+            double spacing2 = (double)spacing * spacing;
+            int firstCellX = (int)firstX, firstCellZ = (int)firstZ, lastCellX = (int)lastX, lastCellZ = (int)lastZ;
+            long cellsVisited = 0;
+            int attempted = 0, spacingRejected = 0, densityRejected = 0, invalidDensity = 0, accepted = 0;
+            for (int z = firstCellZ; z <= lastCellZ; z++)
+            {
+                if (cancelled != null && cancelled()) return new List<ScatterCandidate>();
+                for (int x = firstCellX; x <= lastCellX; x++)
+                {
+                    if (((x - firstCellX) & 255) == 0 && cancelled != null && cancelled()) return new List<ScatterCandidate>();
+                    cellsVisited++;
+                    ScatterCandidate candidate = StableCandidate(settings.seed, x, z, spacing, jitter);
+                    if (candidate.worldX < minX || candidate.worldX >= maxX || candidate.worldZ < minZ || candidate.worldZ >= maxZ) continue;
+                    attempted++;
+                    uint priority = CellHash(settings.seed, x, z, 3);
+                    bool admitted = true;
+                    for (int dz = -2; dz <= 2 && admitted; dz++)
+                        for (int dx = -2; dx <= 2; dx++)
+                        {
+                            if (dx == 0 && dz == 0) continue;
+                            uint rivalPriority = CellHash(settings.seed, x + dx, z + dz, 3);
+                            if (rivalPriority > priority || (rivalPriority == priority && (dz > 0 || dz == 0 && dx > 0))) continue;
+                            ScatterCandidate rival = StableCandidate(settings.seed, x + dx, z + dz, spacing, jitter);
+                            double separationX = (double)candidate.worldX - rival.worldX, separationZ = (double)candidate.worldZ - rival.worldZ;
+                            if (separationX * separationX + separationZ * separationZ < spacing2) { admitted = false; break; }
+                        }
+                    if (!admitted) { spacingRejected++; continue; }
+                    float weight = accept != null ? accept(candidate.worldX, candidate.worldZ) : 1;
+                    if (!Finite(weight)) { invalidDensity++; continue; }
+                    if (weight <= 0 || candidate.random >= Mathf.Clamp01(weight)) { densityRejected++; continue; }
+                    candidate.maskValue = Mathf.Clamp01(weight);
+                    accepted++;
+                    KeepRanked(kept, candidate, cap);
+                }
+            }
+            kept.Sort((a, b) => a.worldZ != b.worldZ ? a.worldZ.CompareTo(b.worldZ) : a.worldX.CompareTo(b.worldX));
+            report?.Invoke(new PoissonSamplingReport(true, cellsVisited, attempted, spacingRejected, densityRejected, invalidDensity, accepted - kept.Count, kept.Count));
+            return kept;
+        }
+
+        private static ScatterCandidate StableCandidate(int seed, int x, int z, float cellSize, float jitter)
+        {
+            return new ScatterCandidate {
+                worldX = (float)((x + 0.5 + (CellUnit(seed, x, z, 1) - 0.5) * jitter) * cellSize),
+                worldZ = (float)((z + 0.5 + (CellUnit(seed, x, z, 2) - 0.5) * jitter) * cellSize),
+                random = CellUnit(seed, x, z, 4)
+            };
+        }
+
+        private static float CellUnit(int seed, int x, int z, uint stream) => (CellHash(seed, x, z, stream) >> 8) * (1f / 16777216f);
+
+        // Pure integer avalanche; full world coordinates participate rather than a repeating noise-table address.
+        private static uint CellHash(int seed, int x, int z, uint stream)
+        {
+            unchecked
+            {
+                uint value = (uint)x * 0x8da6b343U ^ (uint)z * 0xd8163841U ^ (uint)seed ^ stream * 0x9e3779b9U;
+                value ^= value >> 16; value *= 0x7feb352dU;
+                value ^= value >> 15; value *= 0x846ca68bU;
+                return value ^ (value >> 16);
+            }
+        }
+
+        // A bounded max heap keeps the best cap entries without retaining the entire candidate field.
+        private static void KeepRanked(List<ScatterCandidate> heap, ScatterCandidate candidate, int cap)
+        {
+            if (heap.Count < cap)
+            {
+                int index = heap.Count; heap.Add(candidate);
+                while (index > 0)
+                {
+                    int parent = (index - 1) / 2;
+                    if (CompareRank(heap[parent], candidate) >= 0) break;
+                    heap[index] = heap[parent]; index = parent;
+                }
+                heap[index] = candidate;
+            }
+            else if (CompareRank(candidate, heap[0]) < 0)
+            {
+                int index = 0;
+                while (index * 2 + 1 < heap.Count)
+                {
+                    int child = index * 2 + 1;
+                    if (child + 1 < heap.Count && CompareRank(heap[child + 1], heap[child]) > 0) child++;
+                    if (CompareRank(candidate, heap[child]) >= 0) break;
+                    heap[index] = heap[child]; index = child;
+                }
+                heap[index] = candidate;
+            }
+        }
+
+        private static int CompareRank(ScatterCandidate a, ScatterCandidate b)
+        {
+            int rank = a.random.CompareTo(b.random);
+            if (rank != 0) return rank;
+            rank = a.worldZ.CompareTo(b.worldZ);
+            return rank != 0 ? rank : a.worldX.CompareTo(b.worldX);
+        }
+
+        private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
 
         /// <summary>
         /// Converts a density in instances per square kilometre into the minimum
@@ -280,17 +455,38 @@ namespace UniverseCreator
         /// <param name="clusterRadius">Neighbourhood radius, world metres.</param>
         /// <param name="strength">
         /// 0 returns the input unchanged; 1 keeps only points whose local density
-        /// is at or above the set average.
+        /// is at or above the set average. Stable world-field mode instead thins by a world-space clump field.
         /// </param>
+        /// <param name="isCancelled">Optional worker cancellation probe.</param>
+        /// <param name="worldSeed">World/node seed for stable world-field mode; ignored by the legacy neighbourhood mode.</param>
+        /// <param name="stableWorldField">Use an absolute world clump field independent of region bounds and candidate caps.</param>
+        /// <returns>Thinned candidates without moving points; null/empty input and disabled bias retain the input.</returns>
+        /// <exception cref="ArgumentException">Stable mode receives a nonfinite radius/strength.</exception>
         public static List<ScatterCandidate> ApplyClusterBias(
             List<ScatterCandidate> candidates, float clusterRadius, float strength,
-            Func<bool> isCancelled = null)
+            Func<bool> isCancelled = null, int worldSeed = 0, bool stableWorldField = false)
         {
             if (candidates == null || candidates.Count == 0) return candidates;
+            if (stableWorldField && (!Finite(clusterRadius) || !Finite(strength)))
+                throw new ArgumentException("Stable cluster bias requires a finite world-metre radius and strength.");
 
             float t = Mathf.Clamp01(strength);
             if (t <= 0.001f) return candidates;
             if (clusterRadius <= 0f) return candidates;
+            if (stableWorldField)
+            {
+                // UC-T06-05: reuse the same world-noise clustering model as shrub clumping; no tile-average feedback or spatial index is needed.
+                var noise = new Noise(unchecked(worldSeed + 7717));
+                var stable = new List<ScatterCandidate>();
+                float scale = 1f / Mathf.Max(0.01f, clusterRadius);
+                foreach (var candidate in candidates)
+                {
+                    if (isCancelled != null && isCancelled()) return new List<ScatterCandidate>();
+                    float clump = Mathf.Clamp01(noise.Perlin(candidate.worldX * scale, candidate.worldZ * scale) * 0.5f + 0.5f);
+                    if (candidate.random < Mathf.Lerp(1, clump, t)) stable.Add(candidate);
+                }
+                return stable;
+            }
 
             // Index bounds come from the candidates themselves; a scatter set is
             // often a small island inside a much larger tile, and sizing the grid

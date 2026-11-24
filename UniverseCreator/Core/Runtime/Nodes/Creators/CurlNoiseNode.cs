@@ -26,7 +26,7 @@ namespace UniverseCreator.Nodes.Creators
         protected override NoiseType BasisType { get { return NoiseType.Perlin; } }
 
         /// <summary>
-        /// Sampling gap for the central difference, in noise-space units. Too
+        /// UC-T03-03: sampling gap for the central difference, in world metres. Too
         /// small and the difference is lost to float precision; too large and the
         /// curl is measured across features rather than along them.
         /// </summary>
@@ -59,7 +59,8 @@ namespace UniverseCreator.Nodes.Creators
                     float wx = originX + x * mppX;
 
                     float cx, cz;
-                    noise.Curl2D(wx, wz, safeSize, out cx, out cz, safeEpsilon, iterations);
+                    // UC-T03-03: the shared fractal potential consumes the inherited detail/turbulence controls.
+                    noise.Curl2D(wx, wz, safeSize, out cx, out cz, safeEpsilon, iterations, detail, turbulence);
 
                     // Magnitude, then a soft compress. The raw curl of a fractal
                     // potential has a long tail, so normalising by a fixed divisor

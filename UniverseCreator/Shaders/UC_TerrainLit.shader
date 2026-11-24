@@ -79,6 +79,16 @@ Shader "UniverseCreator/TerrainLit"
         [HideInInspector] [PerRendererData] _NumLayersCount ("Total Layer Count", Float) = 1.0
 
         // ---- UC control surface. The texture graph writes these. ----
+        // UC-T07-06: reusable layer appearance; clipping adds no keyword variants or extra texture resources.
+        _UC_LayerOpacity ("Layer opacity (RGBA)", Vector) = (1,1,1,1)
+        _UC_LayerAlphaOpacity ("Albedo alpha used as opacity", Vector) = (0,0,0,0)
+        _UC_LayerOcclusion ("Layer occlusion (RGBA)", Vector) = (1,1,1,1)
+        [HDR] _UC_LayerEmission0 ("Layer 0 emission", Color) = (0,0,0,1)
+        [HDR] _UC_LayerEmission1 ("Layer 1 emission", Color) = (0,0,0,1)
+        [HDR] _UC_LayerEmission2 ("Layer 2 emission", Color) = (0,0,0,1)
+        [HDR] _UC_LayerEmission3 ("Layer 3 emission", Color) = (0,0,0,1)
+        [Toggle] _UC_EnableSurfaceClip ("Clip surface opacity", Float) = 0
+        _UC_SurfaceCutoff ("Surface opacity cutoff", Range(0,1)) = 0.5
         //
         // Almost every _Enable* below is a plain float the fragment shader
         // branches on rather than a shader keyword. The reasoning is recorded in
@@ -115,6 +125,23 @@ Shader "UniverseCreator/TerrainLit"
         _SlopeMetallic      ("Slope Metallic", Range(0.0, 1.0)) = 0.0
         _SlopeNormalStrength("Slope Normal Strength", Range(0.0, 4.0)) = 1.0
         _SlopeTriplanarScale("Slope Triplanar Scale (m)", Float) = 6.0
+        // UC-T07-11: runtime sampling changes preserve authored geographic coverage and physical scale.
+        _UCTriplanarSharpness("World Projection Sharpness", Range(1.0, 8.0)) = 4.0
+        [HideInInspector] _UCTextureQuality("Adaptive Texture Sampling", Float) = 0.0
+        _CliffRockAltitude     ("Cliff Rock Altitude (m)", Float) = 60.0
+        _CliffRockAltitudeRange("Cliff Rock Altitude Range (m)", Float) = 80.0
+        _CliffLowAltGrass      ("Cliff Low-Alt Grass Fraction", Range(0.0, 1.0)) = 0.4
+
+        [Header(Beach and Shoreline)]
+        [ToggleUI] _EnableBeach ("Beach Band", Float) = 0.0
+        _BeachTex ("Beach Sand Albedo", 2D) = "white" {}
+        _BeachColor ("Beach Tint", Color) = (1,1,1,1)
+        _SeaLevel ("Sea Level (m)", Float) = 0.0
+        _BeachHeight ("Beach Berm Height (m)", Float) = 4.0
+        _BeachFalloff ("Beach Top Falloff (m)", Float) = 2.0
+        _BeachSlopeLimit ("Beach Slope Limit (deg)", Range(0.0, 90.0)) = 20.0
+        _BeachSmoothness ("Beach Smoothness", Range(0.0, 1.0)) = 0.4
+        _BeachScale ("Beach Scale (m)", Float) = 4.0
 
         [Header(Snow)]
         [ToggleUI] _EnableSnow ("Snow Cover", Float) = 0.0
@@ -128,6 +155,7 @@ Shader "UniverseCreator/TerrainLit"
         _SnowCoverage       ("Snow Coverage", Range(0.0, 1.0)) = 1.0
         _SnowSmoothness     ("Snow Smoothness", Range(0.0, 1.0)) = 0.55
         _SnowNormalStrength ("Snow Normal Strength", Range(0.0, 4.0)) = 0.6
+        _SnowOcclusion      ("Snow Keeps Ground AO", Range(0.0, 1.0)) = 0.0
         _SnowTriplanarScale ("Snow Triplanar Scale (m)", Float) = 8.0
 
         [Header(Wetness)]
@@ -185,6 +213,13 @@ Shader "UniverseCreator/TerrainLit"
         [ToggleUI] _EnableDistanceFade ("Distance Fade", Float) = 0.0
         _DistanceFadeStart  ("Fade Start (m)", Float) = 180.0
         _DistanceFadeEnd    ("Fade End (m)", Float) = 900.0
+        _DistanceRoughen    ("Distance Roughening", Range(0.0, 1.0)) = 0.0
+
+        [Header(Tiling Breakup)]
+        [ToggleUI] _EnableTileBreakup ("Tiling Breakup", Float) = 0.0
+        _TileBreakupScale    ("Breakup Wavelength (m)", Float) = 35.0
+        _TileBreakupStrength ("Breakup Strength", Range(0.0, 1.0)) = 0.35
+        _TileBreakupDistance ("Breakup Start (m)", Float) = 25.0
 
         [Header(Colour Grade)]
         _Saturation         ("Saturation", Range(0.0, 2.0)) = 1.0
@@ -196,7 +231,18 @@ Shader "UniverseCreator/TerrainLit"
     }
 
     HLSLINCLUDE
-    #pragma multi_compile_fragment __ _ALPHATEST_ON
+    // Terrain hole clipping, declared ONCE for every pass in this shader.
+    //
+    // It was previously declared twice: globally here as multi_compile_fragment
+    // and again inside the forward pass as multi_compile_local_fragment. Unity
+    // refuses a keyword that is both global and local in one shader, which is
+    // what made this file fail to compile.
+    //
+    // shader_feature rather than multi_compile is deliberate: it lets the build
+    // drop the hole-clipping variant entirely when no terrain in the project has
+    // painted holes, instead of always shipping both. That is a smaller shader
+    // and less GPU memory on a mid-range phone, for no loss of function.
+    #pragma shader_feature_local_fragment _ALPHATEST_ON
     ENDHLSL
 
     SubShader
@@ -262,24 +308,80 @@ Shader "UniverseCreator/TerrainLit"
             #pragma multi_compile_fragment _ _WRITE_RENDERING_LAYERS
 
             // ---- terrain ----
-            #pragma multi_compile_local_fragment __ _ALPHATEST_ON
             #pragma multi_compile_fragment __ _TERRAIN_INSTANCED_PERPIXEL_NORMAL
             #pragma multi_compile_instancing
             #pragma instancing_options assumeuniformscaling nomatrices nolightprobe nolightmap
 
-            // ---- UC features. multi_compile_local keeps these out of the
-            //      global keyword budget, which is a hard 256 per project.
+            // ---- UC features. _local keeps these out of the global keyword
+            //      budget, which is a hard 256 per project.
             //
-            //      Only two. Each of these costs six extra texture fetches,
-            //      which a uniform branch cannot avoid paying for in register
-            //      pressure even when the branch is not taken. Height blend,
-            //      macro variation, distance fade, detail, gradient, mud,
-            //      wetness, AO and emission are all uniform branches instead:
-            //      arithmetic-only or a single fetch, and each keyword added
-            //      here would double the variant count for the whole shader. ----
-            #pragma multi_compile_local_fragment __ _UC_SLOPEBLEND_ON
-            #pragma multi_compile_local_fragment __ _UC_SNOW_ON
+            //      These were previously two multi_compile keywords (slope, snow)
+            //      plus seven uniform branches, on the reasoning that a keyword
+            //      "would double the variant count for the whole shader" and that
+            //      a one-fetch feature is not worth one. That reasoning was sound
+            //      but incomplete: a uniform branch still BINDS its texture, so
+            //      the five optional maps below counted against the per-pass
+            //      texture-unit limit even when switched off. The shader reported
+            //      "19 texture parameters, more than the 16 supported", which on a
+            //      device that really exposes 16 fragment units is a hard failure,
+            //      not a slow path. Gating them takes this pass to 14.
+            //
+            //      shader_feature, not multi_compile, is what makes that free:
+            //      multi_compile ships every combination (7 keywords = 128
+            //      variants), while shader_feature ships only the combinations
+            //      actually present on material assets at build time - normally a
+            //      handful. So the variant-doubling objection does not apply, and
+            //      it is also why slope and snow moved onto it: one mechanism for
+            //      one job, matching the _ALPHATEST_ON policy documented above.
+            //
+            //      This is safe here only because UC terrain materials are real
+            //      saved assets - UCTextureGraphApplier calls AssetDatabase
+            //      .CreateAsset and then UCTerrainShaderGUI.SyncAllKeywords, so
+            //      the enabled keywords are serialised into the .mat for Unity's
+            //      build-time scan to find. No runtime code enables these. A
+            //      material built at run time with one of these features on would
+            //      need its variant kept alive by a ShaderVariantCollection. ----
+            #pragma shader_feature_local_fragment __ _UC_SLOPEBLEND_ON
+            #pragma shader_feature_local_fragment __ _UC_SNOW_ON
+            #pragma shader_feature_local_fragment __ _UC_GRADIENT_ON
+            #pragma shader_feature_local_fragment __ _UC_MUD_ON
+            #pragma shader_feature_local_fragment __ _UC_DETAIL_ON
+            #pragma shader_feature_local_fragment __ _UC_BEACH_ON
+            #pragma shader_feature_local_fragment __ _UC_AOMAP_ON
+            #pragma shader_feature_local_fragment __ _UC_EMISSION_ON
 
+            #include "UC_TerrainLitInput.hlsl"
+            #include "UC_TerrainLitPasses.hlsl"
+            ENDHLSL
+        }
+
+        // -------------------------------------------------------------------
+        //  UC midday repair: material-owned SSR mask shares terrain surface maths without lighting.
+        // -------------------------------------------------------------------
+        Pass
+        {
+            Name "UCReflectionMask"
+            Tags { "LightMode" = "UCReflectionMask" }
+            ZWrite Off
+            ZTest Equal
+            HLSLPROGRAM
+            #pragma target 3.0
+            #pragma vertex UCTerrainVert
+            #pragma fragment UCTerrainFrag
+            #define UC_REFLECTION_MASK 1
+            #define _METALLICSPECGLOSSMAP 1
+            #define _SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A 1
+            #pragma multi_compile_fragment __ _TERRAIN_INSTANCED_PERPIXEL_NORMAL
+            #pragma multi_compile_instancing
+            #pragma instancing_options assumeuniformscaling nomatrices nolightprobe nolightmap
+            #pragma shader_feature_local_fragment __ _UC_SLOPEBLEND_ON
+            #pragma shader_feature_local_fragment __ _UC_SNOW_ON
+            #pragma shader_feature_local_fragment __ _UC_GRADIENT_ON
+            #pragma shader_feature_local_fragment __ _UC_MUD_ON
+            #pragma shader_feature_local_fragment __ _UC_DETAIL_ON
+            #pragma shader_feature_local_fragment __ _UC_BEACH_ON
+            #pragma shader_feature_local_fragment __ _UC_AOMAP_ON
+            // UC midday repair: _ALPHATEST_ON is already declared once in the shared HLSLINCLUDE.
             #include "UC_TerrainLitInput.hlsl"
             #include "UC_TerrainLitPasses.hlsl"
             ENDHLSL

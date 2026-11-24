@@ -45,6 +45,7 @@ CBUFFER_START(UnityPerMaterial)
     float4 _FlowSpeed;
     float  _SecondaryScale;
     float  _Refraction;
+    float  _WaterScreenSpaceEffects; // UC-T04-08: capped by quality without mutating authored materials.
     float  _UseVertexFlow;
     float  _FlowStrength;
 
@@ -55,6 +56,17 @@ CBUFFER_START(UnityPerMaterial)
     float  _FoamScrollSpeed;
     float  _FoamTileMetres;
     float  _FlowFoam;
+
+    // RIV-4 W1. Every one of these MUST be in UnityPerMaterial: a material float
+    // declared in Properties but missing from this buffer silently drops the object
+    // out of SRP batching instead of erroring, which is a performance bug nobody
+    // sees until they profile.
+    float  _ShoreWashEnabled;
+    float  _ShoreWashPeriod;
+    float  _ShoreWashReach;
+    float  _ShoreWashSharpness;
+    float  _ShoreWashStrength;
+    float  _ShoreWashTravel;
 
     float  _CausticsEnabled;
     float4 _CausticsColor;
@@ -67,6 +79,14 @@ CBUFFER_START(UnityPerMaterial)
     float  _WaveLength;
     float  _WaveSpeed;
 
+    // Spectral richness and weather, all scalar so the SRP-batched block stays
+    // array-free (see the header): _WaveOctaves fades wave trains in and out for a
+    // lake-vs-ocean look, _WaveStormAmp is the weather layer's swell multiplier, and
+    // _WaveFlowAdvect drifts the whole swell downstream on a river.
+    float  _WaveOctaves;
+    float  _WaveStormAmp;
+    float  _WaveFlowAdvect;
+
     float  _EdgeSoftenMetres;
 
     float  _RippleStrength;
@@ -75,6 +95,8 @@ CBUFFER_START(UnityPerMaterial)
     float  _WindRipple;
     float  _WindChopLength;
     float  _WindFoam;
+
+    float  _UCIce;
 CBUFFER_END
 
 TEXTURE2D(_WaveNormalMap);      SAMPLER(sampler_WaveNormalMap);
@@ -241,49 +263,146 @@ float2 UCWindChopSlope(float2 worldXZ, float t, float strength)
 //  Vertex displacement
 // -----------------------------------------------------------------------------
 
-// Gerstner-style displacement, trimmed to the vertical term. The full form moves
-// vertices horizontally as well, which pinches the mesh at the shoreline where
-// the water surface is already clipped against the ground - the horizontal push
-// is what makes a lake edge visibly crawl in and out of the bank.
+// This is the VERTICAL term of the Gerstner wave. The horizontal companion lives in
+// UCAmbientWaveHorizontal below: it used to be omitted entirely because, unfaded, the
+// sideways push crawls a clipped shoreline in and out of its bank - that companion now
+// adds it back with a hard per-vertex water-weight fade so the shore stays put while
+// open water gets the crest-sharpening. This vertical term is the one mirrored in C#
+// (UCWaterSurface.WaveOffset) for buoyancy; keep the two in lock-step.
 //
-// Three octaves at incommensurate directions. Two beat visibly at their sum
-// frequency; three do not resolve inside the distance the camera can see.
+// Up to four octaves at incommensurate directions. Two beat visibly at their sum
+// frequency; three do not resolve inside the distance the camera can see; the
+// fourth broadens an open ocean's spectrum. How many are ACTIVE is set per body
+// by _WaveOctaves (1..4): a pond runs one train, a lake two, an open ocean four,
+// and the count fades an octave in fractionally so switching tier blends rather
+// than pops. An octave whose gate is zero costs its sine and nothing else - there
+// is no shader variant and no array, so the SRP-batched CBUFFER is untouched.
+//
+// _WaveStormAmp is the weather layer's storm multiplier: 1 on a calm day (the
+// surface is then exactly what _WaveHeight authored), rising into a gale. It scales
+// the swell as a whole rather than any one octave, because a storm raises the sea,
+// it does not retune it.
 //
 // The amplitude is scaled by the vertex's own water weight (vertex alpha), so a
 // river ribbon one metre from its bank is not lifted clear of the ground it is
 // supposed to be sitting in.
 // MIRRORED IN C# by UCWaterSurface.WaveOffset, which is what buoyancy samples.
-// Same octaves, same directions, same weights, same frequency ratios. Change one
-// and you must change the other, or a boat floats above the crest it is supposed
-// to be sitting on and the bug is invisible in a still frame.
+// Same octaves, same directions, same weights, same frequency ratios, same octave
+// gate and same storm scale. Change one and you must change the other, or a boat
+// floats above the crest it is supposed to be sitting on and the bug is invisible
+// in a still frame.
 float UCAmbientWaveOffset(float2 worldXZ, float t, float weight)
 {
     if (_WaveHeight <= 0.0001) return 0.0;
 
     float k = 6.28318530718 / max(0.5, _WaveLength);
 
+    // Fractional octave gates. Octave i is fully on once the count passes i+1 and
+    // fades in over the count before it, so _WaveOctaves = 1.5 is one full train and
+    // half of a second - a continuous dial, not four discrete steps that click.
+    float o0 = saturate(_WaveOctaves);
+    float o1 = saturate(_WaveOctaves - 1.0);
+    float o2 = saturate(_WaveOctaves - 2.0);
+    float o3 = saturate(_WaveOctaves - 3.0);
+
     float a = sin((worldXZ.x *  0.86 + worldXZ.y *  0.51) * k        + t * _WaveSpeed);
     float b = sin((worldXZ.x * -0.39 + worldXZ.y *  0.92) * k * 1.71 + t * _WaveSpeed * 1.43);
     float c = sin((worldXZ.x *  0.62 + worldXZ.y * -0.78) * k * 2.63 + t * _WaveSpeed * 0.79);
+    float d = sin((worldXZ.x * -0.81 + worldXZ.y * -0.34) * k * 3.55 + t * _WaveSpeed * 1.17);
 
-    return (a * 0.55 + b * 0.30 + c * 0.15) * _WaveHeight * weight;
+    float h = a * 0.55 * o0 + b * 0.30 * o1 + c * 0.15 * o2 + d * 0.07 * o3;
+
+    return h * _WaveHeight * _WaveStormAmp * weight;
+}
+
+// Horizontal (Gerstner) companion to UCAmbientWaveOffset. The vertical term above moves
+// a vertex up and down; the full Gerstner wave ALSO pulls it along the surface, AGAINST
+// the propagation direction by Q*A*cos(phase), which is what bunches crests sharp and
+// hollows troughs wide - the single thing that separates a believable swell from a field
+// of rolling sine humps.
+//
+// WHY THIS IS BACK (noted supersession of the "trimmed to vertical" decision above):
+// the horizontal term was dropped because, UNFADED, it drags the mesh sideways at the
+// shoreline where the surface is already clipped against the ground, so a lake edge
+// crawls in and out of its bank. The fix is not to omit it but to fade it HARD by the
+// vertex's own water weight: `weight*weight` means the clipped shore (weight -> 0) gets
+// essentially no horizontal push while open water (weight = 1) gets the full effect.
+// That removes the original failure mode rather than the whole feature.
+//
+// Shader-only on purpose. UCWaterSurface.WaveOffset (buoyancy) stays vertical-only for
+// the reason stated in its header: a floating hull integrates horizontal orbital motion
+// away to nothing, so mirroring it would cost a per-frame CPU solve to move a boat by
+// less than its own skin. Heights still agree at the authored sample position; only
+// where that height is drawn shifts, by centimetres.
+//
+// Octave directions, phases and gates are IDENTICAL to UCAmbientWaveOffset so the two
+// belong to the same wave - a horizontal pattern taken from different phases would smear
+// the crests sideways off the humps the vertical term built.
+float2 UCAmbientWaveHorizontal(float2 worldXZ, float t, float weight)
+{
+    if (_WaveHeight <= 0.0001) return float2(0.0, 0.0);
+
+    float k = 6.28318530718 / max(0.5, _WaveLength);
+
+    float o0 = saturate(_WaveOctaves);
+    float o1 = saturate(_WaveOctaves - 1.0);
+    float o2 = saturate(_WaveOctaves - 2.0);
+    float o3 = saturate(_WaveOctaves - 3.0);
+
+    float pa = (worldXZ.x *  0.86 + worldXZ.y *  0.51) * k        + t * _WaveSpeed;
+    float pb = (worldXZ.x * -0.39 + worldXZ.y *  0.92) * k * 1.71 + t * _WaveSpeed * 1.43;
+    float pc = (worldXZ.x *  0.62 + worldXZ.y * -0.78) * k * 2.63 + t * _WaveSpeed * 0.79;
+    float pd = (worldXZ.x * -0.81 + worldXZ.y * -0.34) * k * 3.55 + t * _WaveSpeed * 1.17;
+
+    // Pull each octave back along its OWN propagation direction, weighted exactly as the
+    // vertical term weights that octave's amplitude.
+    float2 g =
+        float2( 0.86,  0.51) * (cos(pa) * 0.55 * o0) +
+        float2(-0.39,  0.92) * (cos(pb) * 0.30 * o1) +
+        float2( 0.62, -0.78) * (cos(pc) * 0.15 * o2) +
+        float2(-0.81, -0.34) * (cos(pd) * 0.07 * o3);
+
+    float storm = _WaveStormAmp > 0.0 ? _WaveStormAmp : 1.0;
+
+    // UC-T04-09: an excursion clamp alone does not bound a summed wave's Jacobian.
+    // Bound the sum of each frequency/amplitude/direction outer-product norm.
+    // This is a constant-weight/flow bound; shore gradients still need mesh acceptance.
+    float spectral = 0.55 * o0 * dot(float2(0.86, 0.51), float2(0.86, 0.51))
+        + 0.30 * 1.71 * o1 * dot(float2(-0.39, 0.92), float2(-0.39, 0.92))
+        + 0.15 * 2.63 * o2 * dot(float2(0.62, -0.78), float2(0.62, -0.78))
+        + 0.07 * 3.55 * o3 * dot(float2(-0.81, -0.34), float2(-0.81, -0.34));
+    float amplitude = min(_WaveHeight * storm * 0.5, 0.35 / max(0.0001, k * spectral));
+    return -g * (amplitude * weight * weight);
 }
 
 // Ambient swell plus whatever the interactive simulation has going on at this
 // point. The two ADD rather than one replacing the other: a splash in a choppy
 // sea rides on the chop, it does not flatten it.
 //
-// Physics only mirrors the ambient term. The simulation's contribution is left
-// out of buoyancy on purpose - a ripple is centimetres of displacement over
-// centimetres of wavelength, far below what a floating body integrates over, and
-// reading it back from the GPU would cost a pipeline stall per frame to move an
-// object by less than its own skin depth.
-float UCWaveOffset(float2 worldXZ, float t, float weight)
+// `flow` is xy = surface direction (unit), z = speed in m/s - the same value the
+// fragment shades with. It drives the river-only swell advection below and nothing
+// on a lake or ocean, where _WaveFlowAdvect is 0.
+//
+// Physics only mirrors the ambient term. The simulation's contribution, the wind
+// chop, AND the flow advection are all left out of buoyancy on purpose - a ripple
+// or a chop is centimetres of displacement over centimetres of wavelength, far
+// below what a floating body integrates over, and the advection only slides the
+// same swell along the current by less than a hull's length per second. Reading any
+// of them back would cost a pipeline stall per frame to move an object by less than
+// its own skin depth. Ambient swell is what physics needs and physics has it.
+float UCWaveOffset(float2 worldXZ, float t, float3 flow, float weight)
 {
-    float h = UCAmbientWaveOffset(worldXZ, t, weight);
+    // River swell rides the current: advect the whole ambient pattern downstream so
+    // its crests travel with the water instead of standing still in the world. Gated
+    // by _WaveFlowAdvect, which is 0 on still water - so an ocean or a lake feeds the
+    // ambient term the raw world position and stays a line-for-line match for the C#
+    // buoyancy mirror. GPU-only, for the reason in this function's header.
+    float2 sampleXZ = worldXZ - flow.xy * flow.z * t * _WaveFlowAdvect;
+    float h = UCAmbientWaveOffset(sampleXZ, t, weight);
+    float micro = 0.0; // UC-T04-09: GPU-only interactive/wind height has an explicit 5 cm query error ceiling.
 
     if (_RippleStrength > 0.0001)
-        h += UCSampleRipple(worldXZ).z * _RippleStrength * weight;
+        micro += UCSampleRipple(worldXZ).z * _RippleStrength;
 
     // Wind chop rides on top of both, for the same reason the splash rides on the
     // swell: they are different physical processes happening to the same surface,
@@ -297,10 +416,34 @@ float UCWaveOffset(float2 worldXZ, float t, float weight)
     if (_WindRipple > 0.0001)
     {
         float strength = UCWindSurfaceStrength(float3(worldXZ.x, 0.0, worldXZ.y));
-        h += UCWindChopHeight(worldXZ, t, strength) * weight;
+        micro += UCWindChopHeight(worldXZ, t, strength);
     }
 
-    return h;
+    return h + clamp(micro, -0.05, 0.05) * weight;
+}
+
+// Horizontal displacement wrapper, sibling to UCWaveOffset. Uses the SAME flow-advected
+// sample position so, on a river, the horizontal push rides the current exactly as the
+// vertical swell does; on still water _WaveFlowAdvect is 0 and this is the raw world XZ.
+// Only the ambient Gerstner term is horizontal - ripples, wind chop and the river advect
+// contribute no net sideways pull worth a vertex's cost, same judgement as the mirror.
+float2 UCWaveHorizontal(float2 worldXZ, float t, float3 flow, float weight)
+{
+    float2 sampleXZ = worldXZ - flow.xy * flow.z * t * _WaveFlowAdvect;
+    return UCAmbientWaveHorizontal(sampleXZ, t, weight);
+}
+
+// UC-T04-09: forward/depth share ordering and physical local-depth limits.
+// Zero-depth/zero-weight boundaries retain their actual bank contact.
+float3 UCDisplacedWaterPosition(float3 positionWS, float t, float4 flow, float depth)
+{
+    float limit = max(0.0, depth) * 0.25;
+    float2 horizontal = UCWaveHorizontal(positionWS.xz, t, flow.xyz, flow.w);
+    float magnitude = length(horizontal);
+    if (magnitude > limit && magnitude > 0.0) horizontal *= limit / magnitude;
+    positionWS.y += clamp(UCWaveOffset(positionWS.xz, t, flow.xyz, flow.w), -limit, limit);
+    positionWS.xz += horizontal;
+    return positionWS;
 }
 
 // -----------------------------------------------------------------------------
@@ -322,7 +465,9 @@ half3 UCSampleWaves(float2 worldXZ, float t, float3 flow)
 
     float2 drift = flow.xy * flow.z * t;
 
-    float2 uv0 = (worldXZ + drift) / tile;
+    // UC-T04-08: a texture feature at a fixed UV moves downstream only when
+    // current advection is subtracted. Both detail scales travel with the river.
+    float2 uv0 = (worldXZ - drift) / tile;
     float2 uv1 = (worldXZ - drift * 0.63) / (tile * max(0.05, _SecondaryScale));
 
     half3 n0 = UnpackNormalScale(

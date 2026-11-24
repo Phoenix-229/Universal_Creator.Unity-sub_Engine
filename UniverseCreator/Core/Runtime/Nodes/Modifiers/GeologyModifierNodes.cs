@@ -418,7 +418,7 @@ namespace UniverseCreator.Nodes.Modifiers
     /// without touching the landform's large-scale shape.
     /// </summary>
     [System.Serializable]
-    public class SlopeRemapCurveNode : ModifierNode
+    public class SlopeRemapCurveNode : ModifierNode, IPreparedGraphInputHash
     {
         public override string NodeName { get { return "Slope Remap Curve"; } }
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
@@ -436,6 +436,10 @@ namespace UniverseCreator.Nodes.Modifiers
         // AnimationCurve.Evaluate is main-thread only, so it is baked to a LUT
         // before the worker starts.
         [System.NonSerialized] private float[] lut;
+
+        /// <summary>UC-T01-07: fingerprints the prepared slope remap rather than a live curve.</summary>
+        /// <returns>Deterministic fingerprint; call after main-thread preparation.</returns>
+        public ulong GetPreparedInputHash() { return PreparedRasterInputs.Hash(256, 1, lut); }
 
         public override void PrepareMainThread()
         {

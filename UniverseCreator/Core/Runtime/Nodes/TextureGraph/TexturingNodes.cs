@@ -56,7 +56,7 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Name shown on the generated TerrainLayer asset.")]
         public string layerName = "Layer";
 
-        [Tooltip("Base colour texture. Leave empty for a flat tinted layer.")]
+        [Tooltip("Albedo / Base Color texture. Leave empty for a flat tinted layer.")]
         public Texture2D albedoTexture;
 
         [Tooltip("Multiplied over the albedo. White leaves the texture untouched.")]
@@ -74,7 +74,7 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("0 for everything except bare metal ore. Terrain is almost never metallic.")]
         public float metallic;
 
-        [Tooltip("0 is chalk, 1 is glass. Dry soil sits near 0.2, wet rock near 0.6.")]
+        [Tooltip("Smoothness (A) = 1 - roughness. 0 is chalk, 1 is glass. Dry soil sits near 0.2, wet rock near 0.6.")]
         public float smoothness = 0.35f;
 
         [Tooltip("Raises this layer in the height blend so it reads through its neighbours.")]
@@ -131,6 +131,10 @@ namespace UniverseCreator.Nodes.Texturing
     [System.Serializable]
     public class NormalMapLayerNode : TextureNode
     {
+        /// <summary>UC-T07-10: native references/upload are main-thread only; inline packing consumes readable CPU data.</summary>
+        public override NodeExecutionDomain ExecutionDomain { get { return NodeExecutionDomain.MainThread; } }
+        /// <summary>UC-T02-05: prepacked descriptors and readable inline masks work without a graphics device.</summary>
+        public override bool HasCpuFallback => true;
         public override string NodeName { get { return "Normal Map Layer"; } }
         public override string Tooltip
         {
@@ -153,14 +157,45 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Depth of the normal map. 1 is as authored.")]
         public float strength = 1f;
 
-        [Tooltip("Mask map: R metallic, G occlusion, B height, A smoothness. Optional.")]
+        [Tooltip("Pre-packed mask map (R metallic, G occlusion, B height, A smoothness). " +
+                 "Optional - if you have the four channels as separate maps, leave this empty and " +
+                 "drop them into the Metallic / AO / Height / Roughness slots below instead.")]
         public Texture2D maskTexture;
+
+        // Individual PBR channel slots. A downloaded set ships these as four separate
+        // greyscale PNGs; wiring them here packs them into the mask URP wants, using
+        // the SAME packer as the Mask Map Packer node. Named with their channel and
+        // abbreviation so there is no guessing what each slot is for.
+        [Tooltip("Metallic map -> packed into mask R. Terrain is almost never metallic; leave empty for ground.")]
+        public Texture2D metallicMap;
+
+        [Tooltip("Ambient Occlusion (AO) map -> packed into mask G. Bright = fully lit, dark = shadowed crevices.")]
+        public Texture2D ambientOcclusionMap;
+
+        [Tooltip("Height / Displacement map -> packed into mask B. Drives Height Blend so tall detail punches through.")]
+        public Texture2D heightDisplacementMap;
+
+        [Tooltip("Roughness map -> inverted into mask A as smoothness (smoothness = 1 - roughness).")]
+        public Texture2D roughnessMap;
+
+        [Tooltip("Tick if the map in the Roughness slot is ALREADY smoothness, not roughness. Then A is used as-is.")]
+        public bool roughnessIsSmoothness;
+
+        [Tooltip("Packed mask resolution in pixels, rounded to a power of two. Used only when packing the slots above.")]
+        public int maskResolution = 1024;
 
         [Tooltip("Override the layer tiling. Leave at zero to inherit the layer's own.")]
         public Vector2 tileSizeMetresOverride = Vector2.zero;
 
+        /// <summary>UC-T07-10: copies a layer and attaches borrowed normals/prepacked masks or an owned readable-channel pack on the main thread.</summary>
+        /// <param name="outputIndex">The sole layer output, zero.</param>
+        /// <param name="tile">Bound evaluation/native owner for wired layers/maps and generated packed masks.</param>
+        /// <param name="stop">Optional cooperative cancellation checked by input pulls and packing.</param>
+        /// <returns>An independent layer description; native resource ownership remains with its captured tile or imported asset.</returns>
+        /// <exception cref="System.InvalidOperationException">Called on a worker, an inline channel is unreadable, or memory admission fails.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            GraphExecutionGuard.RequireMainThread("Normal/mask layer references"); // UC-T07-10: direct calls cannot compare or read native texture inputs on workers.
             LayerProduct upstream = GetInputLayer(tile, 0, stop);
 
             // An unconnected Layer input still produces a layer rather than null.
@@ -173,8 +208,27 @@ namespace UniverseCreator.Nodes.Texturing
             else if (normalTexture != null) layer.normal = new TextureRef(normalTexture);
 
             TextureRef wiredMask = GetInputTexture(tile, 2, stop);
-            if (wiredMask != null && wiredMask.texture != null) layer.mask = wiredMask;
-            else if (maskTexture != null) layer.mask = new TextureRef(maskTexture);
+            if (wiredMask != null && wiredMask.texture != null)
+            {
+                layer.mask = wiredMask;
+            }
+            else if (maskTexture != null)
+            {
+                layer.mask = new TextureRef(maskTexture);
+            }
+            else
+            {
+                // No pre-packed mask wired or dropped in: pack whatever individual
+                // PBR channels the user supplied, through the SAME packer the Mask
+                // Map Packer node uses, so channel order and the 1 - roughness
+                // conversion can never diverge between the two paths. Returns null
+                // when no channel is set, leaving the layer's own mask untouched.
+                TextureRef packed = MaskMapPackerNode.PackMask(
+                    metallicMap, ambientOcclusionMap, heightDisplacementMap, roughnessMap,
+                    0f, 1f, 0.5f, 0.5f,
+                    roughnessIsSmoothness, maskResolution, stop, tile); // UC-T02-06: inline packing shares the evaluation's native owner.
+                if (packed != null) layer.mask = packed;
+            }
 
             layer.normalStrength = Mathf.Clamp(strength, 0f, 4f);
 
@@ -325,6 +379,9 @@ namespace UniverseCreator.Nodes.Texturing
             LayerProduct layer = upstream != null ? upstream.Copy() : new LayerProduct();
 
             layer.triplanarOnSlopes = true;
+            TextureImageSampling.RequireFinite(projectionScaleMetres); TextureImageSampling.RequireFinite(sharpness); // UC-T07-11: reject NaN before shader parameter publication.
+            if (projectionScaleMetres <= 0) throw new System.ArgumentException("Triplanar tile scale must be positive world metres.");
+            layer.triplanarSharpness = SafeSharpness;
 
             // Triplanar reads world position directly, so the layer's own UV
             // tiling no longer applies to it. Recording the projection scale in
@@ -485,13 +542,21 @@ namespace UniverseCreator.Nodes.Texturing
     [System.Serializable]
     public class TextureSplatNode : TextureNode
     {
+        // UC-T07-11: append membership inputs; saved layer wire indices remain 0…3.
+        private static readonly Port[] Inputs =
+        {
+            new Port("Layer R", PortType.Layer, PortDirection.Input), new Port("Layer G", PortType.Layer, PortDirection.Input),
+            new Port("Layer B", PortType.Layer, PortDirection.Input), new Port("Layer A", PortType.Layer, PortDirection.Input),
+            new Port("Membership R (0..1)", PortType.Matrix, PortDirection.Input), new Port("Membership G (0..1)", PortType.Matrix, PortDirection.Input),
+            new Port("Membership B (0..1)", PortType.Matrix, PortDirection.Input), new Port("Membership A (0..1)", PortType.Matrix, PortDirection.Input)
+        };
         public override string NodeName { get { return "Texture Splat"; } }
         public override string Tooltip
         {
             get { return "Four layers in control-map channel order: R, G, B, A."; }
         }
 
-        public override Port[] GetInputs() { return TexturePorts.FourLayerIn; }
+        public override Port[] GetInputs() { return Inputs; }
         public override Port[] GetOutputs() { return TexturePorts.SplatOut; }
 
         [Tooltip("Height blending between these layers. Needs mask maps with a height channel.")]
@@ -500,14 +565,23 @@ namespace UniverseCreator.Nodes.Texturing
         [Tooltip("Width of the height-blend transition band. Ignored unless Height Blend is on.")]
         public float heightTransition = 0.2f;
 
+        /// <summary>UC-T07-11: captures up to four material layers and optional independent spatial membership for later explicit Apply.</summary>
+        /// <param name="outputIndex">Sole Splat output, zero.</param>
+        /// <param name="tile">Evaluation tile; membership maps use their own world-metre coordinates.</param>
+        /// <param name="stop">Optional cooperative cancellation token.</param>
+        /// <returns>Borrowed layer/map description; no native terrain or texture is mutated.</returns>
+        /// <exception cref="System.ArgumentException">Membership is connected without its material layer.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            GraphExecutionGuard.Require(this, ExecutionDomain, HasCpuFallback);
             SplatProduct splat = new SplatProduct();
 
             for (int i = 0; i < 4; i++)
             {
                 LayerProduct layer = GetInputLayer(tile, i, stop);
                 if (layer != null) splat.layers[i] = layer;
+                splat.coverage[i] = GetInputMap(tile, i + 4, stop);
+                if (splat.coverage[i] != null && layer == null) throw new System.ArgumentException("Connect a material layer for each authored membership map.");
             }
 
             splat.heightBlend = heightBlend;

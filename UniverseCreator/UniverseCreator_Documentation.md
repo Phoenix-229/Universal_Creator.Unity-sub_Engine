@@ -61,13 +61,28 @@ absent, this manual says so rather than leaving you to discover it.
 29. [The World inspector](#29-the-world-inspector)
 30. [The Water Body inspector](#30-the-water-body-inspector)
 31. [Runtime component inspectors](#31-runtime-component-inspectors)
-32. [The World Settings and About windows](#32-the-world-settings-and-about-windows)
+32. [Windows and menus — every window and every command](#32-windows-and-menus--every-window-and-every-command)
 
 **Systems**
 
 33. [Water authoring, physics and dynamics](#33-water-authoring-physics-and-dynamics)
+    - [How water is built end to end: two chains, and both must be wired](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired) — read this first if a spawner produced nothing
 34. [Vegetation, scatter and wind](#34-vegetation-scatter-and-wind)
+    - [What decides which species goes where](#what-decides-which-species-goes-where) — the ecology layer: sites, species envelopes and world climate
+    - [The environment sample: 37 readings at one point](#the-environment-sample-37-readings-at-one-point) — what is measured on the ground, and why each reading exists
+    - [The species envelope: what one prototype needs](#the-species-envelope-what-one-prototype-needs) — every `Ecology` field on a prototype, in real units
+    - [The 48 shipped species presets](#the-48-shipped-species-presets) — fill an envelope in one click
+    - [How suitability is scored](#how-suitability-is-scored) — read this one if you read only one
+    - [Canopy layers and the light stack](#canopy-layers-and-the-light-stack) — shade is three readings, not one
+    - [Stand structure](#stand-structure-crowns-that-do-not-overlap-and-stands-that-thin-themselves) — crown spacing and self-thinning
+    - [Allometry](#allometry-every-instance-a-different-size-for-a-reason) — instance size, and krummholz at the treeline
+    - [Density is a ceiling, not a target](#density-is-a-ceiling-not-a-target) — why you get fewer stems than you asked for
+    - [Instancing, colliders and shadows](#how-a-species-reaches-the-screen-instancing-colliders-and-shadows) — how an instance is delivered
+    - [Seasonal appearance](#seasonal-appearance) — budburst, senescence, colour and die-back
+    - [The world-level ecology settings](#the-world-level-ecology-settings) — every field that applies to every species
+    - [Procedure: turning a prefab into a species](#procedure-turning-a-prefab-into-a-species) — the six steps, and what to check when nothing appears
 35. [Shaders and material properties](#35-shaders-and-material-properties)
+    - [Detail shader control surface](#detail-shader-control-surface) — how grass cures and repigments, and which side owns the colour
 36. [Performance and mobile budgets](#36-performance-and-mobile-budgets)
 
 **Practice**
@@ -75,13 +90,22 @@ absent, this manual says so rather than leaving you to discover it.
 37. [Recipes](#37-recipes)
 38. [Debugging and troubleshooting](#38-debugging-and-troubleshooting)
 39. [Extending the system](#39-extending-the-system)
+40. [Dynamic lighting — capabilities and honest limits](#40-dynamic-lighting--capabilities-and-honest-limits)
+41. [Geometric density — capabilities and honest limits](#41-geometric-density--capabilities-and-honest-limits)
+42. [Weather and climate](#42-weather-and-climate)
+43. [Integrating an external path-authoring tool](#43-integrating-an-external-path-authoring-tool)
+    - [The two components](#the-two-components) — the provider, and the socket you enter a tool into
+    - [The provider surface](#the-provider-surface) — all six members, with their failure returns
+    - [The lifecycle](#the-lifecycle-acquire-request-release) — acquire, verify, request, release
+    - [What Universe Creator guarantees](#what-universe-creator-guarantees) — and [what it does not](#what-universe-creator-does-not-guarantee)
+    - [Implementing a different path tool](#implementing-a-different-path-tool) — the seven-point checklist
 
 **Appendices**
 
-40. [Appendix A — Mathematical reference](#appendix-a--mathematical-reference)
-41. [Appendix B — Enumeration reference](#appendix-b--enumeration-reference)
-42. [Appendix C — Diagnostics and self test](#appendix-c--diagnostics-and-self-test)
-43. [Appendix D — Glossary](#appendix-d--glossary)
+44. [Appendix A — Mathematical reference](#appendix-a--mathematical-reference)
+45. [Appendix B — Enumeration reference](#appendix-b--enumeration-reference)
+46. [Appendix C — Diagnostics and self test](#appendix-c--diagnostics-and-self-test)
+47. [Appendix D — Glossary](#appendix-d--glossary)
 
 ---
 
@@ -121,19 +145,45 @@ They are independent. A world can have a Node Graph and no Texture Graph (it ren
 whatever material you assign), or a Texture Graph applied to a terrain that was sculpted
 entirely by hand.
 
+### The Living World layer (Module 3)
+
+On top of the terrain-and-texture core, the system runs a **Living World layer**: a
+deterministic clock and sun/moon rig, a physically-driven sky and atmosphere, ten cloud
+types, a weather and climate simulation (wind, fronts, precipitation, fog, snow), an
+indirect-light system that reaches past a single ambient bounce, and an ecology layer that
+decides which species grows where and dresses it for the season. These are covered in:
+
+- [Vegetation, scatter and wind](#34-vegetation-scatter-and-wind) — the ecology layer.
+- [Weather and climate](#42-weather-and-climate) — the deterministic clock and sun/moon, the
+  nine climate presets, and the physical chain from sunlight to rain, plus the read-only
+  one-directional rule.
+- [Dynamic lighting — capabilities and honest limits](#40-dynamic-lighting--capabilities-and-honest-limits)
+  — the sun, moon, sky, clouds and the indirect-light system, **stated against Lumen
+  honestly**, including exactly where it is behind.
+- [Geometric density — capabilities and honest limits](#41-geometric-density--capabilities-and-honest-limits)
+  — prop LOD, impostors, micro-relief and the virtual splat cache, **stated against Nanite
+  honestly**.
+
+The layer is **read-only over the world it observes**: weather and light read terrain,
+climate and season and render on top of them; they never rewrite `TerrainData`. All of it
+runs in play mode only — nothing in this layer executes in the Scene view in edit mode.
+
 ### What it does not do
 
 Stated plainly so you do not go looking:
 
-- **No weather, atmosphere or time-of-day system.** There is no sky, cloud, rain or
-  day/night runtime. Several nodes *model* climate — precipitation, temperature, rain
-  shadow, season — but they produce **masks that drive terrain and texturing**, not
-  visible weather. `Wetness` and `Vegetation Colour` expose a season/rain input precisely
-  so that a weather system you write can drive them.
+- **Not literal Lumen, and not literal Nanite.** The lighting system delivers dynamic GI,
+  multi-bounce, heightfield-traced terrain occlusion and deterministic output, but it does
+  not ray-trace arbitrary dynamic meshes and its reflections are screen-space only on the
+  top tier — [chapter 40](#40-dynamic-lighting--capabilities-and-honest-limits) names every
+  gap. The geometry layer delivers perceptual density by process, not a virtualised
+  micropolygon rasteriser — [chapter 41](#41-geometric-density--capabilities-and-honest-limits)
+  names every gap. Where a competitor's feature is not matched, the manual says so rather
+  than implying parity.
 - **No road or river spline mesh generator** beyond the water surfaces described in
   [chapter 33](#33-water-authoring-physics-and-dynamics). Road integration is via
-  `RoadMasterLinker` and `TerrainHealer`, which cooperate with a third-party road tool.
-- **No ECS, no Burst, no jobs, no `NativeArray`.** The entire generator is standard
+  `RoadCityMasterLinker` and `TerrainHealer`, which cooperate with a separate road tool.
+- **No ECS, no Burst, no jobs, no `NativeArray`.** The entire system is standard
   managed C# over flat `float[]` arrays with `System.Threading.Tasks` for parallelism.
   This is deliberate: it keeps the code portable, debuggable with a normal debugger, and
   free of package dependencies beyond URP. Do not add Burst attributes to node code.
@@ -241,7 +291,7 @@ UniverseCreator                     ← UniverseCreatorObject
 │       │   └── UC_Tunnel_Shell     ← only where the graph cuts holes
 │       ├── Chunk_0_1
 │       └── …
-└── RoadMasterLinker                ← RoadMasterLinker, the Module 7 bridge
+└── RoadCityMasterLinker            ← the Module 7 bridge to Road &amp; City Master
 ```
 
 `Terrain` carries no component of its own and its inspector is empty. That is deliberate:
@@ -396,6 +446,31 @@ Within a single chunk pass, each node is evaluated **once**, and its result is r
 every downstream consumer. Wiring one Perlin node into six places costs one Perlin
 evaluation, not six. This is why `Shared Value` and `Portal In/Out` are cheap, and why
 splitting a wire is always preferable to duplicating a node.
+
+### Where the Living-World layer lives
+
+The Module 3 systems sit inside the same runtime assembly, in their own folders, each with one
+manager component an author adds to the scene and a set of plain classes behind it. This is the
+map from a feature to the file that owns it, and to the inspector that drives it.
+
+| Subsystem | Runtime folder | The component you add | Its inspector (chapter) |
+|---|---|---|---|
+| **Weather and climate** | `Runtime/Weather/`, presets/tiers in `Runtime/Terrain/` | `UCWeatherSystemManager` | Weather inspector ([ch. 42](#42-weather-and-climate)) — owns the clock, latitude, presets |
+| **Ecology and scatter** | `Runtime/Ecology/`, scatter in `Runtime/Terrain/` | `UCVegetationSystemManager` | World inspector ([ch. 29](#29-the-world-inspector)), ecology in [ch. 34](#34-vegetation-scatter-and-wind) |
+| **Sky, sun/moon and indirect light** | `Runtime/Lighting/` | `UCLightingSystemManager` | [ch. 40](#40-dynamic-lighting--capabilities-and-honest-limits) |
+| **Geometric density and painting** | `Runtime/Geometry/` | driven by the World inspector's quality tier | [ch. 41](#41-geometric-density--capabilities-and-honest-limits) |
+
+Two rules the manifest encodes. First, **the weather manager owns the clock and the latitude**;
+the lighting and vegetation managers read them through `ResolveClock()` and never declare their
+own copy, so a world cannot have its sun over one hemisphere and its forest in the other. Delete
+the weather manager and both fall back to a documented default (latitude 45°, longitude 0°) with
+a visible notice on the inspector. Second, **preset and tier tables live in `Runtime/Terrain/`,
+not in the `Weather/` or `Ecology/` folders**, because those folders forbid bare domain literals
+and a preset table is nothing but literals; the numbers sit in the exempt folder and feed the
+pure physics through a request struct, so no physics file gains a magic number.
+
+Everything here compiles into your game. The matching inspectors and the self-test live in the
+editor assembly (`Core/Editor/`) and are never shipped in a build.
 
 ---
 
@@ -687,6 +762,259 @@ An unconnected input falls back to the node's own field value. That is why most 
 useful with nothing wired in — a `Blend` node with no B input blends against its default.
 This makes a graph testable at every stage: wire a `Preview` node in anywhere and look.
 
+An input port accepts **one** incoming wire (last write wins). An output port may fan out
+to **many** inputs — the same height can feed an erosion pass, a preview, and a splat
+output at once. This is fixed in code: every input port is declared `allowMultiple: false`,
+every output `allowMultiple: true`.
+
+### Port sets by category — what a node has before it declares anything
+
+Most nodes never declare ports of their own. They inherit a fixed port set from their
+category base class (`Core/Runtime/Nodes/Base/NodeCategories.cs`), so the shape of a node
+is decided by which family it belongs to. These five sets are the vocabulary the rest of
+this reference is written against:
+
+| Category base | Inputs | Outputs |
+|---|---|---|
+| `CreatorNode` | *(none)* | `Height` (Matrix) |
+| `ModifierNode` | `Height` (Matrix) | `Height` (Matrix) |
+| `SelectorNode` | `Height` (Matrix) | `Mask` (Matrix) |
+| `CombinerNode` | `A`, `B`, `Mask` (all Matrix) | `Height` (Matrix) |
+| `OutputNode` | `Height` (Matrix) | *(none — terminal)* |
+
+A Combiner with only one of `A`/`B` wired passes that side straight through rather than
+collapsing to flat; `Mask` is optional and, when wired, chooses per-pixel between the two.
+A Selector reads `Height` but never writes it — it emits a `Mask` in 0..1.
+
+The Texture Graph adds its own currencies (`Layer`, `Splat`, `Colour`, `Scalar`,
+`Gradient`, `Surface`, `Texture`, `UV`, `Water`), declared in `TexturePorts`. The recurring
+shape there is the **surface chain**: a node takes one `Surface` in, adds one thing, and
+hands one `Surface` out — so the order of feature nodes in the graph is the order the
+shader applies them.
+
+### Nodes that declare their own ports
+
+The nodes below are the exceptions — they override `GetInputs()` / `GetOutputs()` because
+their data flow does not fit the category default. Ports are listed exactly as the code
+declares them (name, type, direction). Everything not listed here uses its category default
+from the table above.
+
+**Creators.** Every noise and shape creator inherits the `CreatorNode` default — nothing in,
+one `Height` out. That covers `Perlin Noise`, `Simplex Noise`, `Value Noise`,
+`Billow Noise`, `Ridged Noise`, `Marble Noise`, `Swiss Noise`, `Curl Noise`,
+`Caustic Noise`, `Ridged Multifractal`, `Hybrid Multifractal`, `Voronoi`, `Constant`,
+`Simple Form`, `Spot Brush`, `Tectonic Plates`, `Continental Shape Mask`,
+`Latitude Gradient`, `Import Heightmap` and `Real-World Import`. Six creators declare more:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Domain Warp Field | *(none)* | `Warp X`, `Warp Z` (Matrix) |
+| Tectonic Plate Seed | *(none)* | `Height`, `Boundary`, `Plate Id` (Matrix) |
+| Prevailing Wind | *(none)* | `Wind X`, `Wind Z` (Matrix) |
+| Hydrology Spawner | `Height` (Matrix) | `Lake Mask`, `River Mask` (Matrix) |
+| Random Seed | *(none)* | `Seed` (**Scalar**) |
+| River Source Seed | `Height`, `Precipitation` (Matrix) | `Mask` (Matrix) |
+
+These six are the graph's real starting points for the physical chains. `Prevailing Wind`'s
+`Wind X` / `Wind Z` are what the `Precipitation Field` and `Rain Shadow Solver` inputs of the
+same name expect — that pair is how a rain shadow knows which side of a range is wet.
+`Domain Warp Field` exists as two outputs rather than one because a warp is a vector: its
+`Warp X` and `Warp Z` feed the matching inputs on `Domain Warp Apply`. `Tectonic Plate Seed`
+hands `Boundary` and `Plate Id` to the geology modifiers that raise ranges along a boundary.
+`Random Seed` emits a `Scalar`, not a field — wire it into many nodes' seed inputs so one
+roll re-rolls a whole subsystem coherently.
+**Modifiers.** Almost every modifier is the plain `Height`-in / `Height`-out shape, pulled
+through a 16-pixel ghost margin so a blur or an erosion pass has neighbours to read at a
+chunk seam. That covers `Blur`, `Sharpen`, `Clamp`, `Invert`, `Power`, `Contrast`, `Curve`,
+`Levels`, `Terrace`, `Ledge`, `Direction`, `Parallax`, `Distort`, `Domain Warp`,
+`Thermal Erosion`, `Hydraulic Erosion`, `Wind Erosion`, `Coastal Erosion`,
+`Droplet Erosion`, `Glacial Carve`, `Lithology Erosion`, `Sediment Map`,
+`Slope Remap Curve`, `Fault Line Displacement`, `Coastal Shelf Shaper` and
+`World Edge Falloff`. Two declare their own ports:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Domain Warp Apply | `Height`, `Warp X`, `Warp Z` (Matrix) | `Height` (Matrix) |
+| Voronoi Rock Strata | `Height` (Matrix) | `Height`, `Rock Type` (Matrix) |
+
+`Domain Warp Apply` is the second half of the pair the PDF described as one node: a warp is a
+vector field, so `Domain Warp Field` produces `Warp X` and `Warp Z` and this node consumes
+both alongside the height it displaces. `Voronoi Rock Strata` emits `Rock Type` beside the
+height so downstream splat and erosion nodes can treat different rock differently — that is
+the field `Lithology Erosion` and the splat output want.
+**Selectors.** Every stock selector (`Slope`, `Cavity`, `Aspect`, `Curvature`,
+`Noise Mask`, `Texture Import Mask`, `Flow Map`, `Height`, `Distance Field`) inherits the
+`SelectorNode` default: `Height` in, `Mask` out. One overrides its inputs:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Composite Filter | `Height` (Matrix), `Mask` (Matrix) | `Mask` (Matrix) |
+
+`Composite Filter` takes an existing mask alongside the height so it can AND/OR several
+selection passes into one — the second input is another selector's `Mask` output.
+
+**Combiners.** All five combiners (`Blend`, `Maximum`, `Minimum`, `Weighted Average`,
+`Mask Mix`) inherit the `CombinerNode` default unchanged: `A`, `B`, `Mask` in, `Height` out.
+`Normalize` is filed as a Combiner but is built on `ModifierNode`, so it has the single
+`Height`-in / `Height`-out shape, not the three-input one. No combiner declares custom ports.
+
+**Climate and biome fields.** These are where "nothing is random" begins — each reads real
+physical fields and emits classified or derived ones. The wiring is the point: a
+temperature field and a moisture (or precipitation) field feed a classifier, whose `Biome`
+/ `Biome Id` output then drives scatter and splat.
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Temperature Map | `Height` (Matrix) | `Height` (Matrix) *(field carried as Matrix)* |
+| Moisture Map | `Height` (Matrix) | `Height` (Matrix) *(field carried as Matrix)* |
+| Biome Mask | `Height` (Matrix) | `Mask` (Matrix) |
+| Precipitation Field | `Height`, `Wind X`, `Wind Z`, `Temperature` (Matrix) | `Mask` (Matrix) |
+| Rain Shadow Solver | `Height`, `Wind X`, `Wind Z`, `Precipitation` (Matrix) | `Shadow`, `Adjusted Precip` (Matrix) |
+| Biome Classifier | `Temperature`, `Moisture` (Matrix) | `Biome` (Matrix) |
+| Koeppen Biome Classifier | `Temperature`, `Precipitation`, `Height` (Matrix) | `Biome Id`, `Class Mask` (Matrix) |
+| Whittaker Biome Classifier | `Temperature`, `Precipitation`, `Height` (Matrix) | `Biome Id`, `Class Mask`, `Vegetation Density` (Matrix) |
+| Seasonal Variation Driver | *(none)* | `Season` (**Scalar**), `Temp Offset`, `Moisture Offset` (Matrix) |
+| Snowline Altitude Solver | `Height`, `Temperature`, `Season` (Matrix) | `Snow Mask`, `Snowline` (Matrix) |
+
+`Season` off the `Seasonal Variation Driver` is one of only two `Scalar` ports in the terrain
+graph (the other is `Random Seed`'s `Seed`) — a single value, not a field — because a season
+is one number for the whole world; it drives the `Snowline Altitude Solver`'s `Season` input
+and the offset fields tint every climate field for time of year.
+
+**Hydrology and water fields.** These thread water descriptions between each other:
+`Water Mask`, `Water Level` and `Depth` produced by one are consumed by the next, ending at
+the water/splat outputs. Several are filed under `Selectors\` but declare `Modifier` intent
+where they carve height.
+
+| Node | Category | Inputs | Outputs |
+|---|---|---|---|
+| River Network Trace | Selector | `Height` (Matrix) | `River Mask` (Matrix) |
+| River Course Solver | Selector | `Height` (Matrix) | `Height`, `River Mask` (Matrix) |
+| River Carve | Modifier | `Height`, `River Mask`, `Water Mask` (opt) (Matrix) | `Height` (Matrix) |
+| Swamp Basin | Selector | `Height`, `Swamp Mask` (opt) (Matrix) | `Height`, `Swamp Mask` (Matrix) |
+| Sky Occlusion | Selector | `Height` (Matrix) | `Mask` (Matrix) |
+| Ocean Level | Selector | `Height` (Matrix) | `Water Mask`, `Depth`, `Shoreline` (Matrix) |
+| Lake Fill | Selector | `Height`, `Lake Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
+| River Fill | Selector | `Height`, `River Mask` (Matrix) | `Water Mask`, `Depth`, `Water Level` (Matrix) |
+| Water Bank Seat | Modifier | `Height`, `Water Level`, `Water Mask` (Matrix) | `Height` (Matrix) |
+| Watershed Basin Segment | Selector | `Height` (Matrix) | `Basin Id`, `Divides`, `Basin Size` (Matrix) |
+| Groundwater Wetland Mask | Selector | `Height`, `Water Mask` (Matrix) | `Mask` (Matrix) |
+| Underwater Terrain Extend | Modifier | `Height` (Matrix) | `Height` (Matrix) |
+| Ecology | Selector | `Height` (Matrix) | `Soil Moisture`, `Wetness Index`, `Aridity`, `Wind Exposure`, `Light`, `Zone Id`, `Zone Mask` (Matrix) |
+
+A canonical hydrology chain: `River Network Trace` → its `River Mask` feeds both
+`River Carve` (to cut the channel into `Height`) and `River Fill` (to compute `Water Mask`
+/ `Water Level`); `Water Bank Seat` then reads that `Water Level` to flatten the banks. The
+`Ecology` node fans one height into seven physical fields that the vegetation system reads.
+
+**Utility.** `Comment Group` has no ports (it is annotation only). `Shared Value` and
+`Portal In` emit `Height` with no input; `Preview` and `Portal Out` take `Height`
+(`Preview` also passes it through). `Math` is the one with a second input:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Math | `A`, `B` (Matrix) | `Height` (Matrix) |
+**Scatter.** Scatter nodes are terminal on their own branch: the `ScatterNodeBase` default
+is `Height` + `Mask` in, **no output** — they write `TreeInstance` / `DetailPrototype` data
+into the tile rather than passing a field on. The placement nodes (`Tree Scatter`,
+`Rock Scatter`, `Object Scatter`, `Shrub Scatter`, `Grass Detail`, `Underwater Scatter`,
+`Debris Scatter`, `Poisson Disc Scatter`, `Species Instance Resolver`) all inherit that
+default. The density and bias nodes that *feed* a scatter node's `Mask` input declare their
+own ports:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Biome Density Table | `Biome Id`, `Moisture` (Matrix) | `Mask` (Matrix) |
+| Slope Altitude Exclusion | `Density`, `Height` (Matrix) | `Mask` (Matrix) |
+| Exclusion Mask | `Density`, `Exclusion` (Matrix) | `Mask` (Matrix) |
+| Cluster Grove Bias | `Height` (Matrix) | `Mask` (Matrix) |
+| Wind Sway Parameter Bake | `Height`, `Wind X`, `Wind Z`, `Vegetation` (Matrix) | `Sway Amplitude`, `Sway Phase` (Matrix) |
+| Ground Cover Colour Tint | `Height`, `Moisture`, `Biome Id` (Matrix) | `Tint R`, `Tint G`, `Tint B` (Matrix) |
+
+The density chain reads left to right: a classifier's `Biome Id` and a moisture field enter
+`Biome Density Table`; its `Mask` (a per-species density) passes through
+`Slope Altitude Exclusion` and `Exclusion Mask` (which subtract road and water masks), and
+the surviving `Mask` becomes the scatter node's `Mask` input. `Wind Sway Parameter Bake`'s
+two outputs are consumed downstream by the `Wind Output` node, not by a scatter node.
+**Outputs.** An output node is terminal: it consumes fields and writes them into the tile's
+output bag for the main thread to apply, and has **no output port**. The `OutputNode`
+default is a single `Height` in. Those with more than one input declare their own:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Height Output | `Height` (Matrix) | *(terminal)* |
+| Grass Output | `Height` (Matrix) | *(terminal)* |
+| Holes Output | `Height` (Matrix) | *(terminal)* |
+| Normal Map Output | `Height` (Matrix) | *(terminal)* |
+| Custom Mesh Output | `Height` (Matrix) | *(terminal)* |
+| Texture Output | `Layer 0`, `Layer 1`, `Layer 2`, `Layer 3` (Matrix) | *(terminal)* |
+| Biome Splat Output | `Height`, `Biome`, `Wetness`, `Override` (Matrix) | *(terminal)* |
+| Wind Output | `Sway Amplitude`, `Sway Phase` (Matrix) | *(terminal)* |
+| Weather Output | `Precip Bias`, `Temperature Bias`, `Wind Bias`, `Fog Bias`, `Cloud Bias`, `Snow Bias`, `Storm Bias`, `Turbidity Bias` (Matrix) | *(terminal)* |
+| Lighting Output | `Sky Tint`, `Ambient Scale`, `Turbidity`, `Cloud Cover Bias`, `Exposure Bias` (Matrix) | *(terminal)* |
+
+Two Module-3 nodes are filed as `Utility` in code but behave as field outputs — they emit
+several derived fields rather than terminating:
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Lithology Output | `Height` (Matrix) | `Unit Index`, `Cover Depth`, `Grain Size`, `Erodibility` (Matrix) |
+| Micro-Relief Output | `Height` (Matrix) | `Offset (mm)`, `Dominant Process` (Matrix) |
+
+`Biome Splat Output` is the terrain graph's counterpart to the Texture Graph's
+`Shader Output`: the `Biome` field from a classifier chooses which terrain layer covers each
+pixel, `Wetness` darkens it, and `Override` lets a hand-painted mask win locally. `Wind`,
+`Weather` and `Lighting Output` are the seams where the terrain graph hands biased fields to
+the three live Module-3 managers.
+
+`Hydrology Spawner` (a **Creator**, `Height` in, `Lake Mask` + `River Mask` out) is where a
+procedural water branch begins. Feed it the terrain height that the water should follow. Its
+two masks describe the same lake basins and river courses used for the water bodies it spawns;
+they can be sent directly to the river and lake shaping nodes, or used to restrict `Lake Fill`
+while `River Network Trace` is used for an independently tuned network.
+
+#### Texture Graph nodes and their ports
+
+Every Texture Graph node's ports, as declared. Surface-chain nodes (one `Surface` in, one
+`Surface` out) are the backbone; the rest either open the chain (no input) or branch it.
+
+| Node | Inputs | Outputs |
+|---|---|---|
+| Terrain Height Source | *(none)* | `Height` (Matrix) |
+| Snow Cover | `Surface`, `Height` (Matrix) | `Surface`, `Snow Mask` (Matrix) |
+| Wetness | `Surface` | `Surface` |
+| Mud and Dirt | `Surface` | `Surface` |
+| Occlusion Map | `Surface`, `Height` (Matrix) | `Surface` |
+| Roughness Map | `Surface` | `Surface` |
+| Metallic Map | `Surface` | `Surface` |
+| Emission | `Surface` | `Surface` |
+| Cliff Surface | `Surface` | `Surface` |
+| Macro Variation | `Surface` | `Surface` |
+| Distance Fade | `Surface` | `Surface` |
+| Colour Grade | `Surface` | `Surface` |
+| Colour Gradient | `Surface` | `Surface`, `Gradient` |
+| Detail Texture | `Surface` | `Surface` |
+| Vegetation Colour | `Surface` | `Surface` |
+| Albedo Layer | `Texture`, `UV` | `Layer` |
+| Normal Map Layer | `Layer`, `Normal` (Texture), `Mask` (Texture) | `Layer` |
+| Triplanar Mapping | `Layer` | `Layer` |
+| Height Blend | `Splat` | `Splat` |
+| Texture Splat | `Layer 0`, `Layer 1`, `Layer 2`, `Layer 3` | `Splat` |
+| UV Scaler | `UV` | `UV` |
+| Texture Sampler | *(none)* | `Texture` |
+| Noise Texture | *(none)* | `Texture` |
+| Colour Math | `A`, `B` (Colour) | `Colour` |
+| Water Surface | *(none)* | `Water` |
+| Water Foam | `Water` | `Water` |
+| Caustics | `Water` | `Water` |
+| Terrain Blend Final | `Surface`, `Splat`, `Water` | `Surface` |
+| Shader Output | `Surface` | *(none — terminal)* |
+
+`Shader Output` is the one terminal node of the Texture Graph: it consumes the finished
+`Surface` and applies it to the über-shader. `Terrain Blend Final` is where the three
+branches — the surface chain, the `Splat` (which layers cover the ground), and the `Water`
+description — merge before that final output.
+
 ---
 
 ## 13. How input fields behave
@@ -813,7 +1141,7 @@ Low-frequency noise inside a radial falloff — the classic "island or continent
 | Field | Default | Meaning |
 |---|---|---|
 | `Seed` | 777 | Coastline pattern |
-| `Size` | 6000 | Metres per period of the coastline noise. Large: this is continental scale |
+| `Size` | 2000 | Metres per period of the coastline noise — the wavelength of the largest bay or headland. **Read it against your world size, never on its own.** Two to three periods across the world is what reads as a coastline, so aim for a third to a half of the world span: 2000 m on a 4 km world, 5000 m on a 10 km one. A value larger than the world cannot complete one period inside it, so the largest and loudest octave degenerates to a constant and the landmass comes out as the bare falloff — a smooth ellipse with a rim of wrinkles. Values above the world span are clamped to it for that reason |
 | `Land Radius` | 0.55 | Fraction of the world that is land before noise. 0.55 is an island with sea around it |
 | `Falloff` | 2.5 | Sharpness of the land-to-sea transition. Higher gives cliffs, lower gives shallows |
 | `Coast Noise` | 0.45 | How ragged the coastline is. 0 is a circle; 1 is deeply fjorded |
@@ -970,23 +1298,70 @@ and it is **opt-in**: no water is placed unless this node exists in the graph *a
 wired through to an Output. Delete it, or disconnect it, and the bodies it made are torn
 down again.
 
-Outputs `Lake Mask` and `River Mask`. Both come out **zero-filled**, and that is not a
-bug — the node's real product is scene objects, not a matrix, and spawning `GameObject`s
-cannot happen on a worker thread. So `UniverseCreatorObject` runs it directly, on the main
-thread, *after the terrain has settled* (`ChunkManager.RunAfterSettle`) — spawning any
-earlier traced every river across the flat baseline and stacked every lake at one height.
-The masks exist so the ports can be wired at all.
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The terrain height that the water should follow, normally the same settled height chain used by the river and lake nodes. Unwired, both mask outputs are empty |
+| `Lake Mask` | out | Matrix | — | The procedural lake footprint. Feed it to `Lake Fill`'s optional `Lake Mask`, a water wetness/splat mask, or any path that reaches an Output |
+| `River Mask` | out | Matrix | — | The procedural, width-graded river course. Feed it to `River Carve` and `River Fill`, or any path that reaches an Output |
+
+The `Height` input is part of the graph contract. The spawner solves that input for its masks;
+the main-thread water build uses the settled terrain and the same node settings to place the
+matching `UCWaterBody` objects. Keep the height source and water settings consistent across the
+spawner, `River Carve`, `River Fill`, `Lake Fill`, and `Water Bank Seat`.
+
+**The one rule that decides whether this node runs at all.** The spawner is skipped unless a
+path exists from it, forwards through the wires, to an Output node. `UCWaterSystemManager`
+seeds a queue with every Output node in the graph and walks the connections **backwards**;
+only spawners it reaches are run. A `Hydrology Spawner` sitting on the canvas with both
+outputs free is *unreachable*, and unreachable means never executed — no rivers, no lakes,
+no ocean, no error, no warning. It is the single most common reason this node "did nothing".
+
+The masks are computed data, not placeholders: `Lake Mask` describes the basins selected by the
+spawner and `River Mask` describes the courses and widths selected by the spawner. Spawning
+`GameObject`s still cannot happen on a worker thread, so `UniverseCreatorObject` places the
+matching `UCWaterBody` objects on the main thread *after the terrain has settled*
+(`ChunkManager.RunAfterSettle`). The output wire is still required because reachability is how
+the water system decides which spawners to execute.
+
+Two more gates sit outside the graph and both are open by default, but check them when the
+wire is right and nothing appears:
+
+- `UCWaterSystemManager.Source` must include the node graph. The default is **Both**, which
+  does. Set to `Hand Placed` it ignores this node entirely.
+- The terrain must actually settle. The spawn is queued behind `RunAfterSettle`, so a build
+  that is still streaming has not reached it yet.
+
+The full wiring procedure, with the shader half as well, is
+[How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired).
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Target River Count` | 3 | How many trunk rivers to plan |
 | `Target Lake Count` | 0 | Explicit upper bound on lakes. **0 means use the coverage percentage exactly** |
 | `Lake Chunk Percentage` | 0.24 (0..1) | Fraction of the world's chunks eligible for a lake |
 | `Lake Outlet Chunk Percentage` | 0.08 (0..1) | Fraction of chunks that get a lake drain-out river |
-| `Min Tributaries` | 3 | Merge this many small rivers to form a **Big** river |
-| `Enable Distributaries` | on | Let a big river split into a delta where it meets the ocean |
-| `Max Distributaries` | 4 | Arms in that delta |
 | `Generate Ocean` | on | Spawn one world-sized sea at the world-edge falloff level, clipped at the shore. Off leaves the world land-locked |
+
+The spawner also exposes the solve settings that keep its masks and spawned bodies aligned:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Drainage Resolution` | 160 | Cells per side of the world drainage solve. Higher values cost more and refine routing, not the final chunk edge. (The stand-alone hydrology selector nodes default this to 256; the spawner's own solve is coarser at 160) |
+| `Sea Level` | 0.35 | Normalised waterline. Rivers terminate here; basins at or below it are treated as sea rather than lakes |
+| `Channel Head Area` | 250,000 | Catchment area in square metres required for a permanent river channel. Lower this on small worlds |
+| `Max Channels` | 512 | Safety cap on traced river courses; it is not the requested river-object count |
+| `Min Lake Depth` | 0.002 | Minimum basin depth, normalised, before the lake mask accepts water |
+| `Depth Normalise` | 0.05 | Lake depth mapped to 1 in the spawner's lake mask calculation |
+| `Shore Softness` | 0.15 | Softness of the lake-mask shoreline |
+
+`Height` is required. With it unwired, both masks return an empty matrix and no useful water
+can be planned from this node. The masks are not zero-filled reachability tokens: `Lake Mask`
+is the basin water footprint and `River Mask` is the traced, width-graded course. They match
+the basins and courses used by the spawned `UCWaterBody` objects. Connect the same terrain
+height to this node that the rest of the water chain uses, then connect `Lake Mask` to
+`Lake Fill`'s optional restriction and `River Mask` to `River Carve` and `River Fill` when you
+want the graph's carved and filled water to match the spawned bodies exactly.
 
 Lakes and outlets are counted as a **fraction of chunks**, not as fixed numbers, because
 the number of basins a landscape supports scales with its area. At 8 % against 24 %, about
@@ -1026,7 +1401,7 @@ scene, so the sea and the lakes must already exist or the course ends in mid-air
 
 Not one random number is drawn in the planner. The same terrain plans the same rivers every
 time, which is what lets a hand-edited course survive a Regenerate. See
-[chapter 30](#30-water-bodies-and-hydrology) for the bodies it produces and
+[chapter 30](#30-the-water-body-inspector) for the bodies it produces and
 [chapter 31](#31-runtime-component-inspectors) for the `Source` switch that can veto it.
 
 #### Spot Brush
@@ -1230,6 +1605,7 @@ building scree fans.
 | `Iterations` | 8 | Relaxation passes |
 | `Talus Angle` | 35 | Angle of repose in degrees. **Physically meaningful:** dry sand is 30–35°, gravel 35–40°, packed soil around 35°. Above this angle material moves |
 | `Amount` | 0.5 | Fraction of the excess moved per pass |
+| `Relax` | 0.5 | Smoothing blended in after each pass, so the scree faces settle instead of stair-stepping |
 
 Excellent as a finishing pass after hydraulic erosion: it softens the impossibly sharp
 edges the water solver leaves and adds convincing debris slopes below cliffs.
@@ -1262,7 +1638,7 @@ where rivers carve V-profiles; this is what makes high terrain read as glaciated
 | `Iterations` | 3 | Passes |
 
 #### Coastal Erosion
-Cuts a wave-notch terrace around sea level. `Sea Level` (0.3), `Wave Height` (0.02 — the
+Cuts a wave-notch terrace around sea level. `Sea Level` (0.35), `Wave Height` (0.02 — the
 vertical band the notch occupies), `Strength` (0.5).
 
 #### Coastal Shelf Shaper
@@ -1271,7 +1647,7 @@ real profile of a coast, which is a wide shallow shelf and then an abrupt drop.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Sea Level` | 0.4 | The waterline |
+| `Sea Level` | 0.35 | The waterline |
 | `Shelf Depth` | 0.06 | How far below sea level the shelf sits |
 | `Shelf Extent` | 0.45 | How far out the shelf reaches |
 | `Slope Sharpness` | 3 | Abruptness of the shelf break |
@@ -1281,6 +1657,16 @@ real profile of a coast, which is a wide shallow shelf and then an abrupt drop.
 #### Underwater Terrain Extend
 Adds submarine canyons and seamounts below sea level, so the sea bed is not a flat plain
 where nobody looks — which matters the moment the player can swim.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Place it **after** `World Edge Falloff`, because the falloff is what creates the submerged shelf this node then sculpts |
+| `Height` | out | Matrix | — | Onward down the height chain, normally into `Water Bank Seat` or `Height Output` |
+
+Nothing above `Sea Level` is touched, so this node is safe to leave in a land-locked graph — it
+simply has nothing to do.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1293,6 +1679,34 @@ where nobody looks — which matters the moment the player can swim.
 | `Seamount Height` | 0.06 | Height of undersea peaks |
 | `Seamount Spacing` | 2200 | Metres between them |
 | `Sediment Detail` | 0.004 | Fine sea-floor texture |
+
+#### Sea-level land floor — always on, in the core
+Dry continental land never sits below sea level: the only ground under the waterline is the sea
+bed and intended (endorheic) basins. **This is no longer a node you wire** — it runs automatically
+inside **Height Output** for every world, so a graph cannot forget it and there is no node/core
+duplication to keep in sync. It is the fix for *a levee wall standing over a sunk plain*, and for
+*a river that climbs out of a sub-sea valley as it nears the ocean or a lake*: once the dry basin
+below the sea no longer exists, the river reaches a coast at sea level and drains cleanly.
+
+At generation time, before the base terrain becomes the heightmap, the core solves the whole world
+once at a coarse resolution and classifies every below-sea cell:
+
+- **Genuine ocean** — below sea *and* flood-reachable from a world edge. Left alone, so the sea
+  bed keeps its depth and the ocean is never erased.
+- **Closed basin** — below sea, not ocean, but a real depression that pools water. Left alone; the
+  lake / inland-sea system fills it later in the settle phase.
+- **Dry-land dip** — below sea, not ocean, not a pooling basin. **This is the artifact.** Raised to
+  the waterline with a smooth coastal grade, driven by the chunk's own fine height so the new shore
+  is as sharp as the heightmap under it.
+
+Because it flood-fills the ocean from the world edges itself, it needs **no hand-wired land mask**
+(that requirement is exactly why the old node did nothing until you found and connected the oracle).
+The lift only ever **raises**, so it can add a coastal plain but never gouge a valley — carving
+stays the river and lake nodes' job downstream. It is the **LOW** layer: rivers (MID) and
+lakes/ocean (HIGH) are stamped on top of it in the settle phase. The waterline it uses is the
+system sea level (0.35), the same value `Ocean Level` and `River Carve` use. Baked once at
+generation, bounded per cell: mobile-safe. The behaviour lives in `SeaLevelFloor.cs` (the
+classification) and `HeightOutputNode.cs` (where it runs).
 
 ### Geological structure
 
@@ -1346,22 +1760,163 @@ redesigning the graph.
 | `Iterations` | 4 | Passes. Slope is a derivative, so reaching a target takes iteration |
 
 #### River Carve
-Cuts a channel profile into the terrain along a river mask — normally from
-`River Network Trace`.
+Cuts a channel profile into the terrain along a river mask — from `River Course Solver`
+by preference, or from `River Network Trace`.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Best taken from `River Course Solver`'s `Height` output, so the carve reads the exact surface the course was seated against. Unwired, there is nothing to carve and the node returns flat ground |
+| `River Mask` | in | Matrix | **yes** | `River Course Solver`'s `River Mask` (preferred) or `River Network Trace`'s. **This is the node's only source of "where"** — unwired, the mask reads zero everywhere and the terrain passes through untouched. It can also be a hand-painted `Shape`, if you want one channel exactly where you put it |
+| `Water Mask` | in | Matrix | no | *Optional.* The `Water Mask` output of `Lake Fill` or `Ocean Level` — the lake/ocean footprint. Where it is wet the carve **tapers its cut to zero** (`Lerp(original, cut, 1 − mask)`), so the channel melts into the pre-carved basin instead of trenching a slot across it or walling it off. Unwired, the carve behaves exactly as before |
+| `Height` | out | Matrix | — | Onward down the height chain. Feed it to `River Fill`'s `Height` (which must read the *carved* surface) and then to `Water Bank Seat` or `Height Output` |
+
+**The channel is placed in the valley by the solver, then seated here.** Placement — moving
+the course onto the valley floor — is done upstream by `River Course Solver` / `River Network
+Trace`, which fit the course to the flow with an iterated cross-flow snap (coarse-to-fine, so a
+course several coarse cells up a slope is walked all the way down) and a slope gate (`N·U`,
+about 37°) that refuses to leave a station on a hillside. River Carve does **not** move the
+channel sideways: an earlier design re-stamped it here and that both dropped cells and printed
+walled, disc-shaped trenches, so it was removed. What the carve still does is seat the **bed
+elevation** — for every cell it takes the lowest ground on the line **across** the flow (out to
+`Valley Seat Metres`) and cuts the profile against that, so a bed is never grooved into the side
+of a slope. Because placement is upstream, feed the carve the solver's own `Height` and `River
+Mask` and the course arrives already on the thalweg.
+
+**Order matters here and nowhere else in the river chain does it matter as much.** The correct
+sequence is `River Course Solver` → `River Carve` → `River Fill` → `Water Bank Seat`, with the
+same `River Mask` fanned out from the solver to both the carve and the fill. Put `River Fill`
+before `River Carve` and it measures a bed that has not been dug yet.
+
+Set `Bank Width` the same on `River Carve` and `River Fill`. It is one bank described twice, and
+the two nodes disagreeing about how wide it is puts the waterline in the wrong place.
+
+Set `Sea Level` the same on `River Carve`, `River Course Solver` and `Ocean Level`. They are one
+waterline described three times.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `Depth` | 0.012 | Channel depth, normalised |
+| `Depth` | 0.012 | Channel depth, normalised (the depth of a nominal-width reach) |
+| `Flow Depth Exponent` | 0.8 | How much depth grows with **discharge** — the local channel width. Leopold–Maddock gives depth ∝ width^0.8, so headwaters cut shallow and trunks deep (the vein network starts small and grows). 0 = flat `Depth` everywhere (the old behaviour). Confinement is a separate term, `Squeeze Strength` |
+| `Squeeze Strength` | 1 | Manning's squeeze: where a **valley pinches** the channel narrower than its discharge width (both walls close in), depth rises to carry the same flow, D ∝ (W_open/W_confined)^0.67. This is confinement — the *same* river is deeper in a gorge than on a plain — so it composes with `Flow Depth Exponent` (discharge). A one-sided wall does not squeeze (the flow spreads to the open bank). Bounded so a pinch cannot run depth away. 0 turns it off |
 | `Bank Width` | 25 | Metres from channel centre to the top of the bank |
 | `Profile Power` | 1.6 | Cross-section shape. 1 is a V, 2 is a U, higher is a box canyon |
-| `Bed Flattening` | 0.6 | How flat the channel floor is. Real rivers have flat beds |
-| `Levee Height` | 0 | Raised banks from deposited sediment, as real rivers build |
+| `Gorge Repose Pixels/Depth` | 0 | Angle-of-repose gorge walls. Where a river cuts **through** a ridge, a fixed-width channel would leave a razor slit; instead the walls are graded back so the cut rises one channel `Depth` every this-many pixels, and a deeper cut opens a wider canyon. Min-only (it stops where the natural hillside is already gentler). 0 turns it off — the old slit. The flat channel floor itself is set by `Bed Width Fraction`, not here |
+| `Bed Width Fraction` | 0.35 | Trapezoid channel: the inner fraction of the half-width is a flat bed, the rest a `Profile Power`-shaped wall out to the bank. 0 = the old pure power curve; ~0.35 gives the real-world trapezium that the floodplain benches and the U/V valley slopes around |
+| `Levee Height` | 0 | Raised banks from deposited sediment. Off by default. When on, a levee builds **only on big rivers** (see Levee Min Width Ratio), is capped at the untouched ground so it can never dam the valley, and is broken by noise into natural crevasse-splay gaps — a low, wide ridge, not a wall |
+| `Levee Min Width Ratio` | 1.8 | A levee forms only where the local channel is at least this multiple of the nominal bank. Big rivers (Mississippi, Yellow) build them; streams and small rivers do not |
+| `Stream Width Ratio` | 0.6 | Below this local-width multiple the channel is a **stream** and gets no floodplain (a brook stays in its trench); at or above it the floodplain belt is graded. Every river but a stream has a floodplain |
+| `Floodplain Width K` | 5 | Floodplain half-width as a multiple of bank width. 0 turns the floodplain off |
+| `Floodplain Depth Fraction` | 0.25 | How far the floodplain bench sits below the valley floor, as a fraction of `Depth` |
+| `Valley Seat Metres` | 40 | How far across the flow the carve looks for the lowest ground when seating the **bed elevation** — it does not move the channel (placement is the solver's job). The seek reaches the wider of this and `Bank Width` |
+| `Sea Level` | 0.35 | The waterline, normalised. The bed is never cut below it, and within one `Depth` of it the cut fades to nothing so the channel **rises to meet the sea at the shoreline** instead of arriving under the water as an open slot |
+
+#### Lake Basin
+Cuts a rugged, shelved lake basin into the terrain under a lake mask — the still-water
+counterpart to `River Carve`. Where `Lake Fill` decides *where* the lake is and how high it
+stands, `Lake Basin` shapes the *ground beneath it*: a dished floor that drops from a shallow
+wave-cut shelf at the shore to a rough deep bed, so a lake reads as a real basin instead of a
+flat disc pressed into the hillside. It only digs, never raises, so a mask edge that lands on a
+slope simply tapers its cut to nothing.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Unwired, there is nothing to shape and the node returns flat ground |
+| `Lake Mask` | in | Matrix | **yes** | The lake footprint — `Lake Fill`'s `Water Mask`, or a hand-painted `Shape`. **This is the node's only source of "where"**; unwired the mask reads zero and the terrain passes through untouched |
+| `Water Level` | in | Matrix | no | *Optional.* A per-cell water surface (from `Lake Fill`) the dish is measured down from. Unwired, the basin dishes from the local shore height |
+| `Height` | out | Matrix | — | Onward down the height chain, before the Output |
+
+**Shape the basin before `Lake Fill` reports depth, not after** — the fill measures how deep the
+water sits, so the dish has to exist first. Feed the same `Lake Mask` to both.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Max Depth` | 0.03 | Deepest the basin digs below its surface, normalised to world height |
+| `Shore Run Metres` | 120 | How far in from the shore the dish reaches full depth, in metres |
+| `Shelf Fraction` | 0.25 | How much of the shore-to-deep run is the shallow wave-cut shelf (a bench) before the floor drops away |
+| `Ruggedness` | 0.004 | Bed roughness amplitude, normalised. 0 is a smooth dish |
+| `Ruggedness Feature Metres` | 40 | Feature size of the bed roughness, in metres |
+| `Ruggedness Octaves` | 3 | Octaves of the bed roughness |
+| `Ruggedness Persistence` | 0.5 | Roughness persistence, 0–1 |
+| `Seed` | 12345 | Seed for the bed roughness, so a basin is identical on every rebuild |
+
+#### Swamp Basin
+Shapes a swamp — a low-energy, flat depression where a static water table sits at or just
+above a hummocky floor. It does **not** trench like a river. It flattens a low-lying, gently
+sloped region toward a swamp floor, lays low-amplitude hummock micro-relief over it, and emits
+a **Swamp Mask** whose value is the water-table depth zone: **0** on a dry mound, **~0.5** in
+saturated shallows, **1** in a deep pool. Feed that mask to the splat/scatter so algae sits in
+the pools, reeds in the shallows, and cypress/mangrove on the mound edges. Put the visible
+water in with a **Swamp** water body.
+
+**Placing the swamp water:** **GameObject ▸ 3D Object ▸ Universe Creator ▸ Water ▸ Swamp** (or the Swamp button on the Water System Manager) drops a swamp water body — a still, murky, standing surface (a tuned lake: almost no waves, no foam or caustics, opaque tannin-dark water). Reshape its outline over the basin the Swamp Basin node flattened, and set its height to the node's `Swamp Level`. Manual placement is available now; procedural auto-placement over detected basins is a later addition.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain. Unwired, there is nothing to shape and the node returns flat ground |
+| `Swamp Mask` | in | Matrix | no | *Optional.* A hand-painted `Shape` marking where the swamp is. Unwired, the node **detects** swamps procedurally: flat ground lying near the water table |
+| `Height` | out | Matrix | — | Onward down the height chain |
+| `Swamp Mask` | out | Matrix | — | The water-table depth zone (0 dry → 1 deep). Feed to `Biome Splat Output` / scatter and to a Swamp water body |
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Swamp Level` | 0.4 | Water-table height, normalised. The swamp forms around this |
+| `Floor Drop` | 0.02 | How far below the table the flattened floor sits — sets pool depth |
+| `Flatten` | 0.85 | How strongly the floor is flattened toward the level |
+| `Detect Max Slope` | 0.02 | Procedural detection: the steepest ground still counted as a flat basin (a swamp never climbs a hillside) |
+| `Band Below` / `Band Above` | 0.03 / 0.01 | Detection height band under and over the water table |
+| `Hummock Amp` | 0.0015 | Micro-relief amplitude, normalised — keep tiny; real hummocks are ~0.3 m |
+| `Hummock Feature Metres` | 25 | Size of the hummock mounds |
+| `Seed` | 4242 | So a swamp is identical on every rebuild |
+
+#### Sky Occlusion
+Bakes **ambient (sky) occlusion** from the heightfield — the mobile-cheap way to get the
+soft indirect darkening that a desktop engine's dynamic GI would give a valley or the base of
+a cliff. For every cell it measures how much of the sky the surrounding terrain hides (the
+maximum upward horizon slope in several directions) and writes a `Mask`: **1 = open sky**,
+lower in creases, hollows and cliff-bases. Feed that `Mask` into a `Biome Splat Output` layer
+mask or a `Blend` to darken shaded ground, or into the shader's ambient term. It is computed
+**once at generation**, so it costs nothing per frame — the "Lumen look" a phone can afford,
+with no ray-marching, no distance-field volume and no runtime global illumination.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Directions` | 8 | How many directions the horizon is sampled around each cell (higher = smoother, costlier bake) |
+| `Reach Pixels` | 16 | How far it looks for occluding terrain along each direction |
+| `Strength` | 6 | How strongly a rising horizon becomes shadow. Higher = deeper occlusion |
+| `Min Visibility` | 0.25 | Floor on the mask, so the deepest crease never goes pure black |
+
+It reads only `Height`, so it can sit anywhere after the terrain is shaped. Baked, mobile-safe,
+and self-consistent in the heightfield's own units — it needs no metre scale.
 
 #### Water Bank Seat
 Cuts a shore so the water surface meets the ground **exactly**. This is the node that stops
 a lake or river reading as a sheet laid on top of the landscape.
 
-Inputs: `Height`, `Water Level`, `Water Mask`. Output: `Height`.
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain, **after** `River Carve` and after any erosion. This is the last shaping node before the Output, because anything after it would move the ground it just seated |
+| `Water Level` | in | Matrix | **yes** | The `Water Level` output of `Lake Fill`, `River Fill` or `Ocean Level` — whichever produced the water you are seating. **Not** `Depth`, and **not** `Water Mask`: seating means moving ground to a specific elevation, and only `Water Level` carries an elevation |
+| `Water Mask` | in | Matrix | **yes** | The `Water Mask` output of the *same* node you took `Water Level` from. It says which cells are water; the level says how high |
+| `Height` | out | Matrix | — | Onward to `Height Output`, or to a second `Water Bank Seat` if you are seating lakes and rivers in turn |
+
+**Half-wired it does nothing.** With either `Water Level` or `Water Mask` missing it passes the
+terrain straight through rather than deforming it on a guess. Silent no-op, no warning — so if
+your lake still reads as a sheet laid on the landscape, check that both are connected before
+touching any field.
+
+**Seating two kinds of water: chain two of these, do not merge them.** Lakes and rivers have
+different levels at the same cell, so a `Blend` on the two `Water Level` outputs averages two
+unrelated elevations and seats the shore at neither. Instead put one `Water Bank Seat` fed from
+`Lake Fill` and a second, downstream of the first, fed from `River Fill`. Each moves only the
+cells its own mask claims.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1370,17 +1925,13 @@ Inputs: `Height`, `Water Level`, `Water Mask`. Output: `Height`.
 | `Min Depth` | 0.001 | Clearance kept between bed and surface, normalised. Stops a bump in the bed poking back through its own water |
 | `Strength` | 1 | 0 leaves the terrain untouched, 1 applies the full seat |
 
-Wire the `Water Level` and `Water Mask` from `Lake Fill`, `River Fill` or `Ocean Level` —
-whichever produced the water you are seating. **Half-wired it does nothing**: with either
-input missing it passes the terrain straight through rather than deforming it on a guess.
-
 Water just outside a chunk still owns bank inside it, so the node expands its tile by a ghost
 ring the width of the bench plus the skirt (capped at 96 px, past which the padded pull would
 re-evaluate the whole upstream graph for a blend the eye cannot follow) and crops it off
 again.
 
 The equivalent for **hand-placed and spawned** bodies is the mandatory bank skirt built by
-`ShorelineConformer` — see [chapter 30](#30-water-bodies-and-hydrology). This node is for
+`ShorelineConformer` — see [chapter 30](#30-the-water-body-inspector). This node is for
 water the graph describes as a field.
 
 #### World Edge Falloff
@@ -1457,8 +2008,25 @@ rescale to full range per chunk; **turn off for chunked worlds** for the same re
 `Normalize`).
 
 #### Flow Map
-Selects drainage channels by flow accumulation. `Intensity` (1). The raw hydrology signal —
-higher values mean more upstream area drains through that pixel.
+Selects drainage channels by flow accumulation. The raw hydrology signal — higher values mean
+more upstream area drains through that pixel. The cheap one: no world solve, no areas in metres,
+one hydraulic pass over the tile with erosion turned off, harvesting the flow field.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | Any point in the height chain. Unwired, there is no relief and the mask is flat |
+| `Mask` | out | Matrix | — | Normalised flow accumulation, 0..1. Feeds wet-rock and sediment splat layers on `Biome Splat Output`, moss scatter, and any `Blend` mask that wants "where water runs" |
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Intensity` | 1 | Multiplies the normalised flow on the way out |
+
+**Use it for texturing, not for rivers.** It is normalised per tile, so the same valley can read
+differently in two chunks, and it has no notion of a channel head or a catchment area. When you
+want water, or a course that agrees across chunk seams, use `River Network Trace` — see
+[Hydrology selectors](#hydrology-selectors).
 
 #### Distance Field
 Proximity to marked cells — banks, shorelines, clearings.
@@ -1514,18 +2082,67 @@ The standard vegetation gate: height 200–1400 m, slope 0–28°, all combined.
 
 ### Hydrology selectors
 
+#### Read this first: the water family is ten nodes, in three graphs' worth of jobs
+
+Water is not one node and it is not one chain. Ten nodes touch water, they live in three
+different categories, and they do three different jobs. Wiring one and expecting water is the
+single most common mistake, so here is the whole family on one page before the detail.
+
+| Node | Category | Job | Chapter |
+|---|---|---|---|
+| `Hydrology Spawner` | Creator | **Creates the water objects.** The only node that does | [14](#14-creator-nodes) |
+| `River Network Trace` | Selector | Finds where channels run | this chapter |
+| `River Carve` | Modifier | Cuts the channel into the ground | [15](#15-modifier-nodes) |
+| `River Fill` | Selector | Says how much of that channel holds water | this chapter |
+| `Lake Fill` | Selector | Floods closed basins to their spill level | this chapter |
+| `Ocean Level` | Selector | Sea mask, sea depth, shoreline band | this chapter |
+| `Water Bank Seat` | Modifier | Seats the shore so water meets ground exactly | [15](#15-modifier-nodes) |
+| `Watershed Basin Segment` | Selector | Divides the world into drainage basins | this chapter |
+| `Groundwater Wetland Mask` | Selector | Marks marsh ground | this chapter |
+| `Underwater Terrain Extend` | Modifier | Submarine canyons and seamounts | [15](#15-modifier-nodes) |
+
+The three jobs, and this is the distinction that matters:
+
+1. **Creating water objects** — `Hydrology Spawner`, and nothing else. Rivers, lakes and the sea
+   are `UCWaterBody` components in the scene. One node spawns them.
+2. **Shaping the ground water sits in** — `River Carve`, `Water Bank Seat`,
+   `Underwater Terrain Extend`. These output `Height`. They are the only
+   water nodes whose product reaches the terrain. (The **sea-level land floor** that lifts dry land
+   back up to the waterline is not a node — it is baked into `Height Output` and always on; see
+   [§15](#15-modifier-nodes).)
+3. **Producing masks that describe water** — `River Network Trace`, `River Fill`, `Lake Fill`,
+   `Ocean Level`, `Watershed Basin Segment`, `Groundwater Wetland Mask`. These output matrices for
+   *texturing, scatter and other nodes to read.* *They do not create water.* A `Lake Fill` alone
+   floods nothing you can swim in — it hands you a mask of where a lake would be.
+
+**So the masks look like they hang, and mostly they should.** `Water Mask`, `Depth`,
+`Water Level`, `Shoreline`, `Basin Id` are *optional* inputs to splat, scatter and modifier nodes.
+Leaving one unwired is not an error and the graph will not warn you. If you want water in the
+scene, that comes from the spawner — see
+[How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired),
+which is the procedure, and read it before wiring anything here.
+
 #### The shared drainage solve
 
 Five of these nodes — `Lake Fill`, `River Network Trace`, `Watershed Basin Segment`,
 `Groundwater Wetland Mask` and `Underwater Terrain Extend` — answer a question that cannot be
 answered inside one chunk. Where water collects depends on ground the chunk cannot see, so each
 of them runs a **world drainage solve** first: a priority-flood depression fill, then D8 flow
-directions, then flow accumulation, over the whole world at once. Two fields on all five come
-from that, and they mean the same thing on each:
+directions, then flow accumulation, over the whole world at once.
+
+**One field is common to all five**, and it means the same thing on each:
 
 | Field | Default | Meaning |
 |---|---|---|
 | `Drainage Resolution` | 256 | Cells per side of the world solve. **Coarse on purpose** — it decides *where* the rivers run, not how sharp their banks are; the bank detail comes from the per-chunk pass afterwards. Raising it costs time quadratically and changes routing very little |
+
+`Sea Level` also appears on three of them (`Lake Fill`, `River Network Trace`,
+`Underwater Terrain Extend`) and on `Ocean Level` and `River Fill`. It is **not** shared state:
+each node holds its own copy, nothing reconciles them, and a graph with two different sea levels
+in it will happily produce a lake surface that floats above its own coastline. **Set the same
+number on every node that has one.** The world's real sea level is settled later, in metres, by
+the ocean body itself — see `Sync Sea Level From Ocean` in
+[chapter 31](#ucwatersystemmanager).
 
 The second shared idea is that **every threshold is an area in square metres, not a cell count.**
 `Channel Head Area`, `Min Area Square Metres`, `Saturation Area` and `Canyon Catchment Area` are
@@ -1539,8 +2156,33 @@ world may not contain a catchment that large anywhere**, so it can come out with
 nothing wrong. Lower the threshold, or build a bigger world. Lakes are the exception — their floor
 is 60 m², a patch eight metres across, so they show up on any world.
 
+#### How to read the port tables below
+
+Every node in this chapter is documented with a port table before its fields, because a field
+you cannot reach does nothing. The columns mean:
+
+- **Port** — the socket label on the node, exactly as it appears on the canvas.
+- **Dir** — `in` on the left of the node, `out` on the right.
+- **Type** — the wire type. A port only accepts its own type; see
+  [chapter 12](#12-ports-wires-and-data-types). `Matrix` is a full-resolution field of floats.
+- **Required** — **yes** means the node produces nothing useful unwired. **no** means it has a
+  defined fallback, and the table says what that fallback is.
+- **Wire it to / who reads it** — the specific nodes this port normally connects to. Not a
+  suggestion; these are the connections the shipped recipes use.
+
+---
+
 #### Ocean Level
-Sea level to ocean mask, depth and a shoreline band.
+Sea level to ocean mask, depth and a shoreline band. Reads the surface, invents nothing.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain at the point you want the sea measured against — normally the **last** modifier before `Height Output`. Wire it earlier and you are measuring a coastline that later erosion will move. Unwired, the node reads flat ground and returns an all-sea mask |
+| `Water Mask` | out | Matrix | — | 1 where the ground is at or below `Sea Level`. Feeds `Groundwater Wetland Mask`'s `Water Mask`, `Underwater Scatter`, and a `Biome Splat Output` `Wetness` input |
+| `Depth` | out | Matrix | — | 0 at the waterline rising to 1 at `Depth Normalise` below it. Feeds a splat layer for sea-bed darkening, or a `Blend` mask |
+| `Shoreline` | out | Matrix | — | 1 inside a band `Shoreline Band` tall, centred on the waterline. **This is the beach.** Feeds the sand layer on `Biome Splat Output` and the mask on shore scatter |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1549,12 +2191,25 @@ Sea level to ocean mask, depth and a shoreline band.
 | `Edge Softness` | 0.004 | Softness of the water edge |
 | `Depth Normalise` | 0.2 | Depth that maps to 1 on the depth output |
 
-Three outputs: mask, depth, shoreline. The shoreline output is what you feed to beach
-texturing and shore scatter.
+**What it does not do.** It does not make a sea. It has no drainage solve and no
+`Drainage Resolution`, because sea level is a single elevation and needs no routing. For water you
+can swim in, the ocean comes from `Hydrology Spawner` with `Generate Ocean` on. This node's job is
+to tell the *texturing and scatter* where that sea will be, so the beach is painted at the right
+elevation. Keep the two `Sea Level` values equal or the sand and the sea disagree.
 
 #### Lake Fill
 Floods local minima to their spill elevation — a real flood-fill, so lakes appear where
 water would actually pool.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain, after erosion. Erosion carves the basins this node floods, so wiring it before erosion floods basins that will not exist. Unwired, there are no basins and every output is zero |
+| `Lake Mask` | in | Matrix | no | Optional **restriction**. Wired, only basins overlapping the mask are flooded — take it from `Hydrology Spawner`'s `Lake Mask` to flood exactly where the spawner put lakes, or from a `Shape` node to confine lakes to one region. Unwired, **every** qualifying basin in the world floods |
+| `Water Mask` | out | Matrix | — | 1 on lake water. Feeds `Water Bank Seat`'s `Water Mask`, `Groundwater Wetland Mask`, `Underwater Scatter`, and scatter exclusion masks |
+| `Depth` | out | Matrix | — | 0 at the shore to 1 at `Depth Normalise`. Feeds bed texturing and a reed-band mask |
+| `Water Level` | out | Matrix | — | The **surface elevation** of the lake covering each cell, not a depth. Feeds `Water Bank Seat`'s `Water Level`. This is the port that makes the shore meet the water |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1565,9 +2220,21 @@ water would actually pool.
 | `Sea Level` | 0.35 | At and below it the basin is sea, not a lake |
 | `Shore Softness` | 0.15 | Softness of the lake edge |
 
+**Water Level is the output people miss.** `Water Mask` says *where*, `Depth` says *how deep*, and
+`Water Level` says *what elevation the surface stands at* — and only the third can seat a shore,
+because seating means moving ground to a specific height. A lake whose banks do not meet its
+surface is nearly always this port left unwired.
+
 #### River Network Trace
 Traces connected river courses from flow accumulation, widening downstream as tributaries
 join.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain after erosion, before any river carving. It must be the same height the rest of the river chain reads, or the channel is traced on one surface and cut into another |
+| `River Mask` | out | Matrix | — | The **channel course**, widening downstream. Feeds `River Carve`'s `River Mask` and `River Fill`'s `River Mask` — normally both, from the one output |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1579,12 +2246,66 @@ join.
 | `Sea Level` | 0.35 | Where rivers terminate |
 | `Max Channels` | 512 | Safety cap on traced channels |
 
+**The output is a course, not water.** Feed it to `River Carve` to get a valley and to
+`River Fill` to get a water surface. Feeding it to neither leaves a mask nothing reads, and the
+terrain will look exactly as it did before.
+
+**The course is seated in the valley before it is stamped.** A D8 walk on a 256-cell solve
+is only accurate to one solve cell — sixteen metres on a 4 km world, more on a larger one —
+and on a slope one cell of error puts the line up the hillside from the low ground it is
+meant to follow. So every traced course is slid across the flow onto the lowest ground
+within two solve cells, then relaxed to take out the stair-steps a D8 walk leaves behind
+(a D8 path can only move on eight headings, which is what makes an unrelaxed course read
+as a row of joined straight stones). Samples already below `Sea Level` are refused, so a
+course can never be pulled out into the water. This node adds no meander — that is
+`River Course Solver`'s job — but its placement is fitted, not raw.
+
+#### River Course Solver
+The same network as `River Network Trace`, fitted harder: seated in the valley with a
+search distance you set, relaxed, and given a **meander** planform. Use this when the
+river is the thing you care about; use the plain trace when you just need a drainage
+pattern.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain after erosion, before any river carving |
+| `Height` | out | Matrix | — | **The input height, passed straight through.** The solver never alters terrain — it only draws a course — so this is the untouched surface. Wire it to `River Carve`'s `Height` so the carve reads the exact surface the course was seated against, from the one node |
+| `River Mask` | out | Matrix | — | The fitted course. Wire it to `River Carve`'s `River Mask` and `River Fill`'s `River Mask` |
+
+**One solver drives both of River Carve's inputs.** That is what the two outputs are for.
+Taking the height from somewhere else works, but then the course was fitted to one surface
+and cut into another, and the two only agree by luck.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Drainage Resolution` | 256 | Cells per side of the world solve — see [the shared drainage solve](#the-shared-drainage-solve) |
+| `Channel Head Area` | 250,000 | Land a channel must drain before it counts as a river, in square metres |
+| `Base Width` | 6 | Width in metres where a channel first forms |
+| `Width Exponent` | 0.5 | How width grows with flow. 0.5 matches real hydraulic geometry |
+| `Max Width` | 60 | Cap in metres |
+| `Sea Level` | 0.35 | Where rivers terminate. Also refuses any valley sample already below the waterline, so a course cannot be pulled out to sea |
+| `Max Channels` | 512 | Safety cap on traced channels |
+| `Valley Search Metres` | 40 | How far across the flow a point may slide to find the valley floor. Raise it on a coarse solve or a large world |
+| `Valley Pull` | 0.6 | How hard a point is pulled toward the floor it found, 0..1 |
+| `Meander Strength` | 0.5 | Meander amplitude, 0..1. 0 leaves the course straight-ish |
+| `Meander Max Grade` | 0.06 | Steepest grade a meander loop may climb into a bank before it is refused — this is what stops a meander wandering up a hillside |
+
 #### River Fill
 Turns a traced channel into water: how much of the channel the flow actually covers, how
 deep it is, and what elevation its surface stands at. The counterpart of `Lake Fill` for
 moving water.
 
-Inputs: `Height`, `River Mask`. Outputs: `Water Mask`, `Depth`, `Water Level`.
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain **after** `River Carve`. This is the one ordering that is not optional: the node measures bed and crest across the channel, so if the channel has not been cut yet there is no bed to measure and the water comes out flat and wrong |
+| `River Mask` | in | Matrix | **yes** | `River Network Trace`'s `River Mask` — the same mask you gave `River Carve`. Unwired, there is no channel and every output is zero |
+| `Water Mask` | out | Matrix | — | 1 on river water — **narrower** than the channel. Feeds `Water Bank Seat`'s `Water Mask`, `Groundwater Wetland Mask`, whitewater and riparian scatter masks |
+| `Depth` | out | Matrix | — | 0 at the waterline to 1 at `Depth Normalise`. Feeds bed texturing |
+| `Water Level` | out | Matrix | — | Surface elevation of the river at each cell. Feeds `Water Bank Seat`'s `Water Level` |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1607,6 +2328,15 @@ you would get a different water level on each side of the seam.
 #### Watershed Basin Segment
 Segments terrain into drainage basins and emits the divides between them.
 
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain after erosion. Unwired there is no relief, and one basin covers the world |
+| `Basin Id` | out | Matrix | — | A per-basin constant, 0..1. Feeds a `Biome Splat Output` layer mask or a `Remap` for region logic. **Not a mask** — do not threshold it expecting an edge |
+| `Divides` | out | Matrix | — | 1 on the ridge lines between basins. Feeds ridge scatter (bare rock, exposed crag) and a `Blend` mask |
+| `Basin Size` | out | Matrix | — | Each basin's own area, normalised across the world. Lets a rule read "this is a big catchment" — a large river valley floor textured differently from a small side gully |
+
 | Field | Default | Meaning |
 |---|---|---|
 | `Drainage Resolution` | 256 | Cells per side of the world solve — see [the shared drainage solve](#the-shared-drainage-solve) |
@@ -1615,10 +2345,20 @@ Segments terrain into drainage basins and emits the divides between them.
 | `Seed` | 616 | Scramble pattern |
 
 Basin ids make excellent region masks — one biome per watershed is a defensible way to
-divide a world, because real ecological regions do follow drainage.
+divide a world, because real ecological regions do follow drainage. Turn `Scramble Ids`
+**off** when a rule reads the id, and leave it **on** when a human is looking at it: scrambled
+ids read as distinct neighbours, ordered ids read as a smooth gradient.
 
 #### Groundwater Wetland Mask
 Marks marsh ground: low slope, high flow, near standing water.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Height` | in | Matrix | **yes** | The height chain after erosion. Supplies both the slope test and the drainage solve |
+| `Water Mask` | in | Matrix | no | The standing water to measure `Water Proximity` from — `Lake Fill`'s or `Ocean Level`'s `Water Mask`, or both through a `Blend` on Max. Unwired, the proximity term withdraws and the mask comes from slope and flow alone, which gives valley-floor seeps but no lake margins |
+| `Mask` | out | Matrix | — | 1 on marsh ground. Feeds a `Biome Splat Output` wetland layer, reed and sedge scatter, and a tree **exclusion** mask |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -1629,6 +2369,14 @@ Marks marsh ground: low slope, high flow, near standing water.
 | `Table Depth` | 0.006 | How close the water table is to the surface, normalised |
 | `Edge Noise` | 0.3 | Irregularity of the marsh edge |
 | `Seed` | 4242 | Edge pattern |
+
+Wire the `Water Mask` input if you have standing water. It is the difference between a marsh
+that rings your lakes — which is where marshes are — and a marsh scattered over every flat damp
+spot in the world.
+
+`Flow Map`, documented with the general selectors earlier in this chapter, is the cheap
+alternative to all of this — one hydraulic pass over the tile, no world solve. Use it for
+texturing, never for rivers.
 
 ---
 
@@ -2059,6 +2807,14 @@ The full-featured splat writer: builds the splatmap from biome, slope and altitu
 rule per biome, plus beach, snow and wetness handling. Twenty fields, and worth all of
 them — this one node replaces a dozen selectors and combiners.
 
+**Wire the `Biome` input — this is the #1 "it did nothing" trap.** With only `Height`
+connected and `Biome` left unwired, there is no biome field to read, so every pixel falls
+back to `Default Layer` (0) and the terrain paints **one flat texture**. That looks exactly
+like the node stubbed or hung — it did not; it ran to completion, but with no biome there are
+no rules to apply. Feed `Biome Classifier`'s `Biome` output into this node's `Biome` input and
+the rule engine (slope/altitude/biome blending) comes alive. `Wetness` and `Override` are
+optional; **`Biome` is the one that makes it work.**
+
 | Field | Default | Meaning |
 |---|---|---|
 | `Layer Count` | 8 | Terrain layers addressed |
@@ -2071,7 +2827,7 @@ them — this one node replaces a dozen selectors and combiners.
 | `Wet Strength` | 1 | Full strength where wetness is 1 |
 | `Beach Enabled` | on | Paint a beach band around sea level |
 | `Beach Layer` | 3 | Which layer is sand |
-| `Sea Level` | 0.32 | Normalised height of the water plane |
+| `Sea Level` | 0.35 | Normalised height of the water plane |
 | `Beach Height` | 0.012 | How far above sea level the beach reaches |
 | `Beach Max Slope` | 18 | Beaches do not form on cliffs; above this the band is skipped |
 | `Snow Enabled` | on | Paint snow |
@@ -2125,8 +2881,18 @@ produced correct maps and nothing consumed them.
 > **deleted**. Water surfaces are `UCWaterBody` components, and the graph's part in water
 > is now (a) the `Hydrology Spawner` creator, which decides *where* bodies go and spawns
 > those same components, and (b) `Ocean Level`, `River Carve`, `River Fill` and
-> `Water Bank Seat`, which shape the **ground** the water sits in. See
-> [chapter 30](#30-water-bodies-and-hydrology) and
+> `Water Bank Seat`, which shape the **ground** the water sits in.
+>
+> **So how does water appear, if nothing outputs it?** Two things, and they are the whole
+> answer. First: a `Hydrology Spawner` must be **wired through to one of the Output nodes
+> above** — any of them, by any path. Its outputs carry the procedural lake and river masks,
+> but the graph still decides what to execute by walking backwards from every Output, so an
+> unwired spawner is unreachable and is never run at all. The wire both carries data and grants
+> permission. Second: the water's *material* comes from the Texture
+> Graph, through `Terrain Blend Final`'s `Water` input into `Shader Output`. Neither half
+> produces visible water without the other. The full procedure, with a checklist, is
+> [How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired);
+> see also [chapter 30](#30-the-water-body-inspector) and
 > [chapter 33](#33-water-authoring-physics-and-dynamics).
 
 ---
@@ -2495,8 +3261,58 @@ These three nodes describe how water *looks*. What water *is* — its geometry, 
 its flow — belongs to the water bodies system in
 [chapter 33](#33-water-authoring-physics-and-dynamics).
 
+They live in the **Texture Graph**, not the terrain graph. That separation is the thing to
+understand before wiring them: the terrain graph decides *where* water is and how the ground
+around it is shaped; the Texture Graph decides *what water looks like*. Neither can produce a
+finished body of water on its own, and a world with one and not the other gets either invisible
+water or a shader attached to nothing.
+
+**The appearance chain, in full:**
+
+```
+Water Surface  ──Water──▶  Water Foam  ──Water──▶  Caustics  ──Water──▶  ┐
+   (base)       (optional, shoreline)   (optional, bed light)            │
+                                                                         ▼
+                                                   Terrain Blend Final ──Surface──▶ Shader Output
+                                                     (its Water input)
+```
+
+Read it as one wire threaded through up to three nodes. Every one of them emits the same port
+type, `Water`, and each optional node takes the previous stage in and hands the enriched result
+on. So:
+
+- **`Water Surface` alone is a complete water look.** Foam and caustics are additions, not
+  requirements. Wire `Water Surface` straight into `Terrain Blend Final` and you have working
+  water.
+- **The optional nodes must sit in the chain, not beside it.** A `Water Foam` whose `Water`
+  input is empty has nothing to add foam *to*, and a `Water Foam` that is not itself wired
+  onward is a node the graph never asks about. Both cases produce silence, not an error.
+- **Order within the chain is free.** `Caustics` before `Water Foam` gives the same result;
+  each node adds its own contribution to the description it received.
+- **`Terrain Blend Final`'s `Water` input is the exit.** Nothing in the Texture Graph reaches a
+  material except through `Terrain Blend Final` → `Shader Output`. Leave the `Water` input
+  unwired and the whole chain above it is dead code, however carefully it is tuned.
+
+**There is no water Output node, and that is deliberate.** `Ocean Output` and
+`Water Body Output` existed once and were removed: each built one throwaway water slab per
+chunk per body, so a lake spanning four chunks became four meshes with four seams, and the
+ocean became one slab per loaded chunk forever. Water bodies are single scene objects that span
+chunks; a per-chunk output node is the wrong shape for them. What the Texture Graph produces is
+the **material** they wear, which is why the exit is `Shader Output` and not a water output of
+its own.
+
+For the procedure that ties this half to the terrain half, see
+[How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired).
+
 #### Water Surface
 Base water: depth absorption, Fresnel reflectance, refraction and wave normals.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| — | in | — | — | **No inputs.** This is the head of the chain; it describes water from its own fields alone |
+| `Water` | out | Water | **yes** | `Water Foam`'s `Water`, or `Caustics`' `Water`, or — if you want neither — straight into `Terrain Blend Final`'s `Water` input. Unwired, nothing downstream ever asks for it and no water material is produced |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -2519,7 +3335,15 @@ is the fastest way to make water look like plastic.
 
 #### Water Foam
 Foam where water meets geometry, found from depth difference. **Needs the depth texture** —
-enable it on the URP renderer.
+which the system enables for you when it builds the material, so normally you do nothing; the
+manual switch is on the URP renderer asset.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Water` | in | Water | **yes** | `Water Surface`'s `Water`, or `Caustics`' `Water` if you put that first. **Unwired this node does nothing at all** — it adds foam to a water description, so with no description arriving there is nothing to add it to |
+| `Water` | out | Water | **yes** | The next stage: `Caustics`' `Water`, or `Terrain Blend Final`'s `Water`. Unwired, the foam never reaches a material |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -2536,6 +3360,13 @@ from the Froude number and delivered in the vertex stream. See
 
 #### Caustics
 Two counter-scrolling caustic layers on the lake bed, fading out with depth.
+
+**Ports**
+
+| Port | Dir | Type | Required | Wire it to |
+|---|---|---|---|---|
+| `Water` | in | Water | **yes** | The previous stage — `Water Foam`'s `Water`, or `Water Surface`'s directly if you are not using foam. Unwired, no caustics are produced |
+| `Water` | out | Water | **yes** | `Terrain Blend Final`'s `Water` input, or a further stage if you add one |
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -2806,6 +3637,34 @@ cannot exist in the heightfield; at 0.5 m it can. It also tells you whether your
 settings make sense: a droplet erosion radius of 2 samples is 6 m at 3 m/sample, which is a
 gully, not a rill.
 
+### Every button in the World inspector, and what it does
+
+The complete set, as the inspector draws it top to bottom. Nothing here is hidden behind a
+menu; every one is a button in the component.
+
+| Button | Where it sits | What pressing it does |
+|---|---|---|
+| **Cancel** (icon) | Header bar, right | Cancels the generation that is running now. Only shown while one is |
+| **Move World To Origin** | Header area | Zeroes the root's X and Z and rebuilds the chunk layout. Use it when the world has drifted from (0,0,0) and floating-point precision is starting to bite |
+| **Open Node Graph** | Graph section | Opens the Node Graph window on the assigned graph |
+| **Create Empty** | Graph section | Creates a new graph asset already containing a `Height Output`, and assigns it |
+| **Empty Graph** | Graph section, templates | Assigns the bare template — one `Height Output`, nothing wired |
+| **Simple Terrain** | Graph section, templates | Assigns the starter chain `Perlin Noise ▸ Hydraulic Erosion ▸ Height Output` |
+| **Texture Graph** | Graph section | Opens the Texture Graph window |
+| **Topographic Map** | Graph section | Opens the topographic map window for the current world |
+| **World Settings** | World Settings section | Opens the World Settings window |
+| **Roll** | Beside `Seed` | Rolls a new random world seed |
+| **Add** / **Remove** | Terrain Layers, and each prototype list | Adds or removes one entry in that list — a terrain layer, a tree, a shrub, a grass/detail or a rock/prop prototype |
+| **Regenerate** | Action bar (green) | Generates the world now. The one you press after turning `Auto Regenerate` off |
+| **Cancel** | Action bar (amber) | Enabled only while generating; stops cleanly at the next safe point |
+| **Reset** | Action bar (red) | Destroys all generated chunks. Opens a **Reset Settings** confirmation with **Reset** and **Cancel** — the only destructive control, and the only one that asks |
+
+The inspector has **no scroll region of its own** — it uses Unity's own inspector scroll. The
+sections are foldouts, and their open/closed state persists: `Graph`, `World Settings`,
+`Chunk Settings (25+1 Virtual Grid)`, `Terrain Rendering`, `Terrain Layers`,
+`Trees, Grass & Detail` (with the nested `Trees`, `Shrubs & Bushes`, `Grass & Detail`,
+`Rocks & Props`, `Scatter Budgets` groups), `Performance`, `Generation` and `Estimates`.
+
 ---
 
 ## 30. The Water Body inspector
@@ -3021,6 +3880,17 @@ This is the whole workflow, start to finish.
    - **Select a node and press Delete** (or Backspace) to remove it.
    - Everything goes through Undo, and the rebuild happens on mouse-up rather than per
      mouse-move — a drag would otherwise feel stuck behind a rebuild per repaint.
+
+   **Joining one body to another — the one modal gesture in the toolkit.** With an **end node**
+   selected, the Selected Node panel shows `Connect to Water Body`. Press it and the inspector
+   enters a picking mode: an information box reads *"Click another water body in the Scene view
+   to connect this node to it. Press ESC to cancel"*, and while it is active the scene view's
+   own orbit and selection are suppressed so your click cannot land on something else. Three
+   ways out — click a body to join it, press **ESC**, or press `Cancel Connection`. Once joined,
+   the panel shows `Joined to <name> (kind)` with a `Clear Connection` button, and the scene
+   view draws that end **green** with a dotted line to the body it feeds. This is a mode rather
+   than a modifier key because picking a target is a question, and the box on screen is the only
+   honest way to say a question is open.
 
    Five to twelve nodes is a river. Draw the line you want the water to take; you do not need
    to be accurate about the valley floor, because `Fit To Valley` under **Routing** finds the
@@ -3722,16 +4592,41 @@ The component that owns the virtual grid.
 **`Show Slice Map` is the first thing to turn on when chunks misbehave.** It shows exactly
 where boundaries fall, which chunk is which, and whether the grid is centred where you think.
 
+Its inspector groups those fields under four foldouts — `Chunk Dimensions`, `Slice Map`,
+`Focus and Materials`, `Stats` — and carries eight buttons. These are the repair tools: you
+reach for them when the grid and the terrain have stopped agreeing.
+
+| Button | What pressing it does |
+|---|---|
+| `Rebuild Slice Map` | Rebuilds only the debug grid overlay. Cheap, and enough after changing chunk counts |
+| `Rebuild All Cells` | Regenerates every terrain cell in the grid |
+| `Cancel` | Cancels all in-flight cell work |
+| `Select Terrain Cell` | Selects the middle `Terrain` cell in the hierarchy, so Unity's own terrain tools have something to paint on |
+| `Capture Manual Edits` | Snapshots hand sculpting and painting now, so a regeneration can replay it |
+| `Clear Manual Edits` | Discards that snapshot. Hand edits will not survive the next regeneration |
+| `Push Terrain Settings To Cells` | Copies the world's rendering settings (pixel error, basemap distance, shadows, draw distance) onto every existing cell without regenerating them |
+| `Clear All Tunnels` | Removes every generated tunnel shell mesh |
+
+`Select Terrain Cell` is the bridge to native workflow: the deliverable is a real Unity
+`Terrain`, so painting and sculpting happen in Unity's own inspector on a cell this button
+hands you. `Push Terrain Settings To Cells` exists because changing a render setting should
+not cost a full regeneration.
+
 ### TerrainHealer
 
 `Default Blend Distance` (4 m) — how far modifications are blended into surrounding terrain.
 Used when external tools modify the terrain, so an edit does not leave a step.
 
-### RoadMasterLinker
+### RoadCityMasterLinker
 
-Optional integration point for third-party road tools. Exposes road masks to the graph so
-scatter can be excluded from roads and terrain can be flattened along them. Inert if no road
-tool is present.
+The integration point for a road tool — Road &amp; City Master in this toolkit, though the
+contract it implements (`IPCGDataProvider`) names no product, so another path tool can
+register against it unchanged. Exposes road masks to the graph so scatter can be excluded
+from roads and terrain can be flattened along them. Inert if no road tool is present.
+
+Worlds authored before this component was renamed carry a child called `RoadMasterLinker`.
+Rebuilding the hierarchy renames that object in place rather than adding a second one, so
+the reference survives; you do not need to fix it by hand.
 
 ### ScatterPrototypeLibrary
 
@@ -3784,25 +4679,210 @@ The library of things scatter nodes place. Three prototype kinds, each a list.
 Billboard grass costs a fraction of mesh grass. Use mesh grass only where the camera gets
 close.
 
+### The three Living-World managers, and how their inspectors are laid out
+
+These three components are what you add to make the world live. They share one inspector
+convention worth understanding before you read any of them: a **grouped inspector** that
+separates fields which are **live** from fields which are only **`(declared)`**, and ends with
+an **`Unlisted (N)`** catch-all so a field can never be invisible. If a row says `(declared)`,
+the value is stored and serialized but nothing consumes it yet. That is deliberate — the
+inspector tells you what is wired rather than implying everything is.
+
+**`UCWeatherSystemManager`** — header bar `Weather System`. It owns the clock and the
+location, so the lighting and vegetation systems read time and latitude from here rather than
+each keeping their own.
+
+| Control | What it does |
+|---|---|
+| `Create Wind Manager` | Creates the `UCWindManager` this system needs if the scene has none. Once it exists, that component's own inspector is drawn **inline** below, so wind is edited in one place |
+| `Sunrise` / `Solar noon` / `Sunset` / `Midnight` | Set the clock to that computed instant **for this date and latitude** — not to fixed hours. Disabled on a day that has no sunrise or sunset (polar night, midnight sun) |
+| `Archetype` (dropdown) | Picks a climate archetype; the panel previews the geography it implies |
+| `Apply preset` | Writes that archetype's normals into the manager in one step |
+
+Its four sections are labelled for honesty: `Wind (live)`, `Climate and Season (live)`,
+`Presets (geography)` and `Planned (not implemented)` — the last is drawn **disabled**, so you
+can see what is reserved without being able to set something that does nothing. Season, moon
+phase, treeline and the Köppen class are read-only readouts. While the clock is running the
+inspector repaints continuously so those readouts track it. Full detail in
+[chapter 42](#42-weather-and-climate).
+
+**`UCLightingSystemManager`** — header bar `Lighting System`. **No buttons**: lighting is not
+something you trigger, it is something the clock and the sky drive. Two sliders write straight
+into the weather system's clock, which is why moving them changes the sun rather than a local
+copy of it:
+
+| Control | Range | What it does |
+|---|---|---|
+| `Day of year` | 1–365 | Sets the date, which sets solar declination — the seasons |
+| `Time of day (h)` | 0–24 | Sets the hour, which sets the sun's elevation and azimuth |
+
+Eleven sections: `Time and Sun`, `Sky and Atmosphere`, `Clouds`,
+`Exposure and Tonemapping`, `Irradiance Grid`, `Shadows`, `Screen-Space`, `Night`,
+`Tier and Performance`, `Memory Budget`, `Debug Views`. See
+[chapter 40](#40-dynamic-lighting--capabilities-and-honest-limits).
+
+**`UCVegetationSystemManager`** — header bar `Vegetation System`. One button:
+
+| Control | What it does |
+|---|---|
+| `Select World` | Selects the `UniverseCreatorObject` this vegetation system belongs to, since almost every question about placement is answered in the world inspector |
+
+Fifteen groups, in the order the system uses them: `Global`, `Ecology`,
+`Grass and Detail`, `Trees`, `Placement Rules`, `Environment Sampling`,
+`Competition and Canopy`, `Dispersal and Clustering`, `Disturbance`, `Season`,
+`Biome and Masking`, `Build`, `Budget`, `Hierarchy`, `Debug` — followed by resolved readouts,
+a validation panel and a diagnostics panel. See [chapter 34](#34-vegetation-scatter-and-wind).
+
+**`MicroReliefOverlay`** — header bar `Micro-Relief Ring`. **No buttons.** Two sections,
+`Ring Settings` and `Geometry Path`, plus a standing warning box: **the overlay ring carries
+no collider**, so it changes what you see and never what you collide with. In play mode it
+shows a read-only `Active path` readout and, when it has fallen back, a box saying why —
+`forceNonTessellatedFallback`, an unsupported platform, or the quality tier. Fields are
+`overlayPatchSizeM`, `overlayPatchResolution`, `targetCamera`, `quality`, `patchMaterial` and
+`forceNonTessellatedFallback`. See [chapter 41](#41-geometric-density--capabilities-and-honest-limits).
+
 ---
 
-## 32. The World Settings and About windows
+## 32. Windows and menus — every window and every command
 
-**Window ▸ Universe Creator ▸ World Settings** — the same world parameters as the inspector,
-in a floating window that stays open while you work in the graph. Edits here and in the
-inspector are the same values; changing one updates the other.
+Everything under **Window ▸ Universe Creator** is listed here, in menu order, with every
+button it actually contains.
 
-**Window ▸ Universe Creator ▸ About** — version, build information, and the diagnostic entry
-points. Check the version here before reporting a problem.
+| Menu entry | Window tab title | What it is |
+|---|---|---|
+| **Node Graph Editor** | `Universe Creator - Node Graph` | The terrain graph. [Chapter 11](#11-the-node-graph-window) |
+| **Texture Graph** | `Universe Creator - Texture Graph` | The material graph. [Chapter 22](#22-the-texture-graph-window) |
+| **World Settings** | `Universe Creator - World Settings` | A **placeholder**, and it says so — see below |
+| **Lighting Day Cycle** | `Day Cycle` | A read-only sun-and-sky preview strip for the whole day |
+| **Geometry Debug** | `Geometry Debug` | Six live diagnostic panels for the density and streaming systems |
+| **About** | `About Universe Creator` | Version, module badges, and the button that opens this manual |
+
+### World Settings — a placeholder that says so
+
+This window is not the world inspector in floating form, and it does not edit anything. Its
+header carries the status **"not yet implemented"** and its only content is an information box
+that tells you where the settings really live: per-world values on the **Universe Creator
+World** component, project-wide defaults in **Project Settings ▸ Universe Creator**. Two
+buttons take you to each, so the window is a signpost rather than a dead end:
+
+| Button | What it does |
+|---|---|
+| `Open Project Settings` | Opens **Project Settings ▸ Universe Creator** |
+| `Select World In Scene` | Finds any `UniverseCreatorObject` in the open scene, selects it and pings it in the Hierarchy. If the scene has none, it says so instead of failing silently |
+
+Documented as a placeholder deliberately: a window that looks like settings but discards them
+would be worse than one that admits it is unfinished.
+
+### About — what it reports
+
+Three readouts — **Version**, **Unity** (the running editor version) and **Node types** (a live
+count of concrete node classes, resolved once when the window opens because counting them walks
+every loaded assembly). Under those, a **Modules** box badges each module `Installed` or
+`Not installed`: Terrain Core, Texturing & Materials, Vegetation & Props, Weather & Atmosphere,
+Lighting and Geometry & Streaming all read `Installed`; the road-network bridge reads
+`Not installed`, because it is a stub until Module 6. One button, `Open Documentation`, opens
+this file in your editor; if the file has been moved it logs a warning naming the path it
+expected rather than doing nothing.
+
+### Lighting Day Cycle — reading a whole day at once
+
+Header bar `Lighting Day Cycle`, subtitle *"sky and sun sampled by the hour"*. It previews the
+selected `UCLightingSystemManager`; with none selected it says so and shows the default clock.
+Under the header, one info box states which world it is reading and its **latitude**, **day of
+year** and **turbidity** — the three numbers that decide everything else on screen.
+
+The body is a **colour strip 24 samples wide**, one per hour, sky above and sun below, with a
+white cursor line. **Click or drag anywhere on the strip to scrub the preview hour** — that is
+the only pointer gesture in the window, and it is the "scroll" you use here; there is no scroll
+bar because the whole day already fits. Below it an hour axis, then five jump buttons:
+
+| Button | Goes to | Disabled when |
+|---|---|---|
+| `Midnight` | Local midnight | never |
+| `Sunrise` | The **computed** sunrise for this date and latitude | the sun does not rise today |
+| `Solar Noon` | The computed solar noon | never |
+| `Sunset` | The computed sunset | the sun does not set today |
+| `Now` | The world's live clock hour | never |
+
+Four readouts follow the cursor: `Preview time` (hh:mm), `Sun elevation` (with `(up)` /
+`(down)`), `Sun azimuth`, and `Air mass` — shown as `-` while the sun is below the horizon,
+because air mass is meaningless there. On a polar day one of two notes appears instead of a
+sunrise: *"Polar night: the sun does not rise on this day"* or *"Midnight sun: the sun does not
+set on this day."*
+
+**This window is read-only.** Scrubbing moves its own preview cursor, not the world's clock —
+the clock belongs to `UCWeatherSystemManager`, and only one component may own time. To move the
+world, use the sliders on the lighting manager or the jump buttons on the weather manager. The
+window repaints on the editor's idle tick, so changing the date or latitude elsewhere updates
+the strip without you touching it.
+
+### Geometry Debug — six live panels
+
+Header `Geometry Diagnostics`. **No buttons at all**: every row is a measurement, and nothing
+here changes the world. With no snapshot published it shows an information box —
+*"No live geometry data. Enter play mode — the geometry systems publish a snapshot each frame"* —
+and nothing else, because these systems only run in play mode. Once data arrives, one status
+line reports **tier name • target fps • frame count**, and below it a **scroll view wraps the
+whole panel stack**, so the window is usable at any height. Each panel is an independent
+foldout that remembers whether you left it open:
+
+| Panel | Reports |
+|---|---|
+| `Derived distances` | The per-cell pixel-error and basemap distances the angular-error budget produced |
+| `Micro-relief activity` | Whether the overlay ring is active, which path it took, and what it is displacing |
+| `Splat cache` | Tile residency and the mip level chosen for the current camera |
+| `Impostor atlas` | Atlas occupancy and how many props are past their last mesh LOD |
+| `Budget & thermal` | The frame-time budget and the thermal governor's current step. **Open this panel and a sparkline of recent frame times appears under it** — it is drawn only while the panel is expanded |
+| `Terrain writes` | Every write this system made to a `TerrainData` this frame — the audit trail for "what moved my terrain" |
+
+Read `Terrain writes` first when a terrain changes and you do not know why. See
+[chapter 41](#41-geometric-density--capabilities-and-honest-limits).
+
+### Topographic Map
+
+Opened by the `Topographic Map` button in the World inspector ([chapter 29](#29-the-world-inspector)),
+window tab `Topographic Map`. One toolbar button, `Refresh Map`, re-reads the heightmap and
+redraws the contours; with no terrain in the scene it shows a warning instead of a blank image.
 
 ### Tools menu
 
+Every entry under **Tools ▸ Universe Creator**, in the order Unity draws them.
+
+**Setup** — run these when a project is new, or after you change the render pipeline.
+
 | Entry | What it does |
 |---|---|
-| **Tools ▸ Universe Creator ▸ Setup ▸ Configure URP Pipeline** | Checks and configures the URP asset for terrain and water. **Run this first in a new project** |
-| **Tools ▸ Universe Creator ▸ Run Self Test** | Runs the full internal test suite and reports to the console |
-| **Tools ▸ Universe Creator ▸ Diagnostics ▸ Check Shaders** | Verifies every shader compiles and every expected property exists |
-| **Tools ▸ Universe Creator ▸ Diagnostics ▸ Repair Graphs** | Clears graph references to node scripts that no longer exist |
+| `Setup ▸ Configure URP Pipeline` | Checks and configures the URP asset for terrain and water. **Run this first in a new project** |
+| `Setup ▸ Always-Include UC Shaders` | Adds every shipped Universe Creator shader to **Always Included Shaders** in Graphics Settings, so a build cannot strip one |
+| `Setup ▸ Apply Mobile Texture Budget` | Rewrites texture import settings to the mobile budget |
+
+**Diagnostics** — every one of these writes to the console and **opens no dialog**, so they are
+safe in batch mode and in CI.
+
+| Entry | What it does |
+|---|---|
+| `Run Self Test` | Runs the full internal test suite and reports to the console |
+| `Diagnostics ▸ Check Shaders` | Verifies every shader compiles and every expected property exists |
+| `Diagnostics ▸ Repair Graphs` | Clears graph references to node scripts that no longer exist |
+| `Diagnostics ▸ Audit Texture Budget` | Reports which textures exceed the mobile budget, changing nothing |
+| `Diagnostics ▸ Scan Prefabs` | Reports prefab integrity problems — missing renderers, broken LOD groups |
+| `Diagnostics ▸ Fix Prefab LOD Renderers` | Repairs the `LODGroup` renderer lists that the scan reported |
+
+**Content and import** — these modify assets, so each destructive one has a dry run.
+
+| Entry | What it does |
+|---|---|
+| `Bake Impostor (Selection)` | Bakes an octahedral impostor atlas for the selected prefab. Greyed out unless the selection can be baked |
+| `Upgrade Importer Metas` | Applies the current import policy to existing `.meta` files |
+| `Upgrade Importer Metas (dry run)` | Reports what the upgrade *would* change. **Run this first** |
+| `Upgrade Importer Metas (forced rewrite)` | Rewrites the metas even where they already look correct |
+| `Mobile ▸ Apply Model Import Policy` | Applies the mobile mesh-import policy to models |
+| `Mobile ▸ Apply Model Import Policy (dry run)` | Reports what it would change, changing nothing |
+| `Mobile ▸ Cross-Fade LOD Transitions` | Turns on LOD cross-fade across the prefabs it finds, so LOD steps stop popping |
+
+The pattern to notice: **anything that edits assets has a dry run, and the dry run is a separate
+menu entry rather than a checkbox in a dialog** — because there are no modal dialogs anywhere in
+this toolkit.
 
 `Configure URP Pipeline` sets the depth texture and opaque texture the water shader needs.
 Water that renders as a flat opaque sheet with no foam and no refraction is almost always
@@ -3831,6 +4911,150 @@ would one you placed yourself, then press `Save Placement` to keep the edit thro
 regeneration. The two coexist freely: a spawned sea with three hand-placed ponds in the hills
 above it is normal, and the Water System's `Source` setting is what decides which of the two is
 live.
+
+### How water is built end to end: two chains, and both must be wired
+
+This is the procedure. If a `Hydrology Spawner` produced nothing, or a water body appeared but
+looks like untextured grey, the cause is almost always one of the wires below.
+
+**Water needs two independent chains, in two different graphs, and neither substitutes for the
+other.**
+
+| Chain | Graph | Answers | Product |
+|---|---|---|---|
+| **Where the water is** | Node Graph (terrain) | Where rivers run, where lakes sit, where the sea reaches | `UCWaterBody` scene objects |
+| **What the water looks like** | Texture Graph | Colour, depth absorption, waves, foam, caustics | The `UC_WaterMaterial` those objects wear |
+
+Wire chain 1 only and you get water objects with no material: geometry that reads as flat grey.
+Wire chain 2 only and you get a material with nothing wearing it: a world with no water in it at
+all, and a perfectly tuned water shader sitting unused on disk. **Both, every time.**
+
+#### Chain 1 — where the water is
+
+**Step 1. Put a `Hydrology Spawner` in the terrain graph.** It is under Creator nodes. This is
+the only node in the system that creates water objects. `River Carve`, `Lake Fill`, `River Fill`
+and `Ocean Level` do not create water — see
+[chapter 16](#16-selector-nodes).
+
+**Step 2. Feed its required `Height` input, then wire one of its outputs through to an Output
+node.** Both parts matter: without `Height` the spawner has no terrain to solve, and without a
+path to an Output the water system never runs it.
+
+The spawner's `Lake Mask` and `River Mask` are **real procedural masks**, not zero-filled
+reachability tokens. They describe the same basins and courses used for the spawned bodies, so
+they can drive the shaping chain directly. The graph still decides whether to run the node by
+looking at **reachability**:
+`UCWaterSystemManager` collects every `Output` node in the graph, walks the wires *backwards*
+from each, and runs only the `Hydrology Spawner`s that walk reaches. A spawner whose outputs go
+nowhere is never reached, therefore never executed: no rivers, no lakes, no ocean, and **no
+error message**, because an unreachable node is a legitimate thing for a graph to contain.
+
+So the wire is the consent. Any path to any Output will do:
+
+```
+Height Source ──Height──▶ Hydrology Spawner
+Hydrology Spawner ──Lake Mask──▶ Lake Fill (Lake Mask)
+Hydrology Spawner ──River Mask──▶ River Carve (River Mask)
+Hydrology Spawner ──River Mask──▶ River Fill (River Mask)
+Hydrology Spawner ──Lake Mask──▶ … ──▶ Height Output (any reachable path)
+```
+
+Use the same `Height` source for `River Carve`, `River Fill`, and `Water Bank Seat` ordering as
+appropriate. The final output path can be the shaping chain itself, or any other valid route to
+an Output; the important point is that the spawner is reachable and its height input is live.
+
+**Step 3. Shape the ground for it (recommended, not required).** The spawner reads the *settled
+terrain* to decide where water goes, so a graph with river geometry already cut into it produces
+water that sits in real valleys:
+
+```
+Noise ──▶ Hydraulic Erosion ──▶ River Network Trace ──River Mask──┐
+                       │                                          │
+                       └──Height──▶ River Carve ◀──River Mask─────┘
+                                        │
+                                        ├──Height──▶ River Fill ◀──River Mask (same trace)
+                                        │                 │
+                                        │      Water Level, Water Mask
+                                        │                 ▼
+                                        └──Height──▶ Water Bank Seat ──Height──▶ Height Output
+```
+
+Add `Lake Fill` → a second `Water Bank Seat` for lakes, and `World Edge Falloff` →
+`Underwater Terrain Extend` if the world has a coast. Set every `Sea Level` in the graph to the
+same number.
+
+**Step 4. Check the Water System's `Source`.** On the world's `UCWaterSystemManager`, `Source`
+must include the node graph. The default is **Both**, which does — so this is a check, not a
+step. Set to `Hand Placed`, it ignores the spawner completely.
+
+**Step 5. Let the terrain settle.** The spawn is deliberately deferred: `UniverseCreatorObject`
+queues it behind `ChunkManager.RunAfterSettle`, because at graph-evaluation time the terrain is
+still the flat baseline, and spawning then traced every river across a plane and stacked every
+lake at one height. So water appears **after** the ground stops moving, not with it. On a large
+world that is a visible pause. It is not a hang.
+
+#### Chain 2 — what the water looks like
+
+**Step 6. Build the appearance chain in the Texture Graph.**
+
+```
+Water Surface ──Water──▶ [Water Foam] ──Water──▶ [Caustics] ──Water──▶ Terrain Blend Final
+                                                                        (its Water input)
+                                                                              │
+                                                                       Surface ▼
+                                                                        Shader Output
+```
+
+`Water Surface` alone is sufficient; foam and caustics are optional additions that must sit
+**inside** the chain rather than beside it. Full port detail is in
+[chapter 26](#26-water-appearance-nodes).
+
+**Step 7. Wire `Terrain Blend Final`'s `Water` input.** This is chain 2's equivalent of step 2,
+and it fails the same silent way. Nothing in the Texture Graph reaches a material except through
+`Terrain Blend Final` → `Shader Output`. With the `Water` input empty, `Shader Output` produces a
+terrain material and **no water material** — and again, no error, because a graph that
+deliberately describes a dry world is legitimate. The material builder returns "no water
+material" for that world and moves on.
+
+**Step 8. Generate.** On generation the material builder reads the water description off
+`Shader Output`, creates or updates `UC_WaterMaterial`, and hands it to every `UCWaterBody` in
+the world — spawned and hand-placed alike. It also **force-enables the URP depth texture and
+opaque texture** on the active renderer, because the water shader samples both: without the
+depth texture there is no shoreline fade and no foam, and without the opaque texture there is no
+refraction. Water rendered without them is a flat sheet of deep colour — recognisable, and the
+reason that switch is not left to the user to remember.
+
+#### The checklist
+
+Run down this list before changing any field. Every line is a wire or a setting, and every one
+of them fails silently.
+
+| # | Check | If it is wrong you see |
+|---|---|---|
+| 1 | A `Hydrology Spawner` exists in the terrain graph | No water at all |
+| 2 | One of its outputs reaches an `Output` node, through any path | No water at all, no error |
+| 3 | `Generate Ocean` is on, if you want a sea | Land-locked world, rivers ending nowhere |
+| 4 | `Target River Count` / `Lake Chunk Percentage` are above zero | The kind you set to zero is missing |
+| 5 | `UCWaterSystemManager.Source` includes the node graph | No procedural water; hand-placed still works |
+| 6 | The build has finished settling | Water appears late; looks like nothing happened |
+| 7 | A `Water Surface` node exists in the Texture Graph | Water objects with no material: flat grey |
+| 8 | Its chain reaches `Terrain Blend Final`'s `Water` input | Same: flat grey water |
+| 9 | `Terrain Blend Final` reaches `Shader Output` | No materials at all, terrain included |
+| 10 | Optional foam/caustics nodes are wired **both** in and out | They are simply absent, silently |
+| 11 | Every `Sea Level` in the terrain graph is the same number | Beaches at the wrong height; lake surfaces above their own coastline |
+| 12 | `River Carve` and `River Fill` share one `Bank Width` | Waterline in the wrong place across the channel |
+
+#### Everything you can still do by hand, afterwards
+
+Procedural does not mean untouchable. A spawned body is an ordinary `UCWaterBody`: select it and
+every field in [chapter 30](#30-the-water-body-inspector) is editable. Redraw a generated river's
+course node by node, then press `Save Placement` and the edit survives the next regeneration. Add
+three hand-placed ponds above a spawned sea and both coexist. The `Source` setting decides which
+route is live, not which route is allowed.
+
+If something on this list is right and water is still missing, go to
+[chapter 38](#38-debugging-and-troubleshooting) — the two entries on a spawner that produced
+nothing and a body with no material carry the narrower diagnoses.
 
 ### Geometry
 
@@ -4041,6 +5265,503 @@ ScatterPrototypeLibrary                  →  what each instance actually is
 
 Placement is Poisson-disc: `Min Spacing` is a hard geometric floor, so instances never
 interpenetrate no matter how high `Density` goes.
+
+### What decides which species goes where
+
+Placement answers *where an instance can stand*. The ecology layer answers the separate and
+harder question of *what should stand there* — which of your prototypes belongs on this ground,
+how big it should be, whether it should be there at all.
+
+It is opt-in and it is additive. A prototype you never describe ecologically behaves exactly as
+it did before this layer existed: the scatter node places it with its own settings and its own
+prototype index. Everything below activates for prototypes you *do* describe, and a graph
+authored before any of it existed keeps producing the forest its author configured. Every route
+by which the layer can decline — no library, no species described, no sampler — falls back to
+that older behaviour rather than to nothing.
+
+The model has three parts, and they map onto three places in the project:
+
+| Part | What it is | Where you edit it |
+|---|---|---|
+| **The site** | 37 readings taken at one point on the ground — climate, soil, water, light, disturbance | Nowhere. It is measured, never authored |
+| **The species envelope** | What one prototype needs, in real units | The `Ecology` foldout on each prototype, in the World inspector |
+| **The world's climate and rules** | Latitude, temperature, rainfall, which competition rules are live | `UCVegetationSystemManager`, plus the lighting and weather managers |
+
+Suitability is then the match between site and envelope, and the section on
+[how suitability is scored](#how-suitability-is-scored) is the one to read if only one of these
+sections gets read.
+
+### The environment sample: 37 readings at one point
+
+Before any species is considered, the site is measured. One `EnvironmentSample` is filled per
+candidate position, and a chunk evaluates on the order of forty thousand candidates.
+
+That number is why the sample is a value type with no reference-typed field and a hard ceiling
+of 160 bytes, checked by the self test. Forty thousand class instances per chunk is forty
+thousand heap allocations, which does not show up as frame time — it shows up as a collection
+pause on a phone, minutes later, somewhere unrelated to the cause.
+
+**Every field that has a unit carries the unit in its name.** A field called `altitude` is a
+question; `altitudeM` is an answer. Fractions run 0–1 and say so.
+
+| Group | Fields | What it is for |
+|---|---|---|
+| **Position and form** | `worldPos`, `normal`, `altitudeM`, `slopeDeg`, `aspectDeg`, `curvature`, `latitudeDeg` | The shape of the ground and where on the planet it is. Curvature is signed: negative is a hollow that collects, positive a ridge that sheds |
+| **Thermal climate** | `meanAnnualTempC`, `warmestMonthTempC`, `coldestMonthTempC`, `frostFreeFraction`, `gdd` | Five figures, not one. The treeline reads the **warmest month**, evergreen broadleaf reads the **coldest**, and the growing season reads accumulated warmth. A single annual mean cannot express any of the three |
+| **Water balance** | `annualPrecipMm`, `petMm`, `aridity`, `soilMoisture`, `twi`, `waterTableDepthM` | Rainfall is not wetness. `aridity` is precipitation over potential evapotranspiration; `twi` is topographic wetness, high in drainage hollows and low on ridges |
+| **Water bodies and coast** | `distanceToWaterM`, `nearestWaterKind`, `hasWaterInRange`, `submergedDepthM`, `saltFraction` | Riparian and coastal species. `distanceToWaterM` holds the search radius when nothing was found, so a band test simply fails instead of needing a special case — and `hasWaterInRange` is how you ask the honest question, because `nearestWaterKind` has to hold *something* in dry country |
+| **Soil** | `soilDepthM`, `soilFertility`, `rockiness` | Derived from slope and curvature, never authored per cell. Fertility is one scalar on purpose: pH, N, P and K would be four authored fields for an effect no player can see |
+| **Disturbance** | `windExposure`, `snowLoadKgPerM2`, `fireReturnYears`, `browsePressure` | The four reasons ground is bare that have nothing to do with climate. Wind exposure is why ridgelines are bald; browse pressure is what keeps a meadow open |
+| **Competition and biome** | `subcanopyLightFraction`, `canopyLightFraction`, `floorLightFraction`, `canopyLai`, `biomeIndex`, `biomeIndexAlt`, `biomeBlend` | Light is three figures because shade is a stack, not a scalar — see [canopy layers](#canopy-layers-and-the-light-stack). Two biome indices because a boundary should read as a transition, not a line |
+
+**Wind exposure is measured, not guessed.** Eight bearings are cast out to 500 m, six samples
+along each, and ground that rises more than 10° above the horizontal within a 90° arc counts as
+shelter. That is why a summit reads exposed and a corrie floor 200 m below it does not.
+
+**The water table has a sentinel, not a null.** 100 m means "out of reach of any root". A species
+with `waterTableMaxDepthM` at its default of −1 does not test the water table at all.
+
+### The species envelope: what one prototype needs
+
+Each prototype in **Trees**, **Shrubs & Bushes**, **Grass & Detail** and **Rocks & Props** carries
+an `Ecology` block. It is authored in real units, because a number in real units survives being
+moved to another world and a normalised one does not.
+
+`Enabled` off, or a `Weight` of 0, takes the species out of consideration without deleting the
+work of describing it.
+
+**Thermal tolerance**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Temp Optimum C` | 12 | Mean annual temperature this species does best at |
+| `Temp Tolerance C` | 12 | How far either side of the optimum it still manages |
+| `Temp Lethal Min C` / `Max C` | −40 / 50 | Hard kill. Outside this the score is zero, not low |
+| `Warmest Month Min C` | 6.4 | **The treeline.** 6.4 °C in the warmest month is the observed global limit of tree growth, and it is a default rather than a constant so a species can sit above or below it |
+| `Frost Free Fraction Min` | 0 | Share of the year above freezing that this species requires |
+| `Gdd Base C` | 5 | Base temperature its growing-degree-days accumulate above. 5 °C for temperate species, 10 °C for warm-season ones |
+| `Gdd Min Required` | 0 | Accumulated warmth it needs before it can complete a season |
+
+**Water**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Moisture Optimum` / `Tolerance` | 0.5 / 0.25 | Against plant-available soil moisture, 0–1 |
+| `Precip Optimum Mm` / `Tolerance Mm` | 800 / 500 | Against annual rainfall |
+| `Aridity Min` / `Max` | 0.2 / 4 | Hard band on precipitation over PET |
+| `Twi Optimum` / `Tolerance` | 6 / 3 | Against topographic wetness. Raise the optimum for a species that wants a drainage hollow |
+| `Water Table Max Depth M` | −1 (off) | Depth below which its roots cannot reach water |
+| `Flood Tolerance` | 0.1 | How much submergence it survives |
+| `Drought Tolerance` | 0.3 | How far below its moisture optimum it holds on. **This is the field that widens a species' real range**, more than the tolerance figures do |
+
+**Water bodies, salt and tide**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Distance To Water Min M` / `Max M` | 0 / −1 (off) | A riparian band. Set max to 30 for a willow that only grows near water |
+| `Salt Tolerance` | 0 | 0 excludes it from the coast entirely. Salt loading decays inland over 120 m |
+| `Tidal Zone` | `None` | Which tidal band it belongs to, for genuinely intertidal species |
+| `Submerged Depth Range M` | (0,0) | Depth band for aquatic species — kelp and seagrass live here |
+
+**Terrain form**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Use Absolute Altitude` | off | On, `Min/Max Altitude M` are hard limits. **Off is usually right**: temperature already encodes altitude through the lapse rate, and a hard altitude band on top of it fights the climate |
+| `Min` / `Max Altitude M` | 0 / 3000 | The band, when the switch above is on |
+| `Slope Optimum Deg` / `Tolerance Deg` | 8 / 20 | Preferred and tolerated steepness |
+| `Aspect Preference Deg` | −1 (none) | Compass bearing it favours. −1 means indifferent, which most species are |
+| `Aspect Strength` | 0.5 | How much that preference weighs |
+| `Curvature Preference` | 0 | Negative prefers hollows, positive prefers ridges |
+
+**Soil**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Soil Depth Min M` | 0.1 | Rooting depth it needs. A hard gate, and the reason bare rock stays bare |
+| `Soil Fertility Optimum` / `Tolerance` | 0.5 / 0.35 | Against the fertility scalar |
+| `Rockiness Max` | 0.7 | Above this the site is scree and holds stone, not stems |
+
+**Competition and light**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Shade Tolerance` | 0.3 | Fraction of full light it can survive on. Low means it needs a gap; high means it can wait under a canopy |
+| `Canopy Layer` | `Canopy` | `Emergent`, `Canopy`, `Understory`, `Floor`. **Decides which of the three light readings it is scored against** |
+| `Lai Contribution` | 2.5 | Leaf area this species adds to the shade above whatever grows beneath it |
+| `Dispersal Lambda M` | 25 | Mean seed travel. Small values clump a species into groves; large values spread it evenly |
+| `Allelopathy Radius M` | 0 | Radius within which it suppresses other species. Non-zero for a walnut, a eucalypt, a heather |
+
+**Size and form**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Mature Height M` | (12, 22) | The **range** a mature individual reaches, not one number |
+| `Dbh Range M` | (0.25, 0.6) | Trunk diameter at breast height |
+| `Crown Allometry A` / `B` | 1.9 / 0.6 | Crown radius = A · dbh^B. The shipped values are measured forest-mensuration figures |
+| `Root Plate Radius M` | 2 | Footprint kept clear of other root plates |
+| `Trunk Flexibility` | 0.35 | How far wind bends it |
+| `Self Thinning K` | 25000 | Its own constant in Reineke's rule — see [stand structure](#stand-structure-crowns-that-do-not-overlap-and-stands-that-thin-themselves) |
+
+**Disturbance**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Fire Response` | `Killed` | `Killed`, `Resprouts`, `Serotinous`, `Resistant`. Decides what a fire-prone site does to it |
+| `Wind Exposure Max` | 0.8 | Above this it does not stand |
+| `Krummholz Above Exposure` | off | On, an over-exposed site **dwarfs** it instead of removing it — which is what actually happens at a treeline |
+| `Krummholz Height Scale` | 0.3 | How far it is dwarfed |
+| `Snow Load Max Kg Per M2` | 200 | Above this it is broken out. The reason conifers dominate snow country is that their figure is higher |
+| `Avalanche Tolerance` | 0.2 | Survival on scoured slopes |
+| `Browse Tolerance` | 0.5 | Survival under grazing pressure |
+
+**Season**
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Deciduous` | off | Whether it drops its leaves |
+| `Budburst Gdd` | 200 | Accumulated warmth before it leafs out — so spring arrives up a mountain later than at its foot, without anyone authoring that |
+| `Senescence Day Length H` | 11.5 | Day length that triggers autumn. Day length, not date, because that is the real trigger |
+| `Spring` / `Summer` / `Autumn` / `Winter Colour` | greens → tan | Tint through the year |
+| `Leaf Off Fraction` | 0.85 | How bare it goes |
+| `Snow Canopy Accumulation` | 0.5 | How much snow it holds in its crown |
+| `Wet Darkening` | 0.4 | How much darker it reads wet |
+| `Seasonal Height Scale` | (0.55, 1) | Winter-to-summer size, for herbs and grasses that die back |
+
+**Rendering and routing** — `Instancing Policy`, `Collider Policy`, `Billboard Start M`,
+`Shadow Cast Distance M`, `Max Per Chunk`, `Lod Bias`, `Detail Density Scale`. These are covered
+in [how a species reaches the screen](#how-a-species-reaches-the-screen-instancing-colliders-and-shadows).
+
+**Biome affinity** — `Allowed Biomes` is a bitmask over the ten biome classes, and
+`Per Biome Weight` is an optional array giving a per-biome multiplier. Leave both alone and the
+species is judged on climate and soil alone, which is usually the better answer: an envelope
+authored in real units already restricts itself to the right biomes without being told.
+
+### The 48 shipped species presets
+
+Every field above has a defensible default, and describing forty of them per prototype by hand is
+work nobody should have to do twice. So 48 presets ship, in ten groups:
+
+| Group | Presets |
+|---|---|
+| **Boreal and montane conifer** | Spruce, Fir, Pine, Larch, Krummholz Dwarf Pine |
+| **Temperate broadleaf** | Oak, Beech, Birch, Maple, Ash, Alder, Willow |
+| **Mediterranean dry** | Olive, Cork Oak, Juniper, Maquis Scrub, Rosemary Shrub |
+| **Tropical** | Rainforest Emergent, Rainforest Canopy, Understory Palm, Coconut Palm, Banana Herb |
+| **Arid** | Saguaro Columnar Cactus, Barrel Cactus, Creosote Shrub, Acacia, Spinifex Tussock |
+| **Coastal saline** | Mangrove, Saltmarsh Grass, Marram Dune Grass, Sea Buckthorn |
+| **Wetland** | Reed, Sedge, Cattail, Sphagnum Moss, Water Lily |
+| **Aquatic** | Kelp, Seagrass, Freshwater Weed |
+| **Alpine tundra** | Cushion Plant, Alpine Sedge, Dwarf Willow, Crustose Lichen |
+| **Grass and ground** | Meadow Fescue, Bunchgrass, Prairie Tallgrass, Bracken Fern, Heather |
+
+**Procedure.** On any prototype, open the `Ecology` foldout, pick a preset, and every field is
+filled with figures for that plant. Then edit whatever you like — the preset is a starting point,
+not a lock.
+
+Applying a preset records **which** preset it was and a checksum of the values it wrote. The
+inspector uses those to tell you whether the block still matches its preset or you have since
+changed it, so "this is a Pine" and "this started as a Pine and has been edited" are
+distinguishable. That distinction is the only thing the provenance is for; nothing enforces it.
+
+The presets are the practical answer to "how do I get a believable wood out of this". Nine of the
+ten groups mirror the way real vegetation is grouped by climate, so choosing them by the world
+you are building — conifers up high, broadleaf in the middle, Mediterranean where it is dry —
+gets you most of the way before you touch a single number.
+
+### How suitability is scored
+
+One prototype, one site, one number between 0 and 1. It is built in this order, and the order is
+the design:
+
+**1. Hard gates first, and they return zero.** Outside a lethal temperature, below the minimum
+soil depth, past `Rockiness Max`, past `Wind Exposure Max`, past `Snow Load Max`, outside the
+aridity band, on ground steeper than the world's `Max Slope`, inside a water body when
+`Avoid Water` is on, inside a road cut when `Avoid Cut Regions` is on — score zero, and the site
+does not hold this species at any density. A gate is not a penalty; a species outside its lethal
+range is not "less likely", it is dead.
+
+**2. Graded terms next, each 0–1.** Temperature, moisture, rainfall, wetness, fertility, slope,
+aspect, curvature, light, salt, browse, snow. Each term is a smooth falloff from its optimum
+across its tolerance.
+
+**3. The terms combine by their minimum, not their product.** This is
+**Liebig's law of the minimum** and it is the single most consequential decision in the model.
+Multiplying ten terms that each sit at 0.8 gives 0.107 — a species perfectly comfortable in every
+respect scores almost zero, and worse, the answer changes when you add an eleventh term that
+happens to be satisfied. Taking the minimum says what ecology actually says: **a plant is limited
+by its scarcest resource.** A site that is warm enough, wet enough and fertile enough but dark
+scores exactly as well as its light allows, and adding more warmth does not help.
+
+**4. Then the threshold.** `Suitability Threshold` on the vegetation manager is the score below
+which a site holds nothing. `Suitability Sharpness` bends the curve between threshold and 1, so a
+low sharpness gives soft ecological gradients and a high one gives crisp boundaries.
+
+**5. Then the pick.** Species scoring above the threshold are weighted by score × the envelope's
+own `Weight`, and one is drawn. With `Allow Mixed Stands` on, up to `Max Species Per Site`
+survive; off, the best one takes the site. **A site suiting nothing keeps nothing** — no fallback
+species is forced in, which is what leaves genuine bare ground where the ground really is
+hostile.
+
+**Three independent random streams, and they must be independent.** Placement, species choice and
+density thinning each draw from their own stream, salted by the scatter channel. Sharing them
+produces artefacts that read as an invisible hand rather than an ecosystem: share placement with
+species and every oak comes out large and every birch small; share species with thinning and the
+rarer species is the one removed on marginal ground, so a mixed stand purifies itself as
+conditions worsen. The channel is folded in as well, because every scatter node ships with the
+same default seed — without that, shrub species would track tree species slot-for-slot across the
+whole world.
+
+### Canopy layers and the light stack
+
+Shade is a stack, not a scalar, so the site carries **three** light readings and each species is
+scored against exactly one of them:
+
+| `Canopy Layer` | Reads | Meaning |
+|---|---|---|
+| `Emergent` | full light | Nothing shades it. The few trees that break through the canopy |
+| `Canopy` | `subcanopyLightFraction` | Light below the emergents. What a canopy oak competes in |
+| `Understory` | `canopyLightFraction` | Light below the closed canopy |
+| `Floor` | `floorLightFraction` | What grass, moss and seedlings receive |
+
+One number would have to pick which of the three to be wrong about — and picking "floor light",
+the intuitive choice, would exclude every canopy tree from the wood it forms, because a mature oak
+does not grow in the shade a mature oak casts.
+
+Light comes down through the stack by **Beer–Lambert extinction**: each layer's transmittance is
+e^(−k · LAI) with k = 0.5, and LAI is the sum of the `Lai Contribution` of everything standing
+above, capped at 12. `Understory Light Floor` on the vegetation manager sets a minimum so a closed
+canopy does not sterilise the ground completely, which real ones do not.
+
+Turn the whole mechanism off with `Enable Canopy Competition`. `Canopy Layer Passes` is how many
+times the stack is resolved; more passes let a taller layer's shade propagate further down before
+the answer settles.
+
+### Landform assemblages: where each community lives
+
+Suitability answers whether a species *can* stand at a point. It does not, on its own, make a
+place recognisable — a purely numeric model plants the right species but not the right
+*community*. So every candidate is also classified into exactly one landform zone, derived from
+the site sample and never authored, and each zone carries the real assemblage that belongs to
+it. This is the answer to "which community grows around the ocean, the lakes, the hills, the
+mountain, the valley, the snow."
+
+| Zone | Derived from | The community you get |
+|---|---|---|
+| **Submerged / benthic** | submerged depth > 0 | kelp on rock (2–30 m), seagrass on sediment (0–10 m), coral in warm shallow clear water, freshwater weed in lakes |
+| **Intertidal** | tidal zone, at the waterline, salt high | mangrove in the tropics, saltmarsh grass in temperate, bare sorted shingle where waves are strong |
+| **Coastal dune / strand** | 0–120 m from water, salty, sandy | marram grass → sea buckthorn → salt-pruned pine, a visible three-band gradient |
+| **Lake margin** | lake nearby, shallow water table, low slope | reed and sedge in the water, willow and alder carr behind, wet meadow beyond |
+| **Riparian gallery** | along a river, within the water band | a linear forest following the channel through country too dry for forest — the strongest cue a river is real |
+| **Valley floor** | low, concave, high wetness, deep soil | the tallest, densest, most fertile stand in the world: emergents, closed canopy, rich understory |
+| **Hillside** | moderate slope, mid wetness | mixed forest, aspect-split: warm-slope oak / dry scrub against cool-slope conifer / fern |
+| **Ridge and spur** | convex, wind-exposed | sparse, wind-flagged, stunted; bare where exposure exceeds the species' limit |
+| **Montane forest** | above the valley belt, below treeline | conifer-dominated, density falling with altitude through the lapse rate alone |
+| **Treeline / krummholz** | warmest month within ~1 °C of 6.4 | dwarfed wind-flagged scrub instead of absence — the band that makes a mountain read as a mountain |
+| **Alpine tundra** | above treeline, below permanent snow | cushion plants, alpine sedge, dwarf willow, lichen; bare rock rising |
+| **Nival / permanent snow** | snow-covered year-round | lichen on exposed rock only; nothing else |
+| **Cliff and rock face** | steeper than any species allows | nothing rooted; crevice plants only in concave hollows |
+| **Talus / scree** | below cliffs, high rockiness | loose stone; pioneer colonisers only where fines have gathered |
+| **Arid plain / desert** | aridity < 0.2 | spaced by *water* competition (root-zone radius, not crown): cactus, creosote, ephemeral grass in swales |
+| **Steppe / savanna** | aridity 0.2–0.5 | a grass matrix with scattered acacia; trees concentrate where wetness is high |
+| **Bog / peatland** | flat, high wetness, cold, waterlogged | sphagnum, cotton-grass, stunted pine on hummocks |
+
+Spacing is not universal across these zones. In arid zones the competition is for water and
+spacing scales with root-zone radius — which is why desert shrubs sit near-regularly spaced far
+apart rather than reading as thinned forest. In wetlands spacing is near-zero and species form
+continuous mats. In closed forest spacing is crown-driven. And bare ground is *produced*, not
+left over: rock above the slope limit, permanent snow, saline pan, active channel bed, tidal
+scour and the wind-scoured lee of a ridge each write a bare-ground mask that also suppresses the
+soil splat that would otherwise read as ground under nothing. Transitions have real widths — a
+treeline over ~100 m of altitude, a coastal salt gradient over ~120 m, a biome boundary over
+~12 m — so the treeline is a band, not a contour line.
+
+### Detail memory: the arithmetic that decides whether it ships
+
+Grass and ground cover are `TerrainData` detail layers, and a detail layer is an
+`int[detailResolution, detailResolution]` array **per layer, per chunk**. That is the one cost
+in the whole vegetation system most likely to kill a mobile build, so it is worth doing the
+arithmetic before a build rather than discovering it in a crash report:
+
+```
+detail memory = detailResolution² × 4 bytes × layerCount × residentChunks
+```
+
+At the desktop default resolution of 512, one layer on one chunk is 512 × 512 × 4 B ≈ **1 MB**.
+Eight detail species across 26 resident chunks is ≈ **208 MB** of managed memory — on a 6 GB
+phone sharing memory with the OS, that number alone is the difference between shipping and being
+killed by the low-memory killer. The mobile default resolution is therefore **256**, a 4× saving
+(≈ 260 KB per layer per chunk), and the mid-range preset is expected to land under 96 MB for
+detail layers.
+
+The inspector shows this figure live, in MB, computed from the formula above, with a hard
+warning above a configurable ceiling — so the cost is visible before the build, not after. This
+is the same honesty as the lighting probe count and the geometry budget: a number a buyer can
+check, stated before it bites.
+
+GPU instancing is the other side of the same budget. An instanced draw is a GPU submission with
+no GameObject behind it — far cheaper, and the reason a hundred thousand instanced stems is
+viable where a hundred thousand prefabs is not — but it cannot carry a collider (see
+[how a species reaches the screen](#how-a-species-reaches-the-screen-instancing-colliders-and-shadows)).
+`Enable GPU Instancing` on the world turns it on for scattered vegetation and objects, and the
+library's `GPU Instancing Threshold` is the hierarchy guard that stops a density spike from
+turning into tens of thousands of GameObjects.
+
+### Stand structure: crowns that do not overlap, and stands that thin themselves
+
+Two rules run after species are assigned, and both can be switched off.
+
+**Crown spacing** (`Enable Crown Spacing`). Two trees cannot occupy the same air. The required
+separation between neighbours is the sum of their crown radii, floored by the world's tree
+spacing, and crowns are separated by dominance — the more suitable individual keeps its position
+and the less suitable one moves or goes. Crown radius comes from the allometry below, so a
+sapling and a veteran are not given the same personal space.
+
+**Self-thinning** (`Enable Self Thinning`). A stand cannot carry unlimited stems at a given size.
+**Reineke's rule** — stems per hectare ∝ mean dbh^(−1.605) — sets the maximum, with each species'
+own `Self Thinning K` scaling it. Over-dense stands lose their least dominant stems until they fit
+under the line. The exponent is the measured one from Reineke's 1933 work and applies remarkably
+well across species, which is why it is a constant here and the per-species dial is `k`.
+
+Together these are what make a generated wood read as a wood: stems that thin with size, crowns
+that touch without interpenetrating, gaps where the ground could not support another tree.
+
+### Allometry: every instance a different size, for a reason
+
+An instance's size is not a random scale on a prefab. It is resolved from the envelope, the site's
+suitability, and a per-instance hash:
+
+- **Height** is drawn from `Mature Height M`, biased by suitability — a marginal site grows a
+  smaller tree, which is what marginal sites do.
+- **Dbh** is drawn from `Dbh Range M`, correlated with height.
+- **Crown radius** is `A · dbh^B` from the allometry constants, so a fat trunk carries a broad
+  crown and the two never disagree.
+- **Scale** is then the ratio of the resolved height to the prefab's own native height, so the
+  same figures give the right result on prefabs modelled at different sizes.
+
+**Krummholz** is the exception worth knowing. With `Enable Krummholz` on and the species'
+`Krummholz Above Exposure` set, an over-exposed site does not remove the species — it multiplies
+its height by `Krummholz Height Scale`. That is the dwarfed, wind-flagged, waist-high pine you see
+at a real treeline, and it is the difference between a treeline that fades and one that stops at a
+line.
+
+### Density is a ceiling, not a target
+
+The authored density is the **most** a site may carry, never the number it will carry. The dart
+solver throws at the ceiling, and the surplus is removed by a deterministic hash thin during
+species assignment — so no site is environment-sampled twice, and the thin is repeatable.
+
+This matters when reading numbers back: a chunk configured for 400 stems per hectare on ground
+that only suits 30 % of its candidates carries about 120, and that is correct. If you want 400,
+raise the ceiling or improve the ground.
+
+**Density is counted per prototype, never per chunk.** `Max Per Chunk` on an envelope caps that
+species; it does not cap the total.
+
+`Global Density Scale` on the vegetation manager, 0–2, is already folded into the tree and grass
+per-square-metre figures. Anything reading those must not multiply by the dial as well — the dial
+is carried separately only for the channels with no per-hectare field of their own (shrubs,
+objects, rock, debris) so that one dial still thins them.
+
+### How a species reaches the screen: instancing, colliders and shadows
+
+Four envelope fields decide how an instance is delivered, and they are resolved **together**
+because they constrain each other.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `Instancing Policy` | `WhenDense` | `Never`, `WhenDense`, `Always`. Instanced draws are far cheaper and cannot carry a collider |
+| `Collider Policy` | `Auto` | `Auto`, `Never`, `Always`. `Auto` follows the section the prototype sits in |
+| `Billboard Start M` | −1 (world default) | Distance at which it becomes a billboard |
+| `Shadow Cast Distance M` | 60 | Beyond this it stops casting |
+| `Max Per Chunk` | −1 (no cap) | Per-species instance cap |
+| `Lod Bias` | 1 | Multiplies its LOD distances |
+
+**Instancing and colliders are one decision, not two.** An instanced draw is a GPU submission with
+no GameObject behind it, so it cannot own a collider. Asking for both is asking for a contradiction,
+and the resolution is explicit rather than silent: an **explicitly authored** collider survives
+`Instancing Policy.Always`, because you said you wanted it; `Auto` yields to instancing, because
+you did not.
+
+`GPU Instancing Threshold` on the library is a **hierarchy guard** that overrides collider policy
+regardless of the per-prototype flag. Its purpose is to stop a density spike from creating tens of
+thousands of GameObjects, and it is deliberately blunt.
+
+### Seasonal appearance
+
+With `Enable Seasonal Phenology` on, each species' appearance is resolved from the season phase
+and the site's altitude:
+
+- **Budburst** happens when accumulated warmth passes `Budburst Gdd`, so spring climbs a mountain
+  over weeks rather than arriving everywhere at once. Nobody authors that gradient; it falls out of
+  the lapse rate.
+- **Senescence** triggers on day length dropping past `Senescence Day Length H` — day length, not
+  date, because that is the real cue and it makes autumn latitude-dependent for free.
+- **Colour** interpolates through the four seasonal colours, darkened by `Wet Darkening` in rain.
+- **Height** scales through `Seasonal Height Scale`, which is what lets a herb layer die back for
+  winter instead of standing green in the snow.
+
+Deciduous species go bare to `Leaf Off Fraction`; evergreens hold `Snow Canopy Accumulation` of
+snow in the crown instead.
+
+### The world-level ecology settings
+
+These live on `UCVegetationSystemManager` and apply to every species. The climate they describe
+comes from the lighting and weather managers, so the three are read together and a world with
+neither still grows something recognisable — a temperate generalist climate matching the envelope
+defaults, rather than bare rock.
+
+| Group | Fields |
+|---|---|
+| **Suitability** | `Suitability Threshold`, `Suitability Sharpness`, `Allow Mixed Stands`, `Max Species Per Site` |
+| **Sampling** | `Water Search Radius Metres`, `Soil Depth Max Metres`, `Soil Angle Of Repose Degrees`, `Fertility From Curvature`, `Wetness Catchment Radius Metres`, `Salt Spray Decay Metres` |
+| **Competition** | `Enable Canopy Competition`, `Canopy Layer Passes`, `Understory Light Floor`, `Enable Self Thinning`, `Enable Crown Spacing` |
+| **Dispersal** | `Enable Dispersal Clustering`, `Dispersal Seeds Per Hectare`, `Cluster Contrast` |
+| **Disturbance** | `Enable Fire`, `Fire Return Base Years`, `Enable Browse`, `Browse Pressure Base`, `Enable Snow Load`, `Snow Load At Treeline`, `Enable Avalanche`, `Avalanche Min Slope Degrees`, `Enable Krummholz` |
+| **Hard gates** | `Max Slope Degrees`, `Min` / `Max Altitude Metres`, `Clearance Metres`, `Avoid Water`, `Avoid Cut Regions`, `Use Graph Masks`, `Mask Threshold`, `Biome Blend Metres` |
+| **Density and budget** | `Global Density Scale`, `Tree Density`, `Grass Per Square Metre`, `Tree Spacing`, `Candidates Per Square Metre`, `Max Instances Per Cell`, `Shadow Caster Distance Metres` |
+| **Season** | `Enable Seasonal Phenology` |
+
+From the **lighting manager**: latitude, the warm aspect that follows from it, day length and
+extraterrestrial radiation through the year. With no lighting manager the fallback is latitude 0 —
+twelve-hour days all year and the radiation an untilted equator receives, which are the real values
+for the equator rather than placeholders.
+
+From the **weather manager**: sea-level mean temperature, lapse rate, annual and diurnal
+temperature range, continentality, annual precipitation. `Derive Temperature From Latitude` is
+worth knowing about: with it **off**, a world can sit at 60° north and 22 °C at the same time, and
+the treeline will believe the number and ignore the latitude. With it on, the baseline temperature
+comes from where on the planet the world is, and the altitude-for-latitude trade — treelines
+dropping as you go north — emerges instead of being authored.
+
+Ten biome classes are available to the affinity mask, in this order: Tundra, Boreal Forest,
+Temperate Grassland, Temperate Forest, Temperate Rainforest, Desert, Savanna, Tropical Seasonal
+Forest, Tropical Rainforest, Ice. Ice is last, not first.
+
+### Procedure: turning a prefab into a species
+
+1. Drop the prefab into the section that matches how it should behave — **Trees** for anything
+   numerous with a trunk, **Shrubs & Bushes** for something you walk through, **Grass & Detail**
+   for ground cover, **Rocks & Props** for anything you bump into. That choice decides its motion
+   model and its physics, and it is not part of the ecology block.
+2. Open its `Ecology` foldout and pick the closest of the 48 presets. Every field fills with real
+   figures for that plant.
+3. Set `Canopy Layer`. It decides which light reading the species is judged against, and getting
+   it wrong is the most common reason a species never appears — a canopy tree marked `Floor` is
+   competing for light it will never see.
+4. Adjust only what your prefab actually contradicts. `Mature Height M` if your model is a
+   different size than the preset assumes; `Weight` to make it commoner or rarer relative to its
+   neighbours; `Allowed Biomes` only if climate alone is not restricting it the way you want.
+5. On the world, set the **weather** manager's temperature and rainfall and the **lighting**
+   manager's latitude, and turn `Derive Temperature From Latitude` on so the two agree.
+6. Generate. Then use `Suitability Threshold` as the single dial for how picky the world is: raise
+   it for sparse, hard-edged vegetation, lower it for continuous cover.
+
+If a species never appears, the order to check is: `Enabled` on and `Weight` above zero → its
+lethal temperature range against the world's actual climate → `Canopy Layer` → `Soil Depth Min M`
+against ground that is mostly rock → `Allowed Biomes` if you set it → then
+`Suitability Threshold`. Each of those is a hard gate before it is a preference, and a hard gate
+produces nothing rather than less.
 
 ### Wind
 
@@ -4287,6 +6008,53 @@ idea of "fast" changes with it.
 `_SecondaryScale` at 0.37 is deliberately not a neat fraction — two wave layers at a simple
 ratio resynchronise periodically and the surface visibly pulses.
 
+### Detail shader control surface
+
+`UniverseCreator/WindDetail` draws grass and shrubs. Alongside the wind properties it carries
+the two things a sward does over a year: it **cures** to straw and it **repigments**.
+
+| Group | Properties |
+|---|---|
+| **Cure** | `_DryColor` ((0.82,0.78,0.55)), `_DryBlend` (0), `_DryGradient` (1) |
+| **Season** | `_SeasonTintEnable` (off), `_SpringColor`, `_SummerColor` ((1,1,1)), `_AutumnColor`, `_WinterColor`, `_SeasonTintStrength` (1), `_LeafOffFraction` (0.85) |
+| **Weather** | `_WetDarkening` (0.5), `_SnowAccumulation` (1) |
+
+**The season tint replaces pigment, it does not multiply it.** Autumn is not a filter over a
+green leaf — chlorophyll is resorbed and the carotenoids it was masking all summer become
+visible. Multiplying cannot reproduce that: a green albedo carries almost no red for an orange
+tint to scale, so the result only darkens, which is why multiply-tinted autumn foliage reads as
+dirty green however carefully the tint is picked. The tint is applied as a hue rotation
+instead, so green genuinely becomes gold.
+
+That is also why **white means unchanged**. The four season colours are tints, and it is their
+*saturation* that drives how far the hue turns. `_SummerColor` at (1,1,1) has no saturation,
+rotates nothing, and falls through to a plain brightness multiply — so a material authored
+before this existed looks exactly as it did.
+
+**The cure runs tip-first.** `_DryGradient` at 1 keeps green in the crown while the tips go
+straw; at 0 the cure spreads flat over the whole blade. Tip-first is not a stylistic choice —
+a grass leaf grows from a basal meristem, so the tip is the *oldest* tissue on the blade, it is
+the furthest point along the transpiration path so it reaches turgor loss first, and it sits in
+the thinnest boundary layer so it loses most to drying air. Three independent mechanisms, all
+pointing the same way.
+
+`_DryBlend` is the fixed cure an author dials in. `_LeafOffFraction` is the part the world
+drives on top of it, off the same seasonal envelope the tree canopies use — held under the same
+name deliberately, because it is the same number and two names for it would drift. A meadow
+therefore goes straw in September without anyone editing a material.
+
+**Who owns the colour is decided in code.** Terrain scattering writes the season, rain and snow
+into each detail prototype's `healthyColor`/`dryColor`, and Unity's detail renderer hands that
+to the shader as vertex colour — a flat multiply, with the same limitation described above.
+Both sides applying the season means it lands twice, and a meadow in an autumn storm goes near
+black. So enabling `_SeasonTintEnable` is a **handover, not a second copy**: the scatter step
+detects the live keyword on one of our detail materials and stops writing the colours, leaving
+the season to the shader, which does it per pixel and tip-first. A vendor material, or the
+keyword left off, keeps the CPU path. Height is never handed over — only the CPU can resize a
+prototype.
+
+The keyword defaults **off**, so existing swards keep the CPU path until opted in.
+
 ---
 
 ## 36. Performance and mobile budgets
@@ -4391,7 +6159,7 @@ the water actually reaches.
 Hybrid Multifractal (Size 1500, Offset 0.7)
   → Droplet Erosion (Raindrops 60000, Lifetime 64, Inertia 0.03, Deposit 0.35)
   → River Network Trace (Channel Threshold 600)
-  → River Carve (Depth 0.015, Profile Power 1.8, Bed Flattening 0.7)
+  → River Carve (Depth 0.015, Profile Power 1.8, Bed Width Fraction 0.4)
   → Height Output
 ```
 
@@ -4532,6 +6300,62 @@ This has three causes and no others.
    show it here first.
 
 Turn on **`Show Slice Map`** on `ChunkManager` to see exactly which boundary is failing.
+
+### The Hydrology Spawner produced nothing — no rivers, no lakes, no ocean, and no error
+
+**Check the wire before anything else.** The spawner is skipped entirely unless a path exists
+from one of its outputs, forwards through the graph, to an `Output` node. `UCWaterSystemManager`
+walks backwards from every Output and runs only the spawners it reaches, so a spawner sitting on
+the canvas with both `Lake Mask` and `River Mask` free is unreachable — and an unreachable node
+is a legitimate thing for a graph to contain, so nothing warns you.
+
+The confusing part is that the outputs are masks, not water objects. `Lake Mask` is the basin
+footprint and `River Mask` is the traced river course, so connect them to the corresponding
+shaping or texturing inputs. Also check the required `Height` input: without it the node has no
+terrain to solve and both masks are empty. At least one output must still reach an `Output` node
+so the water system considers the spawner reachable and executes it.
+
+In order, the rest of the causes:
+
+1. **No path to an Output.** As above. This is the overwhelming majority of cases.
+2. **`Generate Ocean` off** when the sea is what is missing. The world is then land-locked on
+   purpose.
+3. **`Target River Count` at 0**, or `Lake Chunk Percentage` at 0 — the kind you zeroed is
+   absent because you asked for none of it.
+4. **`UCWaterSystemManager.Source` set to `Hand Placed`.** The default is `Both`; on `Hand
+   Placed` the manager ignores node-graph water completely, and hand-placed bodies keep working,
+   which makes it look like water is fine and only the spawner is broken.
+5. **The build has not settled yet.** The spawn is queued behind `ChunkManager.RunAfterSettle`
+   on purpose: at graph-evaluation time the terrain is still the flat baseline, so spawning then
+   would trace every river across a plane. On a large world the wait is visible. It is not a hang.
+6. **The world is too small for the thresholds.** `Channel Head Area` defaults to 250,000 m² of
+   catchment before a channel counts as a river. A 600 m test world may not contain a catchment
+   that large anywhere, and comes out riverless with nothing wrong. Lower the threshold, or build
+   a bigger world. Lakes have a 60 m² floor and are not affected.
+
+The full wiring procedure with a twelve-line checklist is
+[How water is built end to end](#how-water-is-built-end-to-end-two-chains-and-both-must-be-wired).
+
+### A water body exists but has no material — flat untextured grey
+
+The *where* chain worked and the *what it looks like* chain did not. Water needs both, and they
+live in different graphs.
+
+1. **No `Water Surface` node in the Texture Graph.** Nothing describes water, so no water
+   material is built. This is not treated as an error — a graph that describes a dry world is
+   legitimate, and the material builder simply reports no water material and moves on.
+2. **`Terrain Blend Final`'s `Water` input is unwired.** Nothing in the Texture Graph reaches a
+   material except through `Terrain Blend Final` → `Shader Output`. A `Water Surface` chain that
+   stops short of that input is dead code however carefully it is tuned.
+3. **`Terrain Blend Final` does not reach `Shader Output`.** Then no materials are built at all,
+   terrain included — so if the ground is also untextured, start here.
+4. **A `Water Foam` or `Caustics` node wired on one side only.** It contributes nothing and is
+   silently absent. Both its `Water` in and its `Water` out must be connected; those nodes sit
+   *inside* the chain, never beside it.
+5. **The material exists but renders as a flat sheet of deep colour.** That is the URP depth and
+   opaque textures missing — see [Water is a flat opaque sheet](#water-is-a-flat-opaque-sheet).
+   The builder force-enables both when it creates the material, so this points at a renderer that
+   was changed afterwards.
 
 ### Water is a flat opaque sheet
 
@@ -4729,7 +6553,933 @@ Nothing in `Core/Runtime/` may reference `UnityEditor`.
 
 ---
 
+## 40. Dynamic lighting — capabilities and honest limits
+
+The Living World layer adds a physically-driven lighting system: a sun and moon placed
+from the world's real latitude, date and time; a sky and atmosphere coloured from
+turbidity and sun elevation; clouds; and a single-bounce diffuse indirect-light grid that
+picks up the ground and the season. This chapter states plainly where that is *ahead* of a
+traditional baked pipeline and where it is *behind* a full real-time global-illumination
+solution, so the boundary is a documented scope decision and not a surprise.
+
+### Where it is ahead of a baked pipeline
+
+- **Physically driven, not painted.** The sun's position, the sky's colour and the day's
+  length come from the world's latitude, longitude, axial tilt and calendar day through one
+  astronomy path — the same numbers the weather and vegetation systems read. Two worlds at
+  different latitudes light differently because the physics differs, not because someone
+  tuned two gradients.
+- **Fully dynamic time of day and season, with no bake step.** Time can move to any hour
+  and any day and the whole scene follows — sun angle, day length, sky colour, ambient
+  fill. There is no lightmap to bake, no bake to wait for, and nothing that goes stale when
+  the world or the hour changes.
+- **Weather-coupled.** Turbidity, cloud and wetness feed the same lighting, so an overcast
+  hour and a clear one are genuinely different light, not a post-effect laid over a fixed
+  bake.
+- **Runs on mid-range mobile.** The indirect grid marches the terrain heightfield rather
+  than building and storing a distance field for every mesh, which is why the whole layer
+  fits a mid-range mobile frame and memory budget (see the itemised figures in the module's
+  budget and [chapter 36](#36-performance-and-mobile-budgets)).
+- **Deterministic.** The same world, hour and seed produce identical lighting on every
+  machine — there is no temporal noise that resolves differently per device or per run.
+
+### Where it is behind a full real-time GI solution
+
+Stated plainly, so you do not discover them mid-project:
+
+- **Indoor multi-bounce transport.** The indirect grid is a single diffuse bounce sized for
+  outdoor worlds. Deep interiors lit only by light that has bounced several times through
+  rooms and corridors are not solved; light does not propagate correctly through a warren of
+  enclosed spaces.
+- **Light through openings into interiors.** A shaft of daylight falling through a window or
+  doorway and filling a room behind it is not modelled — the grid samples the open sky and
+  the ground, not apertures in arbitrary geometry.
+- **Specular occlusion and traced reflections.** Reflections are analytic sky plus the
+  diffuse grid, with an optional half-resolution screen-space pass on flagship tiers only.
+  Off-screen geometry does not reflect, and glossy surfaces are not occluded by nearby
+  geometry the way a full ray-traced reflection would occlude them.
+- **Emissive surfaces lighting the scene.** Bright emissive materials do not cast their own
+  indirect light onto surroundings for arbitrary meshes; the indirect light is driven by sun,
+  sky and ground, not by scene emitters.
+- **Occlusion from arbitrary dynamic geometry.** The one surface traced exactly is the
+  terrain heightfield — which is where the overwhelming majority of outdoor occlusion and
+  bounce comes from. Occlusion and bounce from arbitrary meshes (buildings, props, dynamic
+  objects) is approximated by the grid, not traced against those meshes.
+
+If your project is an interior-heavy scene that lives or dies on multi-bounce transport
+through rooms, a bake or a full real-time GI solution remains the right tool. For the
+outdoor worlds this toolkit generates, the trade is deliberate: exact, cheap, dynamic
+terrain lighting in exchange for the interior cases above.
+
+### The tier ladder — what each tier adds, and what it costs
+
+Lighting is built as a ladder of tiers. **Each tier is individually switchable and
+independently correct** — T0 alone is a finished, shippable image; every tier above only
+adds. The mid-range preset defaults to T0+T1(+T1.5); T3 is flagship-only. If a world only
+looks right at T3, the mid-range target is already lost, which is why the ladder is built
+and verified from the bottom up.
+
+| Tier | What it adds | Mid-range cost | Flagship cost | Default on |
+|---|---|---|---|---|
+| **T0** | Analytic ambient from the sky model; directional sun and moon; sky-tinted fog | ~0 ms | ~0 ms | Both |
+| **T1** | Sparse irradiance grid — 6-direction ambient cubes, terrain and canopy bounce | < 0.5 ms | < 0.3 ms | Both |
+| **T1.5** | Multi-bounce feedback, sky visibility, bent normals, foliage colour bleed — all CPU/shader-side, no renderer feature | +0.6 ms | +0.5 ms | Mobile High and up |
+| **T2** | URP SSAO + contact shadows | ~1.5 ms | ~1.0 ms | Flagship; mid-range optional |
+| **T3** | Half-resolution screen-space GI (with irradiance-grid fallback) and, on Ultra only, screen-space reflections | **off** | ~2.5 ms | Flagship only |
+
+**T1.5 is the tier that earns its keep.** It is where the largest visual gain per
+millisecond sits: infinite multi-bounce (each refresh feeds the previous refresh's grid
+back in, so bounce 2 arrives next frame and the series converges because every albedo is
+below 1), sky-visibility bent normals, and real leaf-optics colour bleed — all of it pure
+CPU and shader work with no renderer feature, which is exactly why it runs on a flagship
+phone. Nothing above T1 is ever *required* for a correct image; T1.5 and up only enrich it.
+
+### Cloud types — decided by the weather, never authored
+
+There is no authored cloud-type field anywhere. Cloud genus is decided from the atmospheric
+state the [weather model](#42-weather-and-climate) already produces — lapse rate, per-layer
+humidity, front kind and distance, surface heating and orographic lift — so the sky changes
+genus as the weather changes, and a monsoon-latitude world runs deep convective cloud for
+half the year and clear subtropical skies for the other half with nothing seasonal authored.
+
+| Type | Altitude | Forms when | Rendered as | Precipitation |
+|---|---|---|---|---|
+| **Cirrus** | 6–12 km | High, cold, ice crystals; ahead of a warm front | Thin wispy streaks, ice-crystal white, no shadow | None; halo around sun |
+| **Cirrostratus** | 6–8 km | Warm front further advanced | Milky whole-sky veil; sun visible through it | None; raises turbidity |
+| **Altostratus / Altocumulus** | 2–6 km | Mid-level lift, moderate stability | Layered or dappled sheet; sun a bright patch | Light, often not reaching ground |
+| **Stratus** | 0.1–1 km | Stable air, high RH, weak wind | Flat featureless deck; no visible sun | Drizzle |
+| **Stratocumulus** | 0.5–2 km | Stable with weak convection under an inversion | Broken lumpy deck, visible cell structure | Light showers |
+| **Cumulus humilis** | base at LCL, shallow | Conditionally unstable, daytime heating | Small bright cauliflowers, strong self-shadowing, wide gaps | None — the fair-weather sky |
+| **Cumulus congestus** | base at LCL, deep | Unstable, strong heating | Tall, vertical, dark bases | Showers |
+| **Cumulonimbus** | base 0.5–2 km, top to 12 km+ | Absolutely unstable, deep moisture | Towering, anvil top, very dark base, sharply lit flanks | Heavy convective rain, hail, lightning |
+| **Nimbostratus** | 0.5–4 km, thick | Warm-front or occluded frontal lift | Uniform dark grey, no structure, low base | Steady prolonged rain |
+| **Lenticular** | at ridge-top level | Stable air forced over a range — orographic, from the terrain | Smooth lens shapes stationary over the ridge while wind flows through them | None |
+
+### The exposure model — why a physical sun is viewable at all
+
+A physically driven sun spans about 100 000 lux at noon and 0.25 lux under a full moon.
+Nothing on screen can display that range directly, so the manager carries an exposure model
+with three modes:
+
+- **Physical (default).** Exposure is computed analytically from the scene's key illuminance
+  — the brightest of sun, moon and a starlight floor — derived from the clock and weather,
+  **not** from an image histogram. Because it is analytic it is deterministic, costs nothing,
+  and does not swim when the camera turns (the usual auto-exposure artefact). Anchors: noon
+  ≈ EV 15, overcast ≈ EV 12, full moon ≈ EV −3.
+- **Manual.** An authored EV, for a fixed-look project.
+- **Adaptive.** The analytic target approached at a rate-limited, asymmetric pace — fast
+  toward light, slow toward dark, matching human eye adaptation. Walking from bright noon
+  into deep forest shade brightens over about a second and returns faster.
+
+Tonemapping is URP's own, through a Volume profile the module creates and owns — there is no
+second tonemapper written into the terrain shader.
+
+### The irradiance grid and its budget
+
+The indirect grid (T1) is a sparse set of six-direction ambient cubes refreshed incrementally
+— on the order of 64 probes per frame — so terrain, snow and canopy bounce reach the whole
+loaded world without a bake. Its cost, and the rest of the lighting layer's, is itemised here
+so the mid-range frame budget is visible rather than assumed. Read this against the [geometry
+budget](#41-geometric-density--capabilities-and-honest-limits) and the vegetation budget —
+they are the same frame.
+
+| System | Mid-range | Flagship |
+|---|---|---|
+| Sun/moon rig + sky model CPU | < 0.05 ms | < 0.05 ms |
+| Sky LUT rebuild (amortised) | < 0.1 ms | < 0.1 ms |
+| Skybox draw | < 0.3 ms | < 0.3 ms |
+| Cloud sheets (3) | < 0.6 ms | < 0.9 ms |
+| Cloud shadow cookie | < 0.3 ms | < 0.3 ms |
+| Irradiance grid refresh (64 probes/frame) | < 0.5 ms | < 0.3 ms |
+| Irradiance sampling (in-shader) | included in terrain pass | included |
+| URP SSAO | ~1.0 ms | ~0.8 ms |
+| Contact shadows | < 0.4 ms | < 0.3 ms |
+| SSGI (half res) | **off** | < 2.5 ms |
+| Sun shafts | optional | < 0.4 ms |
+| **Total lighting** | **≈ 2.2 ms at T0+T1(+T2)** | **≈ 5.5 ms at T0–T3** |
+
+Against a 33.3 ms mid-range frame and a 16.6 ms flagship frame, with terrain, vegetation and
+weather also to pay for. That is why T3 is flagship-only.
+
+Memory is itemised the same way and checked live in the lighting inspector's **Memory Budget**
+section against a stated **48 MB mid-range ceiling**: the Sky LUT is 4 KB; managed irradiance
+probes cost 72 B each; the two `Texture3D` irradiance volumes cost 48 B per probe; the cloud
+noise texture is 256 KB; the contact-shadow target is ≈ 2 MB and the (flagship-only) SSGI
+targets ≈ 12 MB at 1920×1080. The fixed mid-range overhead is ≈ 2.24 MB, leaving the probe
+grid the only allocation that can approach the ceiling — which the inspector flags.
+
+> **Measured figures are the tester's to fill.** The millisecond columns above are the design
+> budget. The two required profiler captures — one mid-range, one flagship, each in this
+> module's worst case (dense forest, thunderstorm, snow, full cloud, sunrise) — are read from
+> the Unity Profiler on real hardware and pasted here; they are not asserted from the desk.
+
+### Indirect light, reflections and multi-bounce — measured against Lumen
+
+This is the honest comparison, feature by feature, against what Lumen actually does. Read the
+table as the shipped claim: it says "better" four times and "below" twice, and both "below"
+rows are named rather than hidden.
+
+| Lumen capability | This module | Verdict |
+|---|---|---|
+| Diffuse GI, dynamic, no bake | Irradiance grid (T1) | **Match** |
+| Multi-bounce (effectively infinite) | Temporal grid feedback (T1.5) | **Match**, at ~zero added cost |
+| Ray-traced occlusion vs geometry | Heightfield trace vs terrain | **Better for terrain**, absent for arbitrary meshes |
+| Sky occlusion / bent normals | Bent-normal sky visibility (T1.5) | **Match** |
+| Emissive surfaces light the scene | Capped emissive contributors | **Match**, capped count |
+| Foliage colour bleed | Real leaf optics, season-driven | **Better** — driven by leaf transmittance and the season, not a tint |
+| Screen-space reflections | Half-res SSR, Ultra only | **Below** — half resolution, screen-space only |
+| Reflections with off-screen fallback | Sky + grid specular | **Match in kind**, lower fidelity |
+| Reflections on mobile | Analytic sky + wetness | **Better** — Lumen reflections do not ship on this hardware at all |
+| Arbitrary dynamic geometry occlusion | not delivered | **Below**, and stated here |
+| Deterministic, identical on every machine | pure function of world, seed and clock | **Better** — Lumen is not |
+| Runs at 30 fps on a 350 GFLOPS mobile GPU | the whole design target | **Better** — this is the point |
+
+**Determinism is a real claim, not a hedge.** Every term here except the screen-space ones is
+a pure function of world position, seed and the clock, so two machines showing the same place
+at the same simulated time compute the same indirect light — no bake, no probe-placement pass,
+no "it looks different on the artist's machine." The screen-space reflection and GI terms are
+kept **strictly cosmetic**: they are never required for a correct image, so excluding them
+from the deterministic grid fill costs nothing and keeps the determinism claim true. Nothing
+here ray-traces arbitrary meshes, uses micropolygons, or reaches parity with either "below"
+row; where a Lumen capability is not matched, the table says so.
+
+The per-device-class split of these indirect terms:
+
+| Item | Mobile Low | Mobile High | Desktop | Ultra |
+|---|---|---|---|---|
+| Highest tier | T0/T1 | T1.5 | T3 (no SSR) | T3 + SSR |
+| Multi-bounce | off | on | on | on |
+| Sky-visibility directions | — | 4 | 8 | 8 |
+| Heightfield trace steps | — | 24 | 48 | 64 |
+| Foliage colour bleed | off | on | on | on |
+| Emissive contributors / probe | — | 4 | 8 | 8 |
+| Reflections | sky + wetness + water plane | same | + SSGI specular | + SSR half-res |
+
+The added-cost columns (CPU ms, GPU ms, memory per device class) are filled from the same
+profiler captures noted above — measured on each device class, not estimated.
+
+
+
+---
+
+## 41. Geometric density — capabilities and honest limits
+
+Two questions come up when this toolkit is compared to Unreal: does it reach parity
+with Nanite for geometric density, and does its lighting go past Lumen. The lighting
+answer is [chapter 40](#40-dynamic-lighting--capabilities-and-honest-limits); this
+chapter answers the geometry one. As with lighting, the answer is a scope decision
+stated in full rather than a marketing claim, so the boundary is something you read
+here instead of discovering mid-project.
+
+### What Nanite is, and why literal parity is not the goal
+
+Nanite is a virtualised micropolygon pipeline. It decomposes an authored mesh offline
+into a hierarchy of triangle clusters, streams those clusters by how much screen-space
+error each would introduce, and rasterises most of them in a compute shader rather than
+the hardware rasteriser. To do that it needs engine-level control of the rasteriser, a
+compute-driven visibility buffer, and its own on-disk streaming format.
+
+This toolkit does not reproduce that, and the reasons are the product rather than
+obstacles routed around:
+
+- The Unity **native Terrain** owns the terrain's triangles and generates its own patch
+  level-of-detail from its pixel-error setting. A package that replaced that rasteriser
+  would no longer be native Terrain — and native Terrain, with its full stock inspector,
+  is exactly what this toolkit delivers.
+- The toolkit runs as **managed CPU work** amortised across frames, with no compute
+  cluster culling and no job graph. That is a deliberate portability choice.
+- The **mid-range mobile GPU** this toolkit targets is not the device class a
+  micropolygon rasteriser is built for.
+
+Reaching for literal parity would mean giving up all three — which would mean shipping a
+different product.
+
+### What is delivered instead
+
+What a player perceives in a dense scene is *geometric density* — crisp silhouettes up
+close, believable relief on the ground underfoot, thousands of props that hold their
+shape near and cost almost nothing far away, and no visible moment where detail snaps
+in. This toolkit delivers that through four systems:
+
+| System | What it buys you | How |
+|---|---|---|
+| **Continuous terrain density** | Crisp silhouettes near, cheap far, no visible LOD step | The terrain's own pixel-error and basemap distance are set per region from an angular-error budget, with hysteresis so the setting is not rewritten every frame |
+| **Geomorphic micro-relief** | Close ground carries real displaced relief a one-metre-per-texel heightmap cannot hold — and the *correct* relief for that rock and climate | A camera-following tessellated patch ring, displaced from a relief field built by named weathering and transport processes |
+| **Prop level-of-detail and impostors** | Thousands of rocks and trees at full detail near, near-zero cost far, still correct in winter | Screen-space-error selection over each prefab's own LOD group, flat impostors past the last level, aware of the season |
+| **Virtual splat cache** | Many high-resolution surface layers without holding many full-resolution splat maps in memory | A camera-following tiled cache with a residency map and a resolution matched to what the screen can actually resolve |
+
+The first uses a real quantity: the human eye resolves about one arc-minute, so the
+geometric error allowed at a given distance is roughly that distance divided by 3438.
+Driving the terrain from that rather than a hand-tuned curve is what keeps the on-screen
+error constant when the player changes resolution or field of view. The other three
+follow the same discipline — a measured limit, not a taste dial.
+
+### The one property Nanite does not have
+
+Nanite streams a **finite, authored** asset: someone modelled it, it occupies disk, and
+it stops at the resolution it was authored to. This toolkit's relief is **generated by
+process from position and seed**. That difference is where the constraint is genuinely
+beaten rather than merely accepted:
+
+- It **costs no disk** — nothing is stored, so nothing has to be streamed from storage.
+- It **never repeats and never runs out** — it extends to whatever depth the camera
+  cares about, because it is computed on demand rather than read back from a fixed asset.
+- It is **correct for its site**. Limestone dissolves into runnels and pans; granite
+  rounds at the corners and sheds exfoliation sheets; a north-facing slope in a frost
+  climate grows sorted stone stripes; a forest floor carries the pits and mounds of trees
+  that have fallen. None of that is something an artist has to remember to model, because
+  it is the output of the same climate and vegetation the rest of the world already runs
+  on.
+
+That is the honest sense in which the comparison is favourable: not more triangles than
+Nanite, but every visible feature explained by a process rather than placed by hand.
+
+### Where it is behind
+
+Stated plainly, so none of it is a surprise:
+
+- **No micropolygon rasteriser.** Very high-frequency silhouette detail on an *authored
+  hero mesh* — the case Nanite was built for — is served by that mesh's own LOD group and
+  by impostors, not by decomposing it into micro-triangles. For terrain and for
+  process-generated relief this does not apply; for an imported high-poly hero asset, its
+  authored LODs are the ceiling.
+- **Relief is a height field, not overhangs.** The micro-relief displaces a surface, so
+  it renders runnels, mounds, stone stripes and notches faithfully but cannot produce a
+  true overhang, arch or cave mouth, which are not single-valued in height.
+- **The micro-relief is a picture, not a collision surface.** Displacement happens in the
+  shader, on the GPU, so the physics surface a character walks on stays the native
+  terrain's un-displaced heightfield: without a correction, feet land in the air over a
+  shader mound and sink into a shader pit. No collider ships with the patch ring — one that
+  re-cooked a heightfield each time the ring re-addresses is not affordable on a phone.
+  Gameplay instead reads an analytic height query, `MicroReliefField.SampleOffset`, which
+  returns the same millimetres of displacement the shader applies from the same code path;
+  footstep placement, foot IK, decal projection, prop seating and camera collision add it
+  to the terrain height and so read the very surface the eye sees.
+- **Props are authored assets.** The rocks and trees themselves are modelled meshes with
+  authored LODs; the toolkit places, culls and seasonally dresses them, but does not
+  generate their geometry the way it generates terrain relief.
+
+For the outdoor worlds this toolkit generates, the trade is deliberate: every metre of
+ground correct for its climate and lit dynamically, generated rather than stored, in
+exchange for the authored-hero-mesh micropolygon case above.
+
+### Lithology — the input that decides what the ground is made of
+
+The relief you see up close is not noise with different amplitudes; it is the shape a real
+material takes. Granite exfoliates in sheets and rounds at the corners; limestone dissolves
+into fluted karren; shale rots into platy chips; basalt columns; sandstone grows honeycomb
+tafoni near salt water. To get that, the toolkit needs to know what the ground is made of,
+and that is the one authoring concept most worth learning here because it is the input an
+author will most want and least expect.
+
+You author a **`LithologyProfile`** asset: an ordered stratigraphic column of `LithoUnit`
+beds, oldest first, exactly as a geologist draws one. Each bed carries the physical
+properties every downstream system reads — the micro-relief field, the splat-layer choice,
+the soil-depth and rockiness the ecology reads, and the lighting's albedo — so all of them
+agree about the same rock. A three-unit column produces three visibly different rock
+surfaces without touching a single noise setting.
+
+| Field | Unit | Why it exists |
+|---|---|---|
+| `displayName` | — | the unit as a geologist would name it, so the debug view is readable |
+| `rockClass` | enum | `Crystalline`, `Carbonate`, `Clastic`, `Volcanic`, `Metamorphic`, `Unconsolidated` — selects which weathering process is even eligible |
+| `thicknessM` | m | bed thickness; sets joint spacing and therefore facet size |
+| `erodibilityKlsu` | — | relative resistance; hard beds make benches, soft beds make slopes |
+| `porosity` | 0–1 | gates haloclasty and tafoni |
+| `solubility` | 0–1 | gates karst; non-zero for carbonate only |
+| `grainSizePhi` | φ | the material this unit weathers *into*, on the Udden–Wentworth scale |
+| `jointSetCount` | — | 1 bedding-only, 2–3 blocky, 6 columnar for basalt |
+| `angleOfReposeDeg` | ° | the talus this unit builds below an outcrop |
+| `soilFormationRate` | mm/kyr | how fast it makes soil; feeds the ecology's soil depth |
+| `albedo`, `wetDarkening` | 0–1 | so the splat cache and the lighting agree about the same rock |
+| `terrainLayer` | asset | the layer this unit paints as, when exposed |
+
+### Terrain painting — Unity's own tools, kept
+
+Painting is deliberately **not** replaced. The generated terrain is a real Unity `Terrain`,
+so its stock paint, sculpt and detail brushes work exactly as they always do, and hand-paint
+survives regeneration (see `Capture Manual Edits` in [the World inspector](#29-the-world-inspector)).
+Two rules the toolkit adds on top of Unity's painting, both physical:
+
+- **Layer choice follows lithology.** Where rock is exposed, the layer painted is the one the
+  `LithoUnit` names — so what you see is the rock the column says is there, not an arbitrary
+  splat.
+- **A raise stroke respects the angle of repose.** On unconsolidated cover a raise brush
+  cannot pile material past that material's `angleOfReposeDeg`; you cannot paint a sand dune
+  steeper than sand will stand.
+
+Doubling the alphamap resolution re-composites existing strokes to the same world positions,
+and switching quality tier on a painted terrain leaves the paint intact — `terrainLayers` is
+rewritten only on a real change.
+
+### Budget per device class
+
+The geometry, streaming and painting budget, read together with the [lighting budget](#40-dynamic-lighting--capabilities-and-honest-limits)
+and the vegetation budget — these are the same frame.
+
+| Item | Mobile Low | Mobile High | Desktop | Ultra |
+|---|---|---|---|---|
+| Target frame rate | 30 | 30 | 60 | 60 |
+| Terrain + prop triangles | 300 k | 600 k | 2.5 M | 6 M |
+| Draw calls | 120 | 200 | 800 | 2 000 |
+| Eye-acuity pixels | 4 | 2 | 1 | 1 |
+| Overlay ring | off | 5×5, factor 4 | 7×7, factor 8 | 9×9, factor 8 |
+| Overlay tessellation | n/a | HW or CPU fallback | HW | HW |
+| Micro-relief processes evaluated | 4 | 8 | 13 | 13 |
+| Impostor tile / views | 64² / 5×5 | 96² / 6×6 | 256² / 8×8 | 256² / 8×8 |
+| Impostor atlas ceiling | 8 MB | 16 MB | 48 MB | 96 MB |
+| Virtual splat cache | off | off | on | on |
+| Terrain layers achievable | 4 | 8 | 24 | 32 |
+| Paint raster ceiling | 32 MB | 64 MB | 256 MB | 512 MB |
+| Chunk builds in flight | 1 | 2 | 4 | 6 |
+| Geometry CPU budget / frame | 1.5 ms | 2.5 ms | 4 ms | 6 ms |
+
+Two honest notes:
+
+- **Mobile Low has no overlay and no cache.** It gets the derived terrain density, prop LOD,
+  impostors and the lithology feeding splat choice. That is still a world where nothing is
+  random — it simply has no sub-heightmap geometry. The micro-relief overlay ring and the
+  virtual splat cache are off on a 350 GFLOPS part, and claiming otherwise would be a limit a
+  buyer discovers on day one.
+- **Resident impostor species are 6 on Desktop and 12 on Ultra**, not the whole library. The
+  residency system is what makes a fifty-species world fit; without it the atlas ceiling is
+  the species ceiling.
+
+The measured triangle, draw-call and millisecond figures for a given device are read from a
+profiler capture on that hardware and recorded alongside this table — the numbers above are
+the design ceilings the tester verifies against, not a measurement.
+
+
+---
+
+## 42. Weather and climate
+
+The weather layer is a live, deterministic model of the sky, the seasons and the climate,
+and it obeys one rule above all others: **it is read-only over the world it observes.**
+Weather reads terrain height, slope, aspect, distance-to-coast and the water masks; it never
+writes them back. Its outputs are *biases* an author can feed into a graph — a wetness value,
+a snow line, a temperature — not overrides that rewrite the ground. The arrow points one way,
+always: the world shapes the weather, and the weather then dresses the world.
+
+The second rule is that **nothing here is accumulated.** Every weather quantity is a
+closed-form function of `(worldPosition, ClockState, seed)` — never an integrated simulation
+that depends on how many frames have elapsed or in what order chunks loaded. Jump the clock
+forward a hundred days and back, and the weather returns to exactly what it was. A world
+loaded fresh at day 200, hour 14 matches a world that ran there in real time. That is what
+makes the whole layer deterministic and identical on every machine.
+
+### The clock — everything downstream is a function of where the sun is
+
+The single most important thing to get right is the sun's position, because every season,
+shadow, treeline and snow line inherits its accuracy or its error. The clock is owned in one
+place — the `UCWeatherSystemManager` component — and every consumer reads it through a
+`ClockState` value; nothing reads `Time.time` or a frame count.
+
+`ClockState` is a `readonly struct` passed by value. It carries the calendar and the full
+solved solar and lunar geometry:
+
+| Field | Meaning |
+|---|---|
+| `year`, `dayOfYear` (1–365), `secondsOfDay`, `localHour` | the calendar position |
+| `latitudeDeg`, `longitudeDeg` | where on the world this is |
+| `elevationDeg`, `azimuthDeg` | the sun's position now |
+| `declinationDeg`, `hourAngleDeg` | the intermediate solar terms |
+| `solarNoonHour`, `dayLengthHours`, `equationOfTimeMin` | the derived day structure |
+| `lunarPhase01`, `lunarElevationDeg`, `lunarIlluminatedFraction` | the moon, for night lighting |
+| `season01` | 0 at the vernal equinox, wrapping at 1 — seasons are derived, never enumerated |
+| `solarConstantWm2`, `airMass` | what the atmosphere and lighting read |
+
+The astronomy behind those fields is pure, closed-form and unit-checked. Each formula traces
+to a named law:
+
+| Quantity | Formula |
+|---|---|
+| Solar declination | `δ = −23.44 · cos(360°·(N + 10)/365)` |
+| Equation of time | `EoT = 9.87 sin 2B − 7.53 cos B − 1.5 sin B`, `B = 360°·(N − 81)/364` |
+| Solar hour angle | `h = 15°·(t_solar − 12)`, with the equation-of-time and longitude correction |
+| Sun elevation | `sin α = sin φ sin δ + cos φ cos δ cos h` |
+| Sun azimuth | `cos A = (sin δ − sin α sin φ)/(cos α cos φ)`, reflected past noon so it sweeps a full 0–360° |
+| Day length | `H = (2/15)·acos(−tan φ · tan δ)` |
+| Lunar phase | synodic month 29.53059 d against a fixed epoch |
+| Air mass | `1 / max(0.05, sin(max(α, −6°)) + 0.15)` — the guard that keeps the horizon finite |
+
+One trap is worth stating because it is invisible until it poisons an entire world: inside
+the polar circles `acos(−tan φ · tan δ)` leaves its domain. The argument is clamped to ±1 and
+the result is 0 hours or 24 hours — **polar night and midnight sun are the correct answers**,
+and an unclamped `acos` returns `NaN` that silently corrupts temperature, then moisture, then
+every species suitability. The Polar preset exists partly to exercise this clamp for a full
+year.
+
+### Latitude, seasons and the moon
+
+Latitude is one value, owned by the weather manager. Vegetation and lighting read it through
+`ResolveClock()`; they never carry their own copy, because two copies would let the sun sit
+over the wrong hemisphere with no visible cause. If the weather manager is absent, both fall
+back to a documented default (latitude 45°, longitude 0°) and the inspector says so on an
+info row. A world that spans latitude can set `latitudeSpanDeg` (default 0) so the north and
+south edges carry different biomes from the same graph.
+
+Seasons are **derived**, never enumerated. There is no `Season` enum driving logic — season
+is `season01`, computed from declination and the sign of its change, so it inverts
+automatically in the southern hemisphere (warm season in January at −45°) and compresses
+toward the tropics, where "summer" is a wet season rather than a warm one. A display label is
+derived only for the inspector.
+
+The moon is deterministic from the day count against a fixed epoch: `lunarPhase01`,
+`lunarIlluminatedFraction = (1 − cos(2π·phase))/2`, and `lunarElevationDeg` from the same
+hour-angle machinery as the sun with the moon's own ~5° orbital tilt. Night lighting reads
+all three, so a new moon gives a genuinely dark night and a full moon lights the ground.
+
+### From sun to rain — the physical chain
+
+The climate is not painted; it falls out of the sun's geometry through a chain of named
+physical steps, each one traceable:
+
+1. **Insolation at the top of atmosphere** (FAO-56 `Ra`), a closed form of latitude and day:
+   ```
+   dr = 1 + 0.033·cos(2π·N/365)
+   ωs = acos(−tan φ · tan δ)                       // clamped to ±1
+   Ra = (24·60/π) · Gsc · dr · [ωs sin φ sin δ + cos φ cos δ sin ωs]   // MJ/m²/day
+   ```
+   Surface radiation is `Rs = Ra·(0.25 + 0.50·sunshineFraction)` (Ångström–Prescott), with
+   `sunshineFraction = 1 − cloudCover`.
+2. **Temperature** is a sum of named terms, not a noise field: a latitude gradient
+   (`0.7 °C/°`), a seasonal amplitude lagged ~30 days behind the solstice (thermal inertia —
+   why July beats June), the −6.5 °C/km lapse rate, aspect warming, marine moderation that
+   pulls coasts toward the ocean mean by `exp(−distanceToCoast / 150 km)`, and a diurnal range
+   that widens in clear dry air (the desert's 20 °C swing).
+3. **Continentality** (Conrad's `K = 1.7·A / sin(φ + 10°) − 14`) is used in reverse to derive
+   the seasonal amplitude from distance-to-ocean, so an island stays under ~10 °C annual range
+   and a continental interior exceeds ~30 °C — both from geography alone.
+4. **Precipitation** takes its annual total from the shipped orographic-lift and rain-shadow
+   nodes, and adds a *seasonal distribution* by regime (equatorial double peak, monsoon summer
+   peak, Mediterranean winter maximum, and so on). The regime is derived from latitude,
+   continentality and the ITCZ offset — not authored — though an author may override it.
+5. **PET and aridity** come from Hargreaves on those monthly min/max temperatures and `Ra`,
+   which is what § 6's ecology reads to place vegetation.
+
+### Climate normals — the bridge the ecology needs
+
+`ClimateNormals` computes, once per chunk on the worker thread (never per candidate), twelve
+monthly means for temperature (mean/min/max), precipitation and radiation, plus the annual
+aggregates the ecology consumes: `meanAnnualTempC`, `warmestMonthTempC`, `coldestMonthTempC`,
+`annualPrecipMm`, `annualPetMm`, `aridity`, `frostFreeFraction`, `gddAnnual` and
+`continentality`. Adjacent chunks report continuous normals across their shared edge.
+
+### Köppen — a check, not a driver
+
+The shipped Köppen classifier is fed those normals and its climate code is shown in the
+inspector. It is a **diagnostic**: if a world reports `Af` (tropical rainforest) where the
+author placed spruce, the numbers are wrong and this is the cheapest way to find out. No
+runtime code branches on the Köppen code.
+
+### Climate presets — geography, not moods
+
+A `WeatherPreset` does not author a climate; it sets a *place* — latitude, continentality,
+precipitation regime, altitude, turbidity — after which § 7.2's physics derives the climate.
+There are no authored weather curves; each preset simply hands geography to the same chain
+above. Applying a preset from the inspector is one undo step, and the climate readouts move to
+the new place the same frame.
+
+| Preset | Sets | The world you get |
+|---|---|---|
+| Equatorial rainforest | lat 2°, maritime, ITCZ regime | daily afternoon convection, no seasons but wet/wetter |
+| Monsoon tropics | lat 15°, ITCZ migration | hard rainy/dry alternation |
+| Hot desert | lat 27°, continental, subtropical high | clear, huge diurnal range, rare violent convection |
+| Mediterranean | lat 38°, maritime west coast | winter rain, summer drought |
+| Temperate oceanic | lat 52°, maritime | frequent fronts, mild winters, changeable |
+| Continental | lat 48°, deep interior | −25 °C winters, 30 °C summers, summer thunderstorms |
+| Boreal | lat 62°, continental | long snow season, short intense summer |
+| Polar | lat 75° | polar night and midnight sun, exercising the clock's clamps |
+| Alpine | lat 46°, high altitude | lapse rate and aspect dominate; treeline visible |
+
+### The weather inspector
+
+The inspector is not decoration — a live sky and weather readout is the only way an author can
+tell whether a world is behaving, and it is what turns the layer from a black box into
+something tunable. Every derived value updates live as time advances; every authored field is
+editable and undoable in one step. It is built entirely on the shared `UCInspectorUI` helpers,
+with no modal dialogs. Its sections:
+
+- **Clock and Calendar** — day-of-year slider with a derived season label; hour slider with
+  live sunrise / sunset / day-length read out from the astronomy; `timeScale`; and a live "sun
+  elevation now" row. The four jump buttons — **Sunrise, Solar noon, Sunset, Midnight** — set
+  the time from the *computed* solar times, not from hard-coded hours: a "sunrise" button that
+  jumps to 06:00 is wrong on every day except an equinox at the equator. Inside a polar night
+  the sunrise button reports "no sunrise" rather than doing nothing.
+- **Location** — latitude, longitude, standard meridian, optional latitude span.
+- **Climate** — the full monthly normals readout with the Köppen cross-check code.
+- **Synoptic** — pressure, trend, front kind and distance, air mass. *(Live readout waits on
+  the single weather driver; see the honest-limits note below.)*
+- **Current Conditions** — temperature, dew point, wet-bulb, RH, wind speed and direction,
+  cloud per layer, cloud base, precipitation type and rate, snow line, visibility.
+- **Precipitation and Wetness · Fog · Snow** — the published-grip readouts.
+- **Presets** — an archetype dropdown with a geography preview and a one-step `Apply preset`.
+- **Performance** — the W-63 budget, once measured on the device.
+- **Diagnostics**.
+
+> **Honest limit.** The *live* Synoptic, Current Conditions, Fog and Snow readouts read a
+> per-frame `WeatherState` assembled by the single weather driver. That one publisher is
+> deliberately not yet built, so those readouts show their authored/derived values but not a
+> live synoptic evolution. Computing them a second way inside the inspector would stand up
+> exactly the second drive path the architecture forbids, so they wait for the one publisher
+> rather than being re-derived here.
+
+### Quality tiers
+
+Tier selection comes from the shipped adaptive-quality system — there is no second weather-only
+tier enum — and an author may override the automatic choice to reach any row directly.
+
+| Tier | Emitters | Precip opacity | Fog | Cloud shadows | Volumetric | Lightning |
+|---|---|---|---|---|---|---|
+| Mobile Low (mid-range floor) | 2 | 0.6 | Height fog only | Off | Off | Light flash only |
+| Mobile Medium (**mid-range target**) | 4 | 0.8 | Height + mechanism | Projected, low res | Off | Flash + thunder |
+| Mobile High (**flagship target**) | 6 | 0.9 | Full | Projected | Off | Full |
+| Desktop High | 10 | 1.0 | Full | Projected, high res | Optional | Full |
+| Ultra | 12 | 1.0 | Full | Projected, high res | On | Full |
+
+### The performance budget
+
+Stated so it can be held. These are the targets a profiler capture on each device class is
+checked against; the measured numbers are pasted into the close-out, never asserted without
+the capture.
+
+| System | Mid-range budget | Flagship budget |
+|---|---|---|
+| Clock + solar geometry | < 0.02 ms | < 0.02 ms |
+| Pressure field + machine (per 4 s tick) | < 0.4 ms | < 0.4 ms |
+| Climate normals (per chunk, worker thread) | < 1.0 ms | < 1.0 ms |
+| Precipitation particles | < 0.8 ms | < 1.2 ms |
+| Fog | < 0.3 ms | < 0.5 ms |
+| Snow splat mutation (amortised, per frame) | < 0.5 ms | < 0.5 ms |
+| Global uploads | < 0.05 ms | < 0.05 ms |
+
+### Deterministic and safe
+
+There is no accumulated atmospheric state anywhere. The only stateful values are the
+presentation smoothers that ease a transition over `transitionSeconds`, and each one converges
+to the closed-form value so a scrub or a reload lands on the true weather. Freezing `timeScale`
+to 0 freezes the sun, sky, weather and phenology together; setting the same day, hour and
+latitude twice from different frame counts produces identical state.
+
+## 43. Integrating an external path-authoring tool
+
+Universe Creator owns the terrain. An external tool that lays roads, rails, canals or paths across that
+terrain therefore cannot simply write to it — two systems writing the same heightfield produce a scene
+where the last one to run wins and neither can be undone. Instead Universe Creator publishes a contract,
+and an external tool asks.
+
+This chapter is the contract, written for whoever is implementing the asking side. It documents the
+socket you enter your tool into, every member of the provider interface with its real behaviour, the
+lifecycle you must follow, and — the part that is usually left out and matters most — what Universe
+Creator guarantees in return and what it does not. Everything here is described from the shipped code;
+where a claim would be an intention rather than a behaviour, it says so.
+
+You do not need to have read any external tool's manual to implement against this chapter.
+
+### The two components
+
+Integration is two components on the world side, both additive. A project with neither behaves exactly as
+it always did.
+
+`Road City Master Linker` is the provider. Add it to the object that generates your terrain — the same
+object that owns the chunk manager, or a child of it — and it resolves terrain queries against the live
+chunk grid. It implements `IPCGDataProvider`, and it is the object your tool holds a reference to. The
+class is named for the first tool that consumed it; the interface it implements is product-neutral, so a
+second tool registers against it without any rename.
+
+`Path Provider Socket` is the reporting slot, under **Add Component ▸ Universe Creator ▸ Integration ▸
+Path Provider Socket**. It holds a reference to the external tool's own link component and reports back
+what that tool says about itself: whether the socket accepted it, the name the tool gives itself, which
+version of the provider surface it was written against, whether it is currently routing work, and how many
+regions of provider-owned ground it is holding right now. The socket never calls the tool to do work — the
+direction of control runs the other way — with one exception, *Clear the socket*, which asks the tool to
+give every held region back and only then empties the field.
+
+Nothing in generation consults the socket. It reports; the entered tool acts.
+
+### What the tool must publish back
+
+The socket reads six members from an `IPathToolLink` implemented by the external tool. This is the smaller
+half of the integration and it exists so the world side can report on the connection without knowing
+anything about the tool.
+
+| Member | Type | What it must return |
+| --- | --- | --- |
+| `PathToolName` | `string` | The tool's own display name, shown in the socket's status line. Supplied as data so Universe Creator never hard-codes another product's name. |
+| `UnderstoodProviderMemberCount` | `int` | How many members of `IPCGDataProvider` the tool was written against. Compared against the surface actually published here. |
+| `IsConnectedToProvider` | `bool` | Whether the tool has verified a provider and is routing work through it. Being entered in the socket and being connected are two different facts. |
+| `HeldRegionCount` | `int` | How many provider-owned regions the tool is holding right now — pads, cut regions and tunnel openings together. Zero after a clean release. |
+| `StatusSentence` | `string` | One sentence, authored by the tool, describing what it is doing. Shown verbatim: the tool knows why it is in the state it is in. |
+| `ReleaseAllHeldRegions()` | `int` | Give every held region back and return how many were released, so the socket can report that the release ran rather than assuming it. |
+
+### What the socket reports back
+
+Five states, and the reason there are five rather than two is that a broken integration and an absent one
+need different sentences.
+
+| State | Headline | Meaning |
+| --- | --- | --- |
+| `Empty` | no tool connected | Nothing entered. Universe Creator behaves exactly as it does with no socket component in the scene at all. |
+| `Accepted` | connected | Entered, understood, and reporting. The status line quotes the tool's own sentence. |
+| `NotALink` | not a link | Something was entered that does not implement `IPathToolLink`. Reported rather than ignored, because an ignored mistake looks identical to an empty socket. |
+| `Vanished` | link missing | A link was accepted here and is no longer in the scene. Anything it was holding open could not be released by it, so the sentence names the tool and tells you to look for what it left behind. |
+| `SurfaceMismatch` | version drift | The tool was written against a different number of provider members than this version publishes. Both counts are shown; until they agree, treat what the tool reports as unreliable. |
+
+The socket saves the accepted tool's name with the scene. Without that, a link that has since been deleted
+would be indistinguishable from a field nobody ever filled in — which is exactly the case where a silent
+"nothing connected" costs an afternoon.
+
+There is no version number on the provider interface, and adding one would only move the problem: a number
+that a person maintains by hand drifts from the thing it describes. Instead both sides count the interface's
+members off the type itself — `typeof(IPCGDataProvider).GetMethods().Length`, six as of this version — and
+compare. Adding a member to the contract therefore reports as drift on the next scene open instead of being
+silently half-used by a tool that predates it.
+
+### The provider surface
+
+`IPCGDataProvider` has six members. What follows is what each one actually does, including its failure
+return, because a failure return that an integrator discovers by experiment becomes an assumption that
+breaks on the next change to either product.
+
+#### `float SampleHeight(float worldX, float worldZ)`
+
+The terrain height at that world XZ, in world space and in metres — the terrain's own sampled height plus
+the owning chunk's Y position, so the value is directly comparable with a transform's `position.y`.
+
+Returns **0** when the point lies outside the world, or inside it but on a chunk that has not generated
+yet. Zero is a legitimate height, so a caller that needs to tell "ground at sea level" from "no answer"
+must check the point against `GetActiveChunkBounds()` first. Sampling is bilinear against the heightfield,
+not against the rendered mesh, so it does not change with LOD.
+
+#### `Vector3 SampleNormal(float worldX, float worldZ)`
+
+The interpolated surface normal at that world XZ, normalised, in world space. Use it for banking and for
+slope analysis; the slope as a fraction is `sqrt(1 - n.y²) / n.y`, or simply `1 - n.y` for a small-angle
+approximation.
+
+Returns **`Vector3.up`** when the point is outside the world or its chunk has not generated. Like the height
+case, that is a legitimate value — perfectly flat ground — so the bounds check comes first.
+
+#### `List<Bounds> GetActiveChunkBounds()`
+
+The world-space bounds of every chunk that is live right now: pooled, active in the hierarchy, and holding
+generated data. A freshly allocated list each call, safe for the caller to keep or mutate.
+
+This is the answer to "may I trust a sample here". It behaves the same way in the editor and in play mode —
+there is no separate editor path — but *what it contains* differs, and that difference is the one integrators
+trip over. In the editor, the chunks that exist are the ones the world has been asked to build, so a large
+world commonly reports a subset and everything beyond it samples as zero. In play mode the set changes as the
+camera moves and a chunk that answered a moment ago may be gone. Treat the list as a snapshot for the current
+frame, never as world extents cached at startup.
+
+An empty list is a valid answer meaning nothing is generated yet, and it is what you get before the world has
+been built at all.
+
+#### `void NotifyCutRegion(Bounds worldBounds)`
+
+Your statement that you intend to cut, or have cut, terrain inside that box. It obliges you to nothing beyond
+making the call, and it obliges Universe Creator to nothing about the heightfield: **this call does not flatten,
+lower or heal anything**, and it is not how you request a change to the ground.
+
+What it does do is record the box as a fact about the world that only the path tool knows. Vegetation is the
+consumer: a recorded cut region keeps the next scatter bake from putting trees and detail back on the
+carriageway. There is no terrain pre-loading to do, because the world is resident and only its level of detail
+varies with distance.
+
+Call it once per region you affect, in world space, sized to the ground you actually disturb rather than to the
+road's bounding box — an over-sized region clears vegetation you wanted to keep. The registry accumulates, so
+calling twice for the same ground is harmless but pointless.
+
+#### `int RequestTunnelOpening(Bounds worldBounds)`
+
+Opens the terrain surface inside the box and keeps it open. Three things happen, and all three are required for
+an opening to be usable rather than merely visible: the surface inside the footprint is removed from the holes
+map; a wall skirt is generated around the cut edge, hanging down to the tunnel floor, so a bored hill reads as
+bored rather than sliced open; and a floor with a collider is laid across the footprint so the road and
+anything on it has ground to rest on instead of falling through.
+
+Returns a **stable handle**, counting from 1, to hand back to `ReleaseTunnelOpening`. Handles are ids, not list
+indices, so releasing one opening never repoints another caller's handle at someone else's tunnel.
+
+Returns **−1** on failure — the provider is present but has no chunk manager to carve — and logs a warning
+naming the provider. −1 is never a valid handle, so a caller that stores it and releases it later is safe; a
+caller that treats it as success is not.
+
+The carve is remembered, so a later regeneration re-applies it and rebuilds the shell against the new surface
+rather than filling the tunnel back in. The opening is a *provider-owned resource* from the moment this returns.
+
+#### `void ReleaseTunnelOpening(int handle)`
+
+Fills a previously opened cavity back in, drops its shell and floor, and forgets the carve. Unknown handles,
+already-released handles and −1 are all ignored without error, so a release path that runs twice is safe.
+
+Not calling it is the failure mode this whole contract exists to prevent. An opening you never release stays
+open for the rest of the session, survives every regeneration by design, and is not attributable to anything —
+the provider knows a hole is held and no longer knows who asked for it. The visible result is a hole in a
+hillside with no tunnel in it, or a tunnel deleted from the road network whose mouth is still cut. Release on
+delete, release on disconnect, and release when your tool is unloaded.
+
+### The request channel — how a tool asks for terrain and water changes
+
+The provider surface above is how a tool READS the world. A tool also needs a way to ask Universe Creator to CHANGE
+the world — to flatten a corridor under a road, tie a dam into its abutments, hold a lake up behind that dam, or cut a
+portal through a hillside. Those requests do not travel as extra provider methods: the provider surface stays at six
+members so a tool built against it never reads as out of date. They travel as DATA, left in a serialised component on
+the world object and consumed by Universe Creator at its next regeneration — the same contract the provider uses, in
+the opposite direction.
+
+A request names one of four kinds:
+
+| Kind | What it asks for | How Universe Creator answers it |
+| --- | --- | --- |
+| Conform corridor | Flatten and blend a band of ground to a road's running surface | Cuts below and fills above the natural ground across the flattened width, then blends out to the natural profile over the batter |
+| Key abutments | Tie a structure's ends into the ground at a crest line | Fills the ground up to the crest at each end of the line, and never cuts ground that already stands above it |
+| Raise water body | Hold a lake up behind a dam to a stated level, clipped at the dam line | Governs the author-placed lake the dam impounds — see below |
+| Cut opening | Cut a portal or bore through the terrain at a stated mouth | Cuts the hole through the same terrain-hole mechanism a tunnel already uses, never a second one |
+
+Nothing here moves ground the tool did not ask about, and nothing is remembered: every request is re-read from the
+channel on each regeneration, so withdrawing a request and rebuilding restores the ground exactly as it was.
+
+### Answering a dam: the reservoir and its spillway
+
+A dam request states the levels and the dam line; Universe Creator owns the water. NOTHING HERE IS AUTOMATIC — the
+author drops a lake into the valley, and the dam then governs it. For each request, Universe Creator finds the
+author-placed water body the dam impounds (the flooded extent the tool reports is the hint for which one), raises that
+body's surface to the held level, and clips it at the dam line so the reservoir stands behind the structure and not
+through it. A request that impounds no placed body raises nothing, exactly as a real dam holding back no water would.
+
+The raise is transient GOVERNANCE, never a write to the body's own authored level or outline: withdraw the dam and
+rebuild, and the author's own lake returns at its own level and shape with no trace of the reservoir it briefly became.
+
+A spillway flow illusion rides the same governance. A governed body carries a surface effect driven by the dam's own
+figures — the outlet position, the crest width, and the head between the reservoir surface and the tailwater level — so
+the water reads as flowing over the wall. Release the dam and the effect goes with it. A natural waterfall on a river
+reach is the same idea, driven by the reach's own solved drops rather than by a dam.
+
+### What Universe Creator publishes back: the rivers it built
+
+A tool banking a river needs more than a height sample at the water's edge: it needs how deep the channel was cut below
+the surface and how wide it runs, and only Universe Creator — which solved the course, fitted it to the valley and dug
+it — knows those. So for every river it builds, Universe Creator PUBLISHES a reach: an ordered set of cross-sections,
+each carrying, in world metres, the channel centreline position, the wetted width, the water-surface level and the bed
+level. The design water depth at any station is the surface less the bed.
+
+Like a request, a reach is data left on the world object, not a seventh provider method — so a bank can be built in a
+session where the river was cut last time and has not been rebuilt since. A reader finds the nearest point on the reach
+and reads the width and levels there, easing between stations rather than stepping. Restating an unchanged river leaves
+its reach untouched; deleting the river withdraws its reach, and a bank built against a river that is gone falls away on
+the reader's next rebuild.
+
+### The lifecycle: acquire, request, release
+
+Four steps, and the fourth is the one implementations omit.
+
+**Acquire.** Hold a reference to the provider component that an author entered by hand, and cast it to
+`IPCGDataProvider`. Do not search the scene for one. A scene with two candidate providers has no correct guess,
+and a scene with a leftover test object has a confidently wrong one; an entered reference is the author's
+statement of which object owns the terrain. Verify once, on enable, and record what you concluded — including
+the member count comparison above — rather than re-verifying on every call.
+
+**Verify before you use.** A provider reference that resolves is not the same as a provider that can answer.
+`GetActiveChunkBounds()` returning an empty list during scene load is normal, not broken. One retry a tick later
+is the cheapest way to tell "not ready yet" from "not working", and it should be bounded: a provider that is
+genuinely dead must be reported, not retried forever.
+
+**Request.** Read with `SampleHeight` / `SampleNormal` freely — they are queries and own nothing. Announce ground
+you disturb with `NotifyCutRegion`. Take openings with `RequestTunnelOpening` and keep the handle. Every handle is
+a debt.
+
+**Release.** Give every handle back — on delete, on disconnect, when your tool is disabled, and before the
+reference is dropped. Order matters only in that release must come *before* you forget who you were talking to: a
+reference dropped first leaves a hold nobody can find. The socket's *Clear the socket* button exists precisely to
+run your release path and report the count it returned, so that "the release happened" is something an author can
+see rather than assume.
+
+Failing to release does not throw and does not log. That is why the socket displays the held count: a non-zero
+count with your tool disconnected is the visible form of the bug.
+
+### What Universe Creator guarantees
+
+- **Samples inside `GetActiveChunkBounds()` are real.** Height and normal are read from the live heightfield of a
+  generated chunk. They do not vary with LOD, camera position or frame rate.
+- **Samples outside it are not.** Height is 0 and the normal is up. Both are legitimate values, neither is an
+  error, and nothing tells you which you got. Check the bounds; do not infer from the value.
+- **Openings survive regeneration.** A held opening is re-applied and its shell rebuilt against the new surface
+  for as long as the handle is outstanding. This is the one thing the provider does that you cannot do yourself.
+- **Handles are stable and non-reused within a session.** They count from 1, they are ids rather than indices, and
+  releasing one never invalidates another.
+- **The same world settings produce the same terrain.** Sampling twice from different frame counts, or after a
+  reload with the same settings, gives the same heights.
+- **Everything is main-thread only.** The implementation touches Unity `Terrain` and `TerrainData` and creates
+  GameObjects for tunnel shells. No member of the provider interface may be called from a job or a background
+  thread, and none of them is written to be safe there.
+
+### What Universe Creator does not guarantee
+
+- **Terrain may move under you between requests.** A regeneration changes heights inside the ground it rebuilds.
+  A height you sampled and cached is a value from a moment, not a subscription. Held openings and pads are
+  re-applied; a cached number is not.
+- **You are not told when that happens.** There is no callback, event or dirty flag on the provider surface. If
+  your tool needs to react to regenerated ground, it must re-sample; if it needs the ground to stay put, it must
+  hold it rather than remember it.
+- **Handles do not survive a scene reload.** The carve list is runtime state and starts empty, so after a load
+  every opening you rely on must be requested again. A tunnel shell whose opening was never re-requested sits
+  over solid ground.
+- **Requests are not queued.** Calling `RequestTunnelOpening` before the world exists returns −1 rather than
+  deferring. Check the return; retry when the bounds list is non-empty.
+- **Nothing is undo-recorded on the provider's behalf.** An opening taken during an author action is not undone
+  by Ctrl-Z. Your tool owns the undo story for its own objects and should release explicitly rather than relying
+  on undo to unwind a request.
+
+### What changes when a tool is connected
+
+A connected tool is not a switch between a broken mode and a working one. Most of what a path tool does works
+either way, some of it works over more ground when connected, and a few things genuinely cannot be done without
+a provider — those refuse in words rather than pretending.
+
+The table below is **generated from the same source the connecting tool's own manual and its inspector read**, so
+the three cannot disagree. Do not edit it by hand; the same source drives a check that fails when the copy in a
+document drifts from the code.
+
+<!-- availability-table:begin — generated from the availability table in code; do not edit by hand -->
+
+| Feature | Availability | Standalone | Connected |
+| --- | --- | --- | --- |
+| Road cut into terrain | better connected | the terrain under the road is lowered or raised directly, on whichever terrain tiles are in the scene | the cut is requested from the provider, which shapes it into ground it owns and keeps it through regeneration |
+| Terrain restored when a road is deleted | better connected | the heightfield stored before the road was built is written back, so the restore is only as good as that stored copy | the provider is told which ground changed and regenerates its natural surface there, with no stored copy to go stale |
+| Grass and detail cleared along the road | both modes | detail layers under the road are cleared and restored on delete | the same clearing, announced to the provider so it does not repopulate the corridor |
+| Trees removed from the road corridor | both modes | trees standing in the corridor are removed and put back on delete | the same removal, announced with the corridor so the provider leaves it clear |
+| Terrain texture painted under the road | both modes | the splat map is painted under the road surface | the same painting, announced to the provider with the painted region |
+| Tunnel cavity kept open through terrain | needs a provider | the tunnel shell is placed and terrain holes are punched, but nothing holds them open if the terrain is regenerated -- to keep a cavity open, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the opening is held by the provider and survives regeneration; it is released when the tunnel is deleted |
+| Bridge deck carried over terrain | better connected | the deck spans the ground untouched and the abutments and pier footings are terraformed once; whether a pier lands in water can only be answered for terrain tiles in the scene | the footings are requested as held ground the provider keeps flat, and the provider answers what each support stands on, including ground no tile covers yet |
+| Building pads held against a shared heightfield | needs a provider | a pad is terraformed once and stays until something else changes that ground -- to hold a pad against regeneration, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the pad is a held request, so the provider keeps that ground flat and gives it back on delete |
+| Building and roads across streamed terrain chunks | needs a provider | only terrain tiles already loaded in the scene can be read or changed; a road leaving them stops affecting the ground -- for streamed terrain, connect a terrain provider by adding the Universe Creator terrain link component to the object that generates your terrain | the provider reports which chunks are active, and ground outside them is requested rather than assumed absent |
+| Roads following the natural ground | better connected | height and slope are sampled from the terrain tiles in the scene | height and slope come from the provider, which knows ground that has not been built into a tile yet |
+| City blocks, lots and street furniture | both modes | generated from the road network; the terrain is only read, never owned | identical, and the ground it sits on is requested through the same gateway as everything else |
+
+<!-- availability-table:end -->
+
+### Implementing a different path tool
+
+If you are writing your own tool against this contract, the following is the whole of what you owe.
+
+1. Take a hand-entered reference to the provider component and cast it to `IPCGDataProvider`. Never search.
+2. Compare `typeof(IPCGDataProvider).GetMethods().Length` against the number your tool was written for, and report
+   a mismatch as drift instead of using the surface anyway.
+3. Check `GetActiveChunkBounds()` before trusting any sample, every time it matters, not once at startup.
+4. Announce disturbed ground with `NotifyCutRegion` in world space, sized to what you actually disturb.
+5. Keep every handle `RequestTunnelOpening` returns, treat −1 as failure, and release every one of them.
+6. Implement `IPathToolLink` — six members, listed at the top of this chapter — so an author can enter your tool
+   into the socket and read back what it is doing. `HeldRegionCount` must be the real outstanding count, and
+   `ReleaseAllHeldRegions()` must be the same release path your own disconnect runs, not a second copy of it.
+7. Do all of it on the main thread.
+
+Do that and the integration is debuggable from either end: your own status surface, and an author standing on the
+world side who can see the name, the state and the held count without opening your tool.
+
 ## Appendix A — Mathematical reference
+
 
 ### Noise
 
@@ -4958,8 +7708,9 @@ Min, Max.
 
 **Tools ▸ Universe Creator ▸ Run Self Test.** Exercises node evaluation, graph serialisation,
 chunk coordinates, the drainage solve, the water carve and appliers, the river valley, the
-shoreline conformer and the scatter placer, and writes the result to the console. As of this
-revision it runs **1472 checks**.
+shoreline conformer and the scatter placer, and — since Module 3 — the whole Living-World
+layer as well (enumerated below). It writes the result to the console. As of the Module 3
+close-out it runs **14498 checks**.
 
 It **never opens a dialog**, so it is safe in batch mode:
 
@@ -4974,7 +7725,7 @@ The last three lines of the log are the result:
 
 ```
 === UC SELF TEST: PASS ===
-checks run : 1472
+checks run : 14498
 failures   : 0
 ```
 
@@ -4986,6 +7737,30 @@ compile errors means Unity never got as far as the test.
 exactly N. That is the one thing that separates "my new test passed" from "my new test was never
 called" — a test registered nowhere reports nothing and looks identical to a test that agreed
 with you.
+
+### What the Module 3 self-tests cover
+
+The Living-World checks are registered in `UCSelfTest.Run()` alongside the terrain and water
+tests, so they are part of the single total above — not a separate suite you have to remember to
+run. They fall into these families:
+
+| Family | What it asserts |
+|---|---|
+| **Clock and astronomy** | equinox declination ≈ 0 and solstice ≈ ±23.44° within 0.5°; equatorial day length within 12 h ± 0.2 h all year; day length at 70° reaches exactly 0 h and 24 h with **no `NaN`**; solar-noon elevation matches `90 − φ + 23.44` on the June solstice |
+| **Climate normals** | continuous normals across a shared chunk edge; every month and annual aggregate finite on all nine presets, the Polar path included; `Ra` near 36 MJ/m²/day at the equinox equator and near 0 at 60° in December |
+| **Weather presets and tiers** | all nine presets build; no two collapse (each pair differs on annual mean temperature *and* rainfall together); all five quality-tier rows reachable, monotonic, mobile capped at the flagship row, volumetrics gated to desktop Ultra |
+| **Weather determinism** | jumping the clock 100 days forward and back reproduces the weather exactly; a world loaded fresh at a given day/hour matches one that ran there in real time |
+| **Ecology sample and envelope** | `EnvironmentSample` is a value type with no reference field and ≤ 160 bytes; suitability combines by the minimum (Liebig), not the product; hard gates return exactly zero; the three random streams are independent |
+| **Landform assemblages** | every candidate classifies into exactly one zone; a desert reads as evenly spaced sparse shrub, not thinned forest; the treeline resolves as a band |
+| **Detail memory** | the inspector figure equals `res² × 4 B × layerCount × residentChunks`; the mid-range preset lands under the 96 MB detail-layer target |
+| **Sky, light and irradiance** | the tier ladder is reachable and monotonic; the irradiance grid memory stays under the 48 MB ceiling; the screen-space reflection terms are excluded from the grid fill (the determinism guarantee) |
+| **Geometry, overlay and impostors** | per-cell density derives from the angular-error budget with hysteresis; the overlay ring is off on Mobile Low; impostor atlas stays under its per-tier ceiling; resident impostor species are 6 on Desktop, 12 on Ultra |
+| **Virtual splat cache and painting** | the cache is off below Desktop; a raise stroke respects the material's angle of repose; doubling alphamap resolution re-composites existing strokes to the same world positions |
+
+Anything whose done-when is a **frame-rate or memory measurement** on real hardware is *not* in
+this list — those are runtime measurements the standing rule forbids asserting without a
+profiler capture, and they are recorded in the close-out with the device and the numbers, not
+here.
 
 ### Testing the install without opening Unity
 

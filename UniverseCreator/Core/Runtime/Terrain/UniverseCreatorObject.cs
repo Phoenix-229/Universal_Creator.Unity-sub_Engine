@@ -54,6 +54,19 @@ namespace UniverseCreator.TerrainSystem
     [DisallowMultipleComponent]
     public class UniverseCreatorObject : MonoBehaviour
     {
+        // UC-T06-06: persisted namespace differs from the scheduler's deliberately transient runtime lifetime.
+        [SerializeField, HideInInspector] private string vegetationWorldId = System.Guid.NewGuid().ToString("N");
+        internal string ReadVegetationIdentity()
+        {
+            if (string.IsNullOrEmpty(vegetationWorldId))
+                throw new System.InvalidOperationException("Initialize this legacy world's vegetation identities explicitly before generation; snapshot capture does not change authoring.");
+            // UC-T06-06: cloning a world can copy its namespace; do not silently change keys and lose the clone's saved edits.
+            foreach (var candidate in UnityEngine.Object.FindObjectsByType<UniverseCreatorObject>(FindObjectsInactive.Include))
+                if (candidate != this && candidate.vegetationWorldId == vegetationWorldId)
+                    throw new System.InvalidOperationException("Two loaded worlds share a persistent vegetation namespace. Resolve the copied world identity and its edit migration before generation.");
+            return vegetationWorldId;
+        }
+
         // =====================================================================
         //  GRAPH
         // =====================================================================
@@ -83,11 +96,168 @@ namespace UniverseCreator.TerrainSystem
         public Vector2 worldOriginOffset = Vector2.zero;
 
         // =====================================================================
-        //  CHUNK SETTINGS (25+1 Virtual System)
+        //  CTL-2: WORLD PRESET
         // =====================================================================
 
-        [Tooltip("Chunks per side in the virtual grid. 5 gives the 25-chunk layout.")]
+        [Tooltip("Optional World Preset asset. Fields whose override toggle is on are driven by " +
+                 "the preset; clear the slot and your own values come back exactly as they were.")]
+        public UCWorldPreset worldPreset;
+
+        // The author's OWN values, captured the moment a preset takes over and restored the moment
+        // it is cleared. Serialized so the restore survives a domain reload, a scene save and a
+        // project close - a backup held only in memory would strand the author's numbers the first
+        // time Unity recompiled while a preset was assigned.
+        //
+        // WHY APPLY-AND-BACKUP RATHER THAN READ-THROUGH. worldSizeKm and maxHeightMeters are read
+        // in about forty places across the runtime and the inspectors. Routing all of them through
+        // an Effective* property would mean editing ~25 runtime call sites (a real chance of
+        // missing one) AND would leave the inspector showing an authored number while generation
+        // used a different one. Writing the live fields instead keeps every existing reader
+        // correct, untouched, and means the inspector shows the value actually in use.
+        [SerializeField, HideInInspector] private bool presetBackupValid;
+        [SerializeField, HideInInspector] private int presetBackupSeed;
+        [SerializeField, HideInInspector] private float presetBackupWorldSizeKm;
+        [SerializeField, HideInInspector] private float presetBackupMaxHeightMeters;
+        [SerializeField, HideInInspector] private int presetBackupResolution;
+
+        /// <summary>True while a preset is assigned and holding the author's values in reserve.</summary>
+        public bool PresetIsDriving { get { return worldPreset != null && presetBackupValid; } }
+
+        /// <summary>
+        /// CTL-5. The world facts a node reads but never serializes, as one value, for the
+        /// cross-bake product cache's key.
+        ///
+        /// A node's JSON does not contain the seed, the world size, the world height or the
+        /// resolution - they live here. So changing one of them (by hand, or by swapping a
+        /// World Preset) leaves every node's content hash untouched, and the retained cache
+        /// would forward products solved under the old numbers. Folding this into the hash is
+        /// what makes "I changed the world height" actually re-solve the graph.
+        ///
+        /// PURE READ: no side effects, so it is safe to call anywhere. It reads the LIVE
+        /// fields, which means <see cref="ApplyWorldPreset"/> must have run first for a
+        /// driven world - the bake does that explicitly before hashing.
+        /// </summary>
+        public ulong ComputeWorldFactsHash()
+        {
+            return UniverseCreator.Nodes.GraphContentHasher.WorldSalt(
+                seed, resolution, maxHeightMeters, worldSizeKm);
+        }
+
+        /// <summary>
+        /// CTL-2. Folds an assigned World Preset into the live world fields, and restores the
+        /// author's own values when the slot is cleared. Called from <see cref="BuildSettings"/> -
+        /// the one main-thread funnel every generation path runs through - and from OnValidate so
+        /// the inspector reflects it immediately.
+        /// </summary>
+        /// <remarks>
+        /// The backup is captured on the TRANSITION into "driven", not on every call, so applying
+        /// twice cannot overwrite the reserve with already-driven values. That one detail is what
+        /// makes "clearing it restores the component values" true rather than nearly true.
+        ///
+        /// Idempotent and allocation-free, so calling it per chunk costs nothing measurable.
+        /// </remarks>
+        public void ApplyWorldPreset()
+        {
+            if (worldPreset == null)
+            {
+                // Cleared: hand the author's own numbers back, once.
+                if (presetBackupValid)
+                {
+                    seed = presetBackupSeed;
+                    worldSizeKm = presetBackupWorldSizeKm;
+                    maxHeightMeters = presetBackupMaxHeightMeters;
+                    resolution = presetBackupResolution;
+                    presetBackupValid = false;
+                }
+                return;
+            }
+
+            // Capture ONLY on the way in, or a second apply would back up the preset's own values
+            // and the author's would be lost for good.
+            if (!presetBackupValid)
+            {
+                presetBackupSeed = seed;
+                presetBackupWorldSizeKm = worldSizeKm;
+                presetBackupMaxHeightMeters = maxHeightMeters;
+                presetBackupResolution = resolution;
+                presetBackupValid = true;
+            }
+
+            // Every field is independently opted in, so a preset that only carries a world size
+            // leaves the seed exactly as the author set it.
+            if (worldPreset.overrideSeed) seed = worldPreset.seed;
+            if (worldPreset.overrideWorldSizeKm) worldSizeKm = worldPreset.worldSizeKm;
+            if (worldPreset.overrideMaxHeightMeters) maxHeightMeters = worldPreset.maxHeightMeters;
+            if (worldPreset.overrideResolution) resolution = worldPreset.resolution;
+        }
+
+        // =====================================================================
+        //  CHUNK SETTINGS (25+1 Virtual System)
+        //
+        //  Two numbers, deliberately separate, that a previous design fused into one:
+        //
+        //   - chunkSizeMeters is the AUTHORED source of truth: how big one tile is.
+        //     The world is cut into as many tiles as it takes to cover it, so the tile
+        //     stays the size the developer asked for whatever the world size. Setting
+        //     it to 1000 gives 1 km tiles - a 9 km world is 9x9, a 5 km world is 5x5.
+        //
+        //   - chunkCountPerSide is DERIVED from the two above and cached here for the
+        //     many consumers that read it. It is not authored any more; ValidateSettings
+        //     overwrites it. This is "the +1": the whole-world subdivision, present in
+        //     full only while authoring.
+        //
+        //   - residentWindowPerSide is "the 25": how many tiles stay loaded around the
+        //     player at runtime. Fixed, NOT tied to world size, so a 40 km world streams
+        //     the same small window a 5 km world does and never holds the whole world
+        //     resident on a phone. The tiles outside it are parked (skeleton recycled),
+        //     not destroyed, so walking back re-enables a surface with no re-bake.
+        // =====================================================================
+
+        [Tooltip("Metres per chunk - the authored source of truth. The chunk COUNT is " +
+                 "derived from this and the world size, so a tile stays this size " +
+                 "whatever the world size. 1000 = 1 km tiles.")]
+        public float chunkSizeMeters = 1000f;
+
+        [Tooltip("Derived: chunks per side = worldSize / chunkSize. Set by " +
+                 "ValidateSettings, not authored. Read-only in the inspector.")]
         public int chunkCountPerSide = 5;
+
+        [Tooltip("Resident streaming window per side at runtime - 'the 25'. Fixed, not " +
+                 "tied to world size. 5 keeps a 5x5 window (radius 2) around the player. " +
+                 "Odd only, so there is a single centre tile to keep the player in.")]
+        public int residentWindowPerSide = 5;
+
+        [Tooltip("Stream a window around the player at runtime instead of holding the whole " +
+                 "world. On by default. It only ever engages when the world is bigger than " +
+                 "the resident window (a world that already fits stays whole either way), so " +
+                 "small worlds pay nothing and only a large world streams. Untick to force a " +
+                 "world to stay whole in play mode - only safe when it fits in memory.")]
+        public bool streamingEnabled = true;
+
+        // UC-T09-04: separate presentation/collision bounds; -1 retains the existing authored streaming policy.
+        /// <summary>Visible cell radius inside runtime residency, -1 for the legacy window/buffer policy or 0–12 cells; landing and Visible region requests can extend it. Does not alter terrain generation resolution.</summary>
+        [Tooltip("Visible cell radius inside the resident window. -1 retains the resident/buffer radius. Additional Visible region demands and landing requests can extend it.")]
+        public int visibilityRadiusCells = -1;
+
+        /// <summary>Collision radius inside runtime residency, -1 for legacy visual-LOD collision or 0–12 cells; landing/Collision requests can extend it. Host movement must await readiness before entering undemanded terrain.</summary>
+        [Tooltip("Collision cell radius inside the resident window. -1 retains visible-LOD collision. Host movement must await accepted landing/collision demand before entering an unready cell.")]
+        public int collisionRadiusCells = -1;
+
+        /// <summary>Opt-in native TerrainData retirement outside runtime residency. Default false retains native parking; authored payloads restore through the existing commit pump.</summary>
+        [Tooltip("Retire owned native terrain outside residency after capturing exact painting, holes and foliage. Imported TerrainData stays borrowed. Revisit requires native uploads; the host must await readiness.")]
+        public bool retireDormantTerrain;
+
+        /// <summary>Maximum dormant capture reservations in MiB per world, 8 to 256, also subject to ProductMemory. At most 64 payloads; refused cells retain native content.</summary>
+        [Tooltip("Per-world dormant capture cap in MiB, including readback scratch. At most 64 holders. A full cache retains the native cell and reports a diagnostic rather than losing content.")]
+        public int dormantTerrainBudgetMiB = 64;
+
+        /// <summary>Opt-in distant terrain radius in cells, 0 disables and 1 to 32 draws accepted dormant terrain beyond residency. No collision or foliage is provided.</summary>
+        [Tooltip("Distant display from saved dormant terrain; requires Retire Dormant Terrain. Keeps the full height/hole grid, with a 128-texel area-filtered paint map and no collider or foliage. Zero disables. Refused views report their memory cap.")]
+        public int farTerrainRadiusCells;
+
+        /// <summary>Per-world distant native terrain payload cap in MiB, 8 to 128; also bounded by shared ProductMemory and 16 views. Near terrain quality remains authored.</summary>
+        [Tooltip("Native payload cap for at most 16 distant terrain views. Shared ProductMemory still applies. This is a distant display tier; near terrain, painting and foliage are restored unchanged.")]
+        public int farTerrainBudgetMiB = 32;
 
         [Tooltip("High-LOD ring size (centre square). 3 gives 9 high-fidelity chunks.")]
         public int highLODRingSize = 3;
@@ -106,10 +276,62 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Material applied to every generated terrain chunk. Leave null for Unity's default.")]
         public Material terrainMaterial;
 
-        [Tooltip("Allowed screen-space error in pixels. Higher = fewer triangles, more popping.")]
-        public float pixelError = 5f;
+        // ---------------------------------------------------------------
+        //  ANGULAR-ERROR DENSITY (visual acuity, L-49 / Nyquist, L-50)
+        //
+        //  These replace an authored LOD curve. The terrain's heightmap pixel error
+        //  is derived from the live camera and screen through Geometry/AngularError
+        //  rather than read off a hand-tuned ramp, so the on-screen silhouette error
+        //  it permits is the same on a phone and a monitor. See Geometry/AngularError
+        //  and Geometry/TerrainDensityController.
+        // ---------------------------------------------------------------
 
-        [Tooltip("Distance beyond which terrain uses the low-res basemap instead of splat layers.")]
+        [Tooltip("How many pixels of terrain silhouette error is acceptable. This is the one honest " +
+                 "density dial: resolution- and FOV-independent. Lower = more triangles.")]
+        [Range(0.25f, 8f)]
+        public float acuityPixels = 1f;
+
+        [Tooltip("Hard floor on the derived pixel error, in pixels. The derived value is never allowed " +
+                 "below this even when the source heightmap could carry finer detail.")]
+        [Range(0.25f, 20f)]
+        public float pixelErrorFloor = 1f;
+
+        [Tooltip("Only re-write the terrain pixel error when it moves more than this many pixels. " +
+                 "Writing it rebuilds the patch LOD tree, so a still camera should write it zero times.")]
+        [Range(0f, 4f)]
+        public float densityHysteresis = 0.75f;
+
+        [Tooltip("Metres from the world origin past which the world root is clamped back. A root far " +
+                 "from the origin degrades float precision into jitter, z-fighting and cracks.")]
+        public float maxWorldOriginDistance = 20000f;
+
+        // ---------------------------------------------------------------
+        //  DERIVED DRAW DISTANCES
+        //
+        //  basemapDistance, detailObjectDistance, treeDistance and treeBillboardDistance
+        //  are NOT authored. Each is the range at which its own real-world feature drops
+        //  below the shared acuityPixels budget, resolved once against the reference view
+        //  in Geometry/AngularError. One dial - acuityPixels - therefore moves the whole
+        //  level-of-detail envelope together, instead of four hand-tuned magic numbers
+        //  drifting apart. RecomputeDerivedDistances() applies the model and
+        //  ValidateSettings() calls it on every change. The sizes below are the finest
+        //  detail each system is responsible for keeping resolvable; calibrated so the
+        //  desktop default (acuityPixels = 1) reproduces the long-standing distances.
+        // ---------------------------------------------------------------
+
+        // ~1 m of ground-texture detail: past where a metre of splat detail falls under the
+        // pixel budget, the composited layers are indistinguishable from the baked basemap.
+        private const float BasemapDetailMetres = 1.07f;
+        // A grass clump, ~8.5 cm across.
+        private const float DetailFeatureMetres = 0.085f;
+        // ~1 m of tree silhouette: below the budget the whole tree reads as a smudge, so cull it.
+        private const float TreeSilhouetteMetres = 0.96f;
+        // ~5 cm of tree depth relief - the parallax that separates a 3D mesh from a flat card.
+        private const float TreeReliefMetres = 0.053f;
+
+
+        [Tooltip("Derived (read-only): range past which the composited splat layers fall below the " +
+                 "acuity budget and the low-res basemap takes over. Moves with Acuity Budget.")]
         public float basemapDistance = 1000f;
 
         [Tooltip("Terrain casts shadows. Disable on mobile for a large fill-rate win.")]
@@ -140,8 +362,8 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Draw terrain detail meshes and trees. Off strips all foliage.")]
         public bool drawTreesAndFoliage = true;
 
-        [Tooltip("Distance in metres beyond which grass and detail meshes stop drawing.")]
-        [Range(0f, 250f)]
+        [Tooltip("Derived (read-only): range past which a grass clump falls below the acuity budget " +
+                 "and detail meshes stop drawing. Moves with Acuity Budget.")]
         public float detailObjectDistance = 80f;
 
         [Tooltip("Fraction of authored detail density actually drawn. Lower is the single " +
@@ -149,10 +371,12 @@ namespace UniverseCreator.TerrainSystem
         [Range(0f, 1f)]
         public float detailObjectDensity = 1f;
 
-        [Tooltip("Distance beyond which trees stop drawing entirely.")]
+        [Tooltip("Derived (read-only): range past which a tree's silhouette falls below the acuity " +
+                 "budget and it stops drawing entirely. Moves with Acuity Budget.")]
         public float treeDistance = 900f;
 
-        [Tooltip("Distance beyond which trees switch from mesh to billboard.")]
+        [Tooltip("Derived (read-only): range past which a tree's depth relief falls below the acuity " +
+                 "budget and the mesh is swapped for a billboard. Moves with Acuity Budget.")]
         public float treeBillboardDistance = 50f;
 
         [Tooltip("Metres over which the mesh-to-billboard swap is blended. 0 pops visibly.")]
@@ -222,6 +446,21 @@ namespace UniverseCreator.TerrainSystem
         [Range(1, 16)]
         public int maxConcurrentChunks = 4;
 
+        [Tooltip("Opt-in. Build pending chunks the camera can actually SEE first: inside the " +
+                 "frustum and within draw distance, then inside the frustum but farther, then " +
+                 "along the predicted travel path, then everything else - and nearer first " +
+                 "within each band. OFF (default) keeps the pure nearest-first ring order, so " +
+                 "an existing world's build sequence is unchanged. Turning it on stops the " +
+                 "build budget being spent behind the camera, and re-prioritises on a turn.")]
+        public bool frustumFirstBuildOrder = false;
+
+        [Tooltip("Opt-in. Add a load/unload dead band to the streaming ring so a camera parked on " +
+                 "the window boundary stops thrashing the same chunk (load at the window, unload only " +
+                 "one dead-band further out, hold between). OFF (default) keeps the single-threshold " +
+                 "residency exactly as it was. It only ever holds a chunk slightly longer, never sheds " +
+                 "one early, so it cannot raise peak memory beyond one extra ring near a boundary.")]
+        public bool loadUnloadHysteresis = false;
+
         [Tooltip("Resolution used for interactive regeneration. Draft is fastest.")]
         public PreviewQuality previewQuality = PreviewQuality.Full;
 
@@ -231,8 +470,17 @@ namespace UniverseCreator.TerrainSystem
         [Range(0f, 500f)]
         [SerializeField] private float chunkYieldDelayMs = 100f;
 
+        // UC-T02-04: retain the serialized legacy delay for scene compatibility; the pump now measures actual work.
+        [Tooltip("Soft time budget per terrain commit pump in milliseconds. Indivisible native operations can exceed it and are reported in commit metrics.")]
+        [Range(0.1f, 16f)]
+        [SerializeField] private float chunkCommitBudgetMs = 4f;
+
+        /// <summary>Soft main-thread commit budget in milliseconds, clamped to 0.1–16; nonfinite authored values use 4 ms.</summary>
+        public float ChunkCommitBudgetMilliseconds => float.IsNaN(chunkCommitBudgetMs) || float.IsInfinity(chunkCommitBudgetMs)
+            ? 4f : Mathf.Clamp(chunkCommitBudgetMs, 0.1f, 16f);
+
         /// <summary>
-        /// Gap enforced between chunk applications, in seconds.
+        /// Legacy authored gap in seconds, retained for compatibility; UC-T02-04 uses ChunkCommitBudgetMilliseconds instead.
         ///
         /// Generation is off-thread, but applying a finished chunk is not and cannot be:
         /// the height write, the splatmap write and the collider rebuild are all
@@ -271,13 +519,56 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>
         /// Capture hand sculpts into the override layer before each regeneration.
-        /// On by default: losing sculpting work to a background regeneration is the
-        /// worse failure. Turn it off when the graph is the only source of truth and
-        /// the diff scan per cell is not worth paying for.
+        ///
+        /// DEF-1: THIS SHIPS OFF, AND THE REASONING THAT MADE IT ON HAS CHANGED.
+        /// It was on because "losing sculpting work to a background regeneration is the
+        /// worse failure", which is true while a HUMAN is the only thing that writes the
+        /// heightfield. A second writer breaks it. Capture diffs the live terrain against
+        /// the baseline this object last wrote, so it cannot tell a brush stroke from a
+        /// road's cut - both are simply "the terrain differs from what we wrote". Once an
+        /// external system flattens ground, the first regeneration records that flatten as
+        /// an author sculpt and every regeneration afterwards faithfully re-applies it. The
+        /// terrain then stops tracking the graph, the original can never be recovered, and
+        /// nobody ever pressed Capture. That is a far worse failure than losing a sculpt,
+        /// because it is silent and permanent.
+        ///
+        /// So Regenerate means regenerate. Capturing a sculpt is now an explicit act: the
+        /// "Capture Manual Edits" button, which is unchanged and still does exactly this.
+        /// Turn this back on only for a world where nothing but a human touches the
+        /// heightfield.
         /// </summary>
-        [Tooltip("Capture hand-sculpted height changes before regenerating, so they " +
-                 "survive the graph re-run. Off means the graph output replaces them.")]
+        [Tooltip("Capture hand-sculpted height changes before regenerating, so they "
+               + "survive the graph re-run. OFF by default: it cannot tell a hand sculpt "
+               + "from a road or plugin writing the terrain, so leaving it on lets an "
+               + "external cut be recorded as your edit and re-applied for ever. Use the "
+               + "Capture Manual Edits button when you do want a sculpt kept.")]
         public bool captureManualEditsOnRegenerate = false;
+
+        /// <summary>
+        /// DEF-2. The widest band of FLATTENED ground an external system (a road, a rail
+        /// corridor, a plugin) may ask this world to cut, measured each side of the centre
+        /// line. A road owns the ground it sits on, not the landscape.
+        ///
+        /// This exists because an unlimited contract is not a contract. Road &amp; City
+        /// Master ships an upstream default `matchHeightsDistance = 50f` and buffers it
+        /// by 1.65x, so one road reaches roughly 165 m of terrain - invisible on a large
+        /// open landscape, and on a 4 km world it flattens the world.
+        /// </summary>
+        [Tooltip("Widest band of flattened ground an external system (road, rail, plugin) "
+               + "may cut, each side of its centre line. A six-lane carriageway with "
+               + "shoulders fits in 24 m. Over-wide requests are NARROWED and reported, "
+               + "never dropped - a dropped request leaves the road floating.")]
+        [Min(0.5f)]
+        public float maxPluginFlattenHalfWidthM = TerrainShapeGuard.DefaultMaxFlattenHalfWidthM;
+
+        /// <summary>
+        /// DEF-2. How far past the flattened edge an external system may blend out. This is
+        /// the short pull of dirt that stops a cut ending in a step - metres, not hundreds.
+        /// </summary>
+        [Tooltip("How far past the flattened edge an external system may blend the ground "
+               + "out. This is the pull of dirt past the shoulder, so it is metres.")]
+        [Min(0f)]
+        public float maxPluginBlendBeyondFlattenM = TerrainShapeGuard.DefaultMaxBlendBeyondFlattenM;
 
         // =====================================================================
         //  GENERATION STATE
@@ -287,6 +578,29 @@ namespace UniverseCreator.TerrainSystem
         private StopToken currentStopToken;
         private Task currentTask;
         private TileData lastTile;
+        // UC-T01-06: cancellation and publication share a gate so disabling cannot receive a late tile lease.
+        private readonly object generationPublicationLock = new object();
+        // UC-T02-01: all graph domains on this component share one runtime world/revision authority.
+        private readonly WorldGenerationScheduler generationScheduler = new WorldGenerationScheduler();
+
+        // UC-T02-06: a world shares admission across its workers, retained fields and generated terrain reservations.
+        [SerializeField, Min(16), Tooltip("Generated payload budget in MiB, fixed when this world's first job starts. Active consumers are protected; over-budget new work reports an error. Excludes imported assets and engine/driver overhead.")]
+        private int productMemoryBudgetMiB = 512;
+        private ProductMemoryBudget productMemory;
+        /// <summary>World's generated-payload budget, initialized once from its authored MiB limit (minimum 16 MiB).</summary>
+        /// <remarks>Defaults to 512 MiB. Estimates exclude imported assets, GC heap and graphics-driver overhead; reload the world to change an initialized limit.</remarks>
+        public ProductMemoryBudget ProductMemory
+        {
+            get
+            {
+                if (productMemory == null) System.Threading.Interlocked.CompareExchange(ref productMemory,
+                    new ProductMemoryBudget(System.Math.Max(16L, productMemoryBudgetMiB) * 1024 * 1024), null);
+                return productMemory;
+            }
+        }
+
+        /// <summary>Publication authority shared by terrain, material, vegetation and environment work for this world.</summary>
+        public WorldGenerationScheduler GenerationScheduler => generationScheduler;
 
         /// <summary>True while a background generation is running.</summary>
         public bool IsGenerating { get { return isGenerating; } }
@@ -324,11 +638,16 @@ namespace UniverseCreator.TerrainSystem
         /// Regenerates the world through the chunking system: every cell of the
         /// virtual grid, each at its own LOD, recycling the pooled TerrainData.
         /// This is what the inspector's Regenerate button and any committed setting
-        /// route to. Returns false if there was nothing to generate.
+        /// route to. UC-T01-09: rejects invalid graphs before terrain/resource changes.
         /// </summary>
+        /// <returns>True when generation is requested; false for absent/invalid graphs or no available generation path.</returns>
         public bool RebuildChunks()
         {
             ChunkManager cm = Chunks;
+            // UC-T01-09: reject before initialization, sculpt capture, water hooks or terrain allocation.
+            if (graph != null && !ValidateGenerationGraph()) return false;
+            // UC-T02-01: arm deferred environment hooks against the same revision the chunk rebuild will use.
+            GenerationRunId run = cm != null ? GenerationScheduler.BeginRun() : default;
 
             // No graph is a legitimate state, not an error: it is what a world looks
             // like before one is connected. Lay the cells out flat so the terrain is
@@ -339,7 +658,25 @@ namespace UniverseCreator.TerrainSystem
                 if (cm == null) return false;
 
                 cm.Initialize(this);
-                cm.RebuildLayout();
+
+                // GAP-1. The graphless path is a regeneration path too, so it has to
+                // lift a hand sculpt out before RebuildLayout can discard it - otherwise
+                // the C-04 promise below ("the one place... every regeneration path
+                // funnels through here") was quietly false for a graphless world. This
+                // MUST run before RebuildLayout: a committed resolution or preview-quality
+                // change makes EnsureFlatDataAsync drop the mismatched heightfield and
+                // re-seed flat, nulling appliedHeights - and CaptureManualEdits skips any
+                // cell whose live resolution no longer matches its baseline, so a capture
+                // afterwards would find nothing to lift. Taken here, the delta lands in
+                // the override layer at the old sample scale and is rescaled back on the
+                // next apply, so a graphless resolution change preserves the sculpt rather
+                // than erasing it. Same single flag as the graphed path below, so the
+                // capture policy stays one policy. Preservation, not on-screen restore:
+                // a still-graphless surface stays flat until the next bake re-applies the
+                // layer - exactly the C-04 contract ("survives connecting a graph").
+                if (captureManualEditsOnRegenerate) cm.CaptureManualEdits();
+
+                cm.RebuildLayout(run);
                 return false;
             }
 
@@ -366,13 +703,16 @@ namespace UniverseCreator.TerrainSystem
             // Only generate if the creator node is actually connected to the output!
             if (graph != null)
             {
-                // Water is procedural ONLY where the graph asks for it. A Hydrology
-                // Spawner must be present AND wired through to an Output before any
-                // river or lake is drawn - a disconnected node, or no node at all,
-                // means no procedural water, full stop. This is the user's rule:
-                // "make sure the lake do not just create themselves but until their
-                // nodes are created." (Bodies orphaned by a since-disconnected node
-                // are torn down by the graph-reactive removal pass, not here.)
+                // Water is procedural ONLY where the graph asks for it - but the graph
+                // can ask for it in more than one way. A Hydrology Spawner wired
+                // through to an Output settles the counts outright. Failing that, a
+                // water node that reaches an Output - a River Network Trace, a River
+                // Fill, a Lake Fill, an Ocean Level - has plainly asked for water too,
+                // and gets it with the counts derived from the world's own size. Only
+                // when the graph contains neither does the world stay dry. That split
+                // is the user's rule: the spawner's numbers when it is connected,
+                // native math when it is not. ResolveHydrology holds both halves, so
+                // there is one answer to "does this world generate water".
                 //
                 // The reach-an-Output walk lives on the water manager rather than being
                 // written out here, because UCWaterBody.IsGraphLinked asks the same
@@ -384,11 +724,8 @@ namespace UniverseCreator.TerrainSystem
                     GetComponentInChildren<UCWaterSystemManager>(true);
                 bool spawnAllowed = water == null || water.NodeWaterEnabled;
 
-                System.Collections.Generic.List<UniverseCreator.Nodes.Creators.HydrologyNode> spawners =
-                    UCWaterSystemManager.ConnectedHydrology(graph);
-
                 UniverseCreator.Nodes.Creators.HydrologyNode connectedHydrology =
-                    spawnAllowed && spawners.Count > 0 ? spawners[0] : null;
+                    spawnAllowed ? UCWaterSystemManager.ResolveHydrology(graph, this) : null;
 
                 // DEFERRED, not called here. RebuildAll below is async, so at this line
                 // the terrains still hold the flat/stale baseline - spawning now traced
@@ -401,32 +738,101 @@ namespace UniverseCreator.TerrainSystem
                 if (connectedHydrology != null)
                 {
                     UniverseCreator.Nodes.Creators.HydrologyNode hydrologyToRun = connectedHydrology;
-                    cm.RunAfterSettle(() =>
-                    {
-                        UniverseCreator.TerrainSystem.HydrologyGenerator.GenerateFromNode(this, hydrologyToRun);
-                        cm.ReapplyCarves();
 
-                        // The sea's level has only just been derived, from the settled
-                        // surface, in metres. Every splatmap on the terrain was painted
-                        // before that number existed - from whatever fraction the graph
-                        // happened to hold - so the beach can be sitting at an elevation
-                        // the water never reached, which is the untextured shoreline.
-                        // Locking the two together and re-baking puts the sand on the real
-                        // waterline within the same Generate.
-                        //
-                        // Bounded, and not a loop. The re-bake below does not re-arm this
-                        // callback, so hydrology does not run a second time; the sync is a
-                        // no-op once the two agree, and they stay agreed because the ocean
-                        // holds its placement and no splatmap can move a height. A world
-                        // with no sea, or one already in sync, re-bakes nothing.
-                        UniverseCreator.TerrainSystem.UCWaterSystemManager water =
-                            GetComponentInChildren<UniverseCreator.TerrainSystem.UCWaterSystemManager>(true);
-                        if (water != null && water.SyncSeaLevelFromOcean(this))
-                            cm.RebuildAll();
-                    });
+                    // SEA LEVEL RECONCILED BEFORE THE BAKE, NOT ONLY AFTER IT.
+                    // The post-settle SyncSeaLevelFromOcean (armed as step 3 below) locks the
+                    // manager's nodeSeaLevel onto the ocean's real surface and, when that moved
+                    // the number, fires a full second RebuildAll to repaint the beach. That
+                    // re-bake was firing on nearly every Generate: the manager began at its 0.35
+                    // default while the graph placed the ocean at the Hydrology node's own
+                    // fraction, so the two always disagreed - the "it regenerates again the
+                    // moment it finishes" report. Reconcile them HERE so the FIRST bake already
+                    // paints the true waterline and the post-settle sync moves nothing. If an
+                    // ocean already stands (kept or hand-dragged) lock onto its surface; if not,
+                    // adopt the fraction this spawn is about to place the fresh ocean at and push
+                    // it to the shoreline readers. A genuinely dragged ocean is still reconciled -
+                    // now on the first bake instead of a redundant second one.
+                    if (water != null && !water.SyncSeaLevelFromOcean(this))
+                        water.AdoptNodeSeaLevel(hydrologyToRun.seaLevel, graph);
+
+                    // Armed as ordered steps, not one closure (freeze Fix A). Each is a
+                    // bounded piece of the old single blocking finish, and
+                    // SettlePhaseAfter runs one per pump so the Scene view repaints
+                    // between them instead of freezing for the whole finish (the ~30 s
+                    // modal). Order is load-bearing: spawn the water first (it reads the
+                    // settled surface), fold the new digs into the terrain second, then
+                    // reconcile the beach to the real waterline last.
+                    //
+                    // ONLY STEP 1 IS ARMED HERE (spec §15). The spawn now builds the
+                    // ocean, then EACH LAKE on its own after-settle pump, so it can no
+                    // longer be a single queued step with reapply/sync already sitting
+                    // behind it - those would run before the last lake was built. Instead
+                    // the spawn is handed a CONTINUATION: it self-arms one pump per lake,
+                    // and only after the final lake fires the continuation, which enqueues
+                    // the carve fold-in and the beach reconcile as the next two pumps. The
+                    // ordering is therefore preserved (spawn -> fold -> beach) while every
+                    // lake gets its own frame, so the editor never freezes on a bulk flood.
+                    ChunkManager cmFinish = cm;
+                    cm.RunAfterSettle(
+                        // 1) Spawn the procedural water (ocean now, then one lake per pump),
+                        //    reading the final surface. The continuation runs after the last.
+                        () => UniverseCreator.TerrainSystem.HydrologyGenerator.GenerateFromNode(
+                            this, hydrologyToRun,
+                            () =>
+                            {
+                                // 2) Fold the fresh basin/shore digs - and the fill-back of
+                                //    any lake the reconcile-down cull removed - into the
+                                //    settled terrain in one synchronous pass. Enqueued as
+                                //    its own pump so the view repaints before the fold-in.
+                                cmFinish.EnqueueAfterSettle(() => cmFinish.ReapplyCarves());
+
+                                // 3) The sea's level has only just been derived, in metres,
+                                //    from the settled surface. Keep the water system in step
+                                //    with it so shaders, buoyancy and runtime read the real
+                                //    waterline - but do NOT re-bake.
+                                //
+                                //    §A6-1 ONE-CLICK RE-BAKE REMOVED (author 2026-10-10). It
+                                //    pushed the spawned lakes' footprints back into the graph and
+                                //    ran a second RebuildAll so the continental-rise guard could
+                                //    exempt "real" lake basins. That whole loop is obsolete under
+                                //    the new rule: the TERRAIN never forms a lake basin on its own
+                                //    (ContinentalRise now floors every dry sub-sea pan to a plain),
+                                //    and a lake's bed is dug by the LAKE OBJECT's carve, which is
+                                //    folded into every chunk by ReapplyCarves above. So there is no
+                                //    footprint to feed back, no basin to guard, and no second bake.
+                                cmFinish.EnqueueAfterSettle(() =>
+                                {
+                                    UniverseCreator.TerrainSystem.UCWaterSystemManager water =
+                                        GetComponentInChildren<UniverseCreator.TerrainSystem.UCWaterSystemManager>(true);
+                                    if (water == null) return;
+
+                                    water.SyncSeaLevelFromOcean(this);
+                                });
+                            }));
                 }
                 else
                 {
+                    // WHY NOTHING WAS PRODUCED, SAID OUT LOUD
+                    // Two quite different situations arrive here and both look identical
+                    // from the scene - an empty water system. Either the graph genuinely
+                    // asks for no water, which is the ordinary case and rightly says
+                    // nothing, or the graph DOES hold a wired Hydrology Spawner and the
+                    // water manager's Source field is refusing it, and then the sweep
+                    // below takes down every river and lake a previous run made with no
+                    // explanation anywhere. The second case is a setting rather than a
+                    // fault, so it is reported and not overridden: the field is the
+                    // user's to set, and the one thing it must not do is this silently.
+                    if (!spawnAllowed
+                        && UCWaterSystemManager.ConnectedHydrology(graph).Count > 0)
+                    {
+                        Debug.LogWarning("[UC Water] a Hydrology Spawner is wired in the graph, but the "
+                                         + "Water System Manager's Source is set to " + water.source
+                                         + ", which does not let the graph produce water. No river, lake "
+                                         + "or ocean will be generated, and any this world already had is "
+                                         + "being removed. Set Source to Node Graph or Both to let it run.",
+                                         water);
+                    }
+
                     // No Hydrology node reaches an Output any more (disconnected or
                     // deleted), or the water manager's Source says the graph may not
                     // produce water, so any river/lake a previously-connected node
@@ -438,15 +844,19 @@ namespace UniverseCreator.TerrainSystem
                     // bodies are removed; hand-placed water and the UniverseCreator root are
                     // untouched. The re-carve is skipped when nothing was swept, so a world
                     // that never had procedural water sees no behaviour change.
-                    cm.RunAfterSettle(() =>
-                    {
-                        int removed = UniverseCreator.TerrainSystem.HydrologyGenerator.RemoveAllGenerated(this);
-                        if (removed > 0) cm.ReapplyCarves();
-                    });
+                    // Two ordered steps, one per pump (freeze Fix A), the mirror of the
+                    // spawn path: sweep the orphaned bodies first, then fold their freed
+                    // basins back into the settled terrain. removedGenerated carries the
+                    // count between the steps so the re-carve is skipped when nothing was
+                    // swept - a world that never had procedural water sees no change.
+                    int removedGenerated = 0;
+                    cm.RunAfterSettle(
+                        () => removedGenerated = UniverseCreator.TerrainSystem.HydrologyGenerator.RemoveAllGenerated(this),
+                        () => { if (removedGenerated > 0) cm.ReapplyCarves(); });
                 }
             }
 
-            cm.RebuildAll();
+            cm.RebuildAll(run);
             return true;
         }
 
@@ -463,15 +873,60 @@ namespace UniverseCreator.TerrainSystem
             return cm != null && cm.PumpCompleted();
         }
 
+        /// <summary>
+        /// The inspector vegetation path (T-VEGLAW). A vegetation-library edit must NOT
+        /// regenerate the terrain: no height, texture or hydrology rebuild of any chunk.
+        /// It re-applies the scatter prototypes over the EXISTING surface, reading that
+        /// surface rather than rewriting it - "inspector alone does not cause the terrain
+        /// chunk regeneration, it just reads it." Only the procedural graph path is
+        /// allowed to regenerate terrain products.
+        /// </summary>
+        /// <remarks>
+        /// Falls back to a full <see cref="RebuildChunks"/> in exactly one case: nothing
+        /// has been baked yet, so there is no existing terrain for a read-only re-scatter
+        /// to stand on. That first bake is the procedural path doing its one legitimate
+        /// regen; every edit after it re-scatters in place.
+        /// </remarks>
+        /// <returns>True if a re-scatter (or the first-build fallback) was started.</returns>
+        public bool RescatterVegetation()
+        {
+            ChunkManager cm = Chunks;
+
+            // No chunk system in the hierarchy: the single-tile fallback is the only
+            // surface there is, and it has no read-only scatter path, so a bare root
+            // still previews through the full regenerate.
+            if (cm == null) return RegenerateAsync();
+
+            cm.Initialize(this);
+
+            // The read-only pass over the terrain that already exists. Only when there is
+            // nothing baked to re-dress does this hand off to a full build.
+            if (cm.RescatterAll()) return true;
+            return RebuildChunks();
+        }
+
         // =====================================================================
         //  PUBLIC API
         // =====================================================================
 
+        // UC-T01-09: shared admission for full rebuild and direct ChunkManager callers; preserves the last accepted world.
+        internal bool ValidateGenerationGraph()
+        {
+            try { GraphValidationReport.Analyze(graph, NodeExecutionDomain.Worker).ThrowIfInvalid(); }
+            catch (System.InvalidOperationException ex)
+            {
+                Debug.LogError("Universe Creator: " + ex.Message, this);
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>
         /// Kicks off async terrain regeneration. Called by the inspector when the
         /// user commits an input field (Enter or focus-out) or changes the graph.
-        /// Returns false if there was nothing to generate.
+        /// UC-T01-09: invalid topology/domains are rejected before a new worker or publication is created.
         /// </summary>
+        /// <returns>True when a worker starts; false for absent/empty graphs or failed input capture. Rejection is logged.</returns>
         public bool RegenerateAsync()
         {
             // Real Unity null check, on the main thread where it is legal. This also
@@ -488,35 +943,57 @@ namespace UniverseCreator.TerrainSystem
                 return false;
             }
 
+            // Build-currency guard: prints which compiled assembly is actually
+            // running this regeneration, so a stale editor compile is visible at
+            // a glance instead of being mistaken for a code change that "did nothing".
+            UCBuildStamp.LogOnce();
+
             // Supersede any run already in flight. The old worker sees the flag on
             // its next ThrowIfStopRequested and unwinds.
-            if (currentStopToken != null) currentStopToken.RequestStop();
+            CancelGeneration();
 
-            // Nodes that need to read a Unity object (textures, curves, terrain data)
-            // copy it into plain arrays here, while we are still on the main thread.
-            for (int i = 0; i < graph.nodes.Count; i++)
+            // UC-T01-06: clone first, then prepare and hash the copied graph with this world's inputs.
+            GenerationSnapshot snapshot;
+            // UC-T01-09: whole-world generation requires an enabled output and worker-safe topology.
+            try { snapshot = GenerationSnapshot.Capture(graph, this, requireOutput: true); }
+            catch (System.Exception ex)
             {
-                Generator node = graph.nodes[i];
-                if (node != null) node.PrepareMainThread();
+                Debug.LogError("Universe Creator: generation input capture failed - " + ex, this);
+                return false;
             }
-
-            GenerationSettings settings = BuildSettings();
-
-            // Local copies so the closure captures values, not fields that the next
-            // RegenerateAsync call is about to overwrite.
-            Graph localGraph = graph;
-            StopToken stop = new StopToken();
+            GenerationRunId run = GenerationScheduler.BeginRun(); // UC-T02-01: supersedes every domain in this world only.
+            StopToken stop = GenerationScheduler.CreateStopToken(run);
             currentStopToken = stop;
             isGenerating = true;
 
-            currentTask = Task.Run(() => GenerateOnWorkerThread(localGraph, settings, stop));
+            GenerationSnapshot.Lease workerLease = snapshot.Acquire();
+            try
+            {
+                // UC-T02-02: cancelled predecessors still count; queued replacements consume no waiting thread.
+                currentTask = GenerationScheduler.RunWorkerAsync(run, Mathf.Max(1, maxConcurrentChunks), stop,
+                    () => GenerateOnWorkerThread(snapshot, stop, run),
+                    () =>
+                    {
+                        workerLease.Dispose();
+                        if (ReferenceEquals(currentStopToken, stop)) isGenerating = false;
+                    });
+            }
+            catch
+            {
+                workerLease.Dispose();
+                isGenerating = false;
+                throw;
+            }
+            finally { snapshot.Release(); }
             return true;
         }
 
-        /// <summary>Requests the current generation stop. Safe to call when idle.</summary>
+        /// <summary>UC-T02-01: cancels the current world revision across graph domains, preserving already accepted output.</summary>
         public void CancelGeneration()
         {
-            if (currentStopToken != null) currentStopToken.RequestStop();
+            GenerationScheduler.Cancel(GenerationScheduler.CurrentRun);
+            lock (generationPublicationLock)
+                if (currentStopToken != null) currentStopToken.RequestStop();
         }
 
         /// <summary>
@@ -525,6 +1002,13 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public GenerationSettings BuildSettings()
         {
+            // CTL-2: the ONE main-thread funnel every generation path goes through (the whole-world
+            // regenerate above and the chunking system's per-chunk variant both call this), so it
+            // is the single place a preset needs to be folded in. Doing it here rather than in
+            // ~40 call sites is what keeps every existing reader of worldSizeKm /
+            // maxHeightMeters correct without being touched.
+            ApplyWorldPreset();
+
             Vector3 worldSize = GetWorldSize();
 
             GenerationSettings s = new GenerationSettings();
@@ -547,14 +1031,43 @@ namespace UniverseCreator.TerrainSystem
         //  WORKER THREAD
         // =====================================================================
 
+        /// <summary>
+        /// The north fraction of a bake that covers the whole world in one tile: its
+        /// centre, because a single tile spanning every latitude has no one edge to
+        /// belong to. Named rather than written as a bare 0.5 so the reason travels
+        /// with it. (W-05)
+        /// </summary>
+        private const float WholeWorldNorthFraction = 0.5f;
+
         // Static-in-spirit: takes everything by parameter and touches no Unity API
         // beyond Debug.Log, which is thread-safe.
-        private void GenerateOnWorkerThread(Graph g, GenerationSettings s, StopToken stop)
+        private void GenerateOnWorkerThread(GenerationSnapshot snapshot, StopToken stop, GenerationRunId run)
         {
+            GenerationSettings s = snapshot.Settings;
+            Graph g = snapshot.Graph;
+            Ecology.EcoScatterContext ecology = snapshot.Ecology;
+            TileData tile = null;
+            bool published = false;
             try
             {
                 CoordRect rect = new CoordRect(new Coord(0, 0), new Coord(s.resolution, s.resolution));
-                TileData tile = new TileData(s.chunkCoord, rect, s.worldPos, s.worldSize, s.maxHeightMeters);
+                tile = new TileData(s.chunkCoord, rect, s.worldPos, s.worldSize, s.maxHeightMeters);
+                tile.AttachMemory(ProductMemory); // UC-T02-06: whole-world evaluation shares the same budget as chunk workers.
+                tile.AssignRun(run); // UC-T02-01: carry identity all the way to the applying consumer.
+                tile.metrics = GenerationScheduler.Metrics.Capture(run, g, s, s.resolution); // UC-T02-09: captured content and effective quality identify matched measurements.
+                tile.drainageCache = new WorldDrainageCache(GenerationScheduler.CreateStopToken(run), ProductMemory); // UC-T02-03/06: shared, budgeted solve owner.
+                tile.ownsDrainageMemory = true;
+                tile.RetainGenerationInputs(snapshot);
+
+                // ForChunk rather than the context itself, so this tile gets its own
+                // sampler. There is only one tile on this path today, and taking the
+                // shortcut is what would break the day there are two.
+                //
+                // W-05: 0.5 because this path bakes the world as a single tile, so it
+                // spans the whole latitude range and its one latitude can only be the
+                // centre one. Chunked bakes go through ChunkManager, which knows where
+                // each cell sits and passes its real fraction.
+                tile.ecology = ecology != null ? ecology.ForChunk(WholeWorldNorthFraction) : null;
 
                 GraphEvaluator evaluator = new GraphEvaluator(g);
                 evaluator.Evaluate(tile, stop);
@@ -563,7 +1076,19 @@ namespace UniverseCreator.TerrainSystem
 
                 // Hand the filled tile to the main thread. The chunking system reads
                 // tile.outputs and calls TerrainData.SetHeights from there.
-                lastTile = tile;
+                // UC-T01-06: the accepted tile owns a lease; cancellation cannot publish behind OnDisable.
+                // UC-T02-01: revision replacement and managed publication are atomic across every domain.
+                GenerationScheduler.TryPublish(run, () =>
+                {
+                    lock (generationPublicationLock)
+                    {
+                        if (stop.StopRequested || !ReferenceEquals(currentStopToken, stop)) return;
+                        TileData previous = lastTile;
+                        lastTile = tile;
+                        published = true;
+                        if (previous != null) previous.ReleaseProductMemory(); // UC-T02-06: retire the superseded tile's graph payload pins.
+                    }
+                });
             }
             catch (System.OperationCanceledException)
             {
@@ -575,6 +1100,7 @@ namespace UniverseCreator.TerrainSystem
             }
             finally
             {
+                if (!published && tile != null) tile.ReleaseProductMemory(); // UC-T02-06: failed/cancelled workers cannot strand transient pins.
                 // Only the newest run owns the flag. An older, superseded worker
                 // finishing late must not report the current one as idle.
                 if (ReferenceEquals(currentStopToken, stop)) isGenerating = false;
@@ -697,18 +1223,24 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Radius, in cells, of the window kept loaded around the player at runtime.
         ///
-        /// Derived from the visible grid rather than hard-coded to 2, so a world authored
-        /// with a 7x7 or 9x9 grid streams the window its author asked for. The default
-        /// 5x5 grid gives radius 2 - the 25-chunk window - and the buffer ring beyond it
-        /// is pre-generated so the edge never streams in visibly.
+        /// Derived from residentWindowPerSide - 'the 25' - NOT from the world subdivision.
+        /// This is the fix for the crash the old design courted: when the radius followed
+        /// the world count, a large world's window grew to cover the whole world, so a
+        /// 40 km world at 1 km tiles tried to hold ~1600 heightmaps resident and took a
+        /// phone out of memory. Pinning it to the resident window means the window is the
+        /// same small 5x5 (radius 2) on a 5 km world and a 40 km one; the difference is
+        /// only how many tiles it slides across. The buffer ring beyond it is
+        /// pre-generated so the edge never streams in visibly.
         ///
         /// Edit mode does not use this: the whole world stays resident there, which is
         /// what makes global placement of cities, roads and foliage possible.
         /// </summary>
+        /// <returns>Nonnegative Chebyshev radius, including the buffer. A one-cell window with no buffer has radius zero.</returns>
         public int GetStreamRadius()
         {
-            int radius = (Mathf.Max(1, chunkCountPerSide) - 1) / 2;
-            return Mathf.Max(1, radius) + Mathf.Max(0, bufferRingWidth);
+            int window = Mathf.Max(1, residentWindowPerSide);
+            int radius = (window - 1) / 2;
+            return radius + Mathf.Max(0, bufferRingWidth); // UC Scene/Play repair: honor an authored one-cell window.
         }
 
         /// <summary>
@@ -736,18 +1268,36 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>
         /// Whether the world should hold every cell resident instead of streaming a
-        /// window. True in the editor while not playing.
+        /// window. This is the hybrid gate.
         ///
         /// The two modes want opposite things and cannot share one policy. Authoring
         /// needs the whole 10-40 km world on screen at once, because a road or a city
         /// placed against a cell that is not loaded has nothing to sit on. Runtime needs
         /// the opposite: the same world resident in full is thousands of heightmaps, and
         /// on a phone that is an out-of-memory kill rather than a slow frame.
+        ///
+        /// So the whole world stays resident when ANY of these hold:
+        ///   - the editor is not playing (authoring always sees everything);
+        ///   - the developer unticked streamingEnabled (an explicit "keep it whole");
+        ///   - the world already FITS in the resident window - no cell would ever fall
+        ///     outside it, so streaming would slide a window that never has an edge to
+        ///     stream and would only spend the LOD sweep to discover nothing changed.
+        ///     This is the "small world does not stream" rule: streaming engages only
+        ///     when the world is bigger than the window, exactly the auto-activation the
+        ///     25+1 needs. Compare complete side lengths, including even world grids;
+        ///     truncating the world's radius admitted one extra row and column.
         /// </summary>
+        /// <returns>True for authoring, disabled streaming or a finite world that fits the buffered runtime window.</returns>
         public bool ShouldRenderWholeWorld()
         {
-            return !Application.isPlaying;
+            if (!Application.isPlaying) return true;
+            if (!streamingEnabled) return true;
+
+            return FitsStreamWindow();
         }
+
+        // UC Scene/Play repair: shared runtime decision, independently checkable without entering the host game's Play loop.
+        private bool FitsStreamWindow() => chunkCountPerSide <= 2 * GetStreamRadius() + 1;
 
         /// <summary>
         /// Grid side length past which per-cell resolution gives way to keep the whole
@@ -755,6 +1305,22 @@ namespace UniverseCreator.TerrainSystem
         /// doubling the side quadruples the bill.
         /// </summary>
         public const int WholeWorldClampGridSide = 16;
+
+        /// <summary>
+        /// Ceiling on the derived chunk count per side. The 56 km stress world at the
+        /// smallest sensible tile (about 900 m) lands near this; past it the tile size
+        /// is raised for the developer rather than instantiating thousands of Terrains.
+        /// The resolution clamp above keeps the heightmap memory affordable well before
+        /// this; this bound is about GameObject/TerrainData count, not samples.
+        /// </summary>
+        public const int MaxChunkCountPerSide = 63;
+
+        /// <summary>
+        /// Ceiling on the resident streaming window per side - 'the 25' can be widened
+        /// (a fast-vehicle world may want 7x7) but not without bound: the resident set is
+        /// window^2 heightmaps held on the device at once, and a phone cannot hold many.
+        /// </summary>
+        public const int MaxResidentWindowPerSide = 9;
 
         /// <summary>
         /// Highest 2^n+1 resolution whose full grid fits inside the platform budget.
@@ -811,26 +1377,61 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public void ValidateSettings()
         {
+            // CTL-2: fold the preset in BEFORE clamping, so a preset's values are validated by
+            // exactly the same rules a typed value is. A preset therefore cannot smuggle in a
+            // world size or resolution the maths could not survive.
+            ApplyWorldPreset();
+
             // 1 km to 56 km. The ceiling is the stress target the resource guard below
             // is sized against, not an arbitrary cap.
             worldSizeKm = Mathf.Clamp(worldSizeKm, 1f, 56f);
             maxHeightMeters = Mathf.Clamp(maxHeightMeters, 1f, 10000f);
             resolution = SnapToPowerOfTwoPlusOne(resolution, 33, 4097);
 
-            // Odd counts only: an even grid has no single centre chunk to keep the
-            // player in, which the 25+1 recentring logic depends on.
-            chunkCountPerSide = Mathf.Clamp(chunkCountPerSide, 1, 15);
-            if (chunkCountPerSide % 2 == 0) chunkCountPerSide++;
+            // CHUNK COUNT IS DERIVED, NOT AUTHORED. The tile size is what the developer
+            // sets; the count is however many tiles it takes to cover the world. This is
+            // the inversion the old design had backwards - it pinned the count and let
+            // the tile size float, so asking for 1000 m tiles on a 4 km world gave 800 m
+            // (round(4000/1000)=4, forced odd to 5, 4000/5=800). No odd-forcing here:
+            // the odd-centre requirement belongs to the resident WINDOW below, not the
+            // world subdivision, and forcing it is exactly what mangled the tile size.
+            chunkSizeMeters = Mathf.Clamp(chunkSizeMeters, 50f, worldSizeKm * 1000f);
+            int derived = Mathf.RoundToInt((worldSizeKm * 1000f) / chunkSizeMeters);
+            chunkCountPerSide = Mathf.Clamp(derived, 1, MaxChunkCountPerSide);
 
-            highLODRingSize = Mathf.Clamp(highLODRingSize, 1, chunkCountPerSide);
+            // Resident window - 'the 25'. Odd only: an even window has no single centre
+            // tile to keep the player in, which the recentring depends on. Never larger
+            // than the world, and never larger than the runtime cap that keeps the
+            // resident set affordable on a phone.
+            int windowLimit = Mathf.Min(chunkCountPerSide, MaxResidentWindowPerSide);
+            residentWindowPerSide = Mathf.Clamp(residentWindowPerSide, 1, windowLimit);
+            if (residentWindowPerSide % 2 == 0)
+                residentWindowPerSide += residentWindowPerSide < windowLimit ? 1 : -1; // UC Scene/Play repair: keep a single centre even when capped by an even world.
+
+            // High-LOD ring is measured against the resident window, not the world: it is
+            // the sharp centre of what is streamed, so it can never exceed the window.
+            highLODRingSize = Mathf.Clamp(highLODRingSize, 1, residentWindowPerSide);
             if (highLODRingSize % 2 == 0) highLODRingSize++;
-            highLODRingSize = Mathf.Min(highLODRingSize, chunkCountPerSide);
+            highLODRingSize = Mathf.Min(highLODRingSize, residentWindowPerSide);
 
             bufferRingWidth = Mathf.Clamp(bufferRingWidth, 0, 3);
+            visibilityRadiusCells = Mathf.Clamp(visibilityRadiusCells, -1, MaxResidentWindowPerSide + 3);
+            collisionRadiusCells = Mathf.Clamp(collisionRadiusCells, -1, MaxResidentWindowPerSide + 3);
+            dormantTerrainBudgetMiB = Mathf.Clamp(dormantTerrainBudgetMiB, 8, 256); // UC-T09-04: independent cache cap supplements the shared world budget.
+            farTerrainRadiusCells = Mathf.Clamp(farTerrainRadiusCells, 0, 32);
+            farTerrainBudgetMiB = Mathf.Clamp(farTerrainBudgetMiB, 8, 128);
             recenterThreshold = Mathf.Clamp01(recenterThreshold);
 
-            pixelError = Mathf.Clamp(pixelError, 1f, 200f);
-            basemapDistance = Mathf.Clamp(basemapDistance, 0f, 20000f);
+            acuityPixels = Mathf.Clamp(acuityPixels, 0.25f, 8f);
+            pixelErrorFloor = Mathf.Clamp(pixelErrorFloor, 0.25f, 20f);
+            densityHysteresis = Mathf.Clamp(densityHysteresis, 0f, 4f);
+            maxWorldOriginDistance = Mathf.Clamp(maxWorldOriginDistance, 1000f, 1000000f);
+
+            // basemap/detail/tree/billboard distances are not clamped here: they are not
+            // authored. RecomputeDerivedDistances resolves all four from the (now clamped)
+            // acuity budget, so a change to acuityPixels moves the whole LOD envelope.
+            RecomputeDerivedDistances();
+
             drawDistance = Mathf.Clamp(drawDistance, 50f, 20000f);
             lodBias = Mathf.Clamp(lodBias, 0.5f, 2f);
             maxConcurrentChunks = Mathf.Clamp(maxConcurrentChunks, 1, 16);
@@ -842,6 +1443,59 @@ namespace UniverseCreator.TerrainSystem
             // it was not asked to make.
             int budgeted = GetBudgetedResolution();
             if (budgeted < resolution) resolution = budgeted;
+        }
+
+        /// <summary>
+        /// Resolves the four native draw distances from the shared acuity budget. Each
+        /// feature (a metre of splat detail, a grass clump, a tree silhouette, a tree's
+        /// depth relief) drops below <see cref="acuityPixels"/> pixels at its own range,
+        /// computed against the reference view in Geometry/AngularError - so raising the
+        /// one budget pulls all four distances in together. This is the whole point: one
+        /// dial for the level-of-detail envelope, not four numbers that drift apart.
+        /// </summary>
+        public void RecomputeDerivedDistances()
+        {
+            basemapDistance       = Geometry.AngularError.FeatureCullDistanceReference(BasemapDetailMetres, acuityPixels);
+            detailObjectDistance  = Geometry.AngularError.FeatureCullDistanceReference(DetailFeatureMetres, acuityPixels);
+            treeDistance          = Geometry.AngularError.FeatureCullDistanceReference(TreeSilhouetteMetres, acuityPixels);
+            treeBillboardDistance = Geometry.AngularError.FeatureCullDistanceReference(TreeReliefMetres, acuityPixels);
+        }
+
+        /// <summary>
+        /// Sets the acuity budget from the product quality tier (Mobile Low 4, Mobile
+        /// High 2, Desktop 1, flagship 1) and re-derives the four draw distances, so
+        /// choosing a device class moves the whole level-of-detail envelope through the
+        /// one dial rather than through a second, per-class distance ladder. A one-shot
+        /// author or boot action - never per-frame, so it is safe in edit mode.
+        /// </summary>
+        public void ApplyAcuityTier(UniverseCreator.Optimization.AdaptiveQuality.QualityTier tier)
+        {
+            acuityPixels = Geometry.AcuityTier.Resolve(tier);
+            RecomputeDerivedDistances();
+        }
+
+        /// <summary>
+        /// Horizontal distance in metres from the world origin to this root. Height is
+        /// deliberately ignored: lifting a world on the Y axis keeps full float precision,
+        /// because it is the horizontal spread of the heightfield samples that pushes them
+        /// into the coarse part of the float range where the surface jitters, z-fights and
+        /// cracks between cells. This is the one number the origin clamp compares and the
+        /// inspector reports, so both read the same value instead of each rolling its own.
+        /// </summary>
+        public float OriginDistanceMetres()
+        {
+            Vector3 p = transform.position;
+            return new Vector2(p.x, p.z).magnitude;
+        }
+
+        /// <summary>
+        /// True when the root sits farther from the origin than <see cref="maxWorldOriginDistance"/>,
+        /// i.e. far enough that float precision visibly degrades across the terrain. Pure and
+        /// side-effect-free so the self-test and the inspector agree on the threshold.
+        /// </summary>
+        public bool IsFarFromOrigin()
+        {
+            return OriginDistanceMetres() > Mathf.Max(0f, maxWorldOriginDistance);
         }
 
         /// <summary>
@@ -865,9 +1519,21 @@ namespace UniverseCreator.TerrainSystem
             // A domain reload or scene close must not leave a worker running against
             // a graph that is about to be unloaded.
             CancelGeneration();
+            lock (generationPublicationLock)
+            {
+                if (lastTile != null) lastTile.ReleaseProductMemory(); // UC-T02-06: release the world-owned tile before clearing retention.
+                lastTile = null;
+            }
 
             ChunkManager cm = Chunks;
             if (cm != null) cm.CancelAll();
+            ProductMemory.ClearRetained(); // UC-T02-06: still-running consumers retain pins until their finally blocks retire.
+        }
+
+        private void OnDestroy()
+        {
+            // UC-T02-07: a deleted/replaced world cannot remain a channel source for later consumers.
+            RiverChannelRegistry.Withdraw(GenerationScheduler.CurrentRun.WorldId);
         }
     }
 }
