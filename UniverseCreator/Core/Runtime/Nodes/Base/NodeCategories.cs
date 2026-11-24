@@ -90,11 +90,11 @@ namespace UniverseCreator.Nodes
 
     /// <summary>One height in, one height out. Erosion, blur, curves, terracing.</summary>
     /// <remarks>
-    /// Every modifier is pulled through a ghost margin, because most of them read a
-    /// neighbourhood - a blur, an erosion pass, a slope - and at a chunk seam the
-    /// neighbours are simply absent. Sixteen pixels is what the widest stock kernel
-    /// reaches; see TileWindows for why a margin is the right fix here and not for
-    /// drainage.
+    /// UC-T02-08: neighbourhood modifiers declare their required sample margin. The legacy
+    /// default remains sixteen samples; a finite margin is not a guarantee for global/in-place
+    /// erosion. Those algorithms need their own world-solve contract, like drainage.
+    /// UC-T03-02: river-bearing fields also transform an owned copy of their pre-trench
+    /// ground with the same modifier and crop. Modify implementations must not publish side effects.
     /// </remarks>
     [System.Serializable]
     public abstract class ModifierNode : Generator
@@ -102,12 +102,18 @@ namespace UniverseCreator.Nodes
         /// <summary>Ghost pixels pulled either side of the chunk before modifying.</summary>
         protected const int GhostMargin = 16;
 
+        /// <summary>UC-T02-08: samples needed on every side before cropping the modified field.</summary>
+        /// <param name="tile">Unexpanded input tile, including its sample spacing in world metres.</param>
+        /// <returns>Nonnegative sample count; the legacy default is 16. Override for the algorithm's full dependency radius.</returns>
+        protected virtual int RequiredMargin(TileData tile) => GhostMargin;
+
         public override Port[] GetInputs() { return SharedPorts.HeightIn; }
         public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
-            TileData padded = TileWindows.Expand(tile, GhostMargin);
+            int margin = System.Math.Max(0, RequiredMargin(tile));
+            TileData padded = TileWindows.Expand(tile, margin);
 
             // No graph to re-pull through - a node driven directly, as a test does.
             // The tile-local path is still right in the interior; it only loses the
@@ -116,21 +122,35 @@ namespace UniverseCreator.Nodes
             {
                 Matrix bare = GetInputMatrixCopy(tile, 0, stop);
                 if (stop != null && stop.StopRequested) return null;
-                Modify(bare, tile, stop);
+                ModifyWithTrenchReference(bare, tile, stop); // UC-T03-02: keep the same downstream shaping on the reference ground.
                 return bare;
             }
 
-            object pulled = padded.PullInput(this, 0, stop);
+            object pulled = padded.PullInputForMutation(this, 0, stop, out bool mayMutate);
             if (pulled == null || !(pulled is Matrix)) return tile.CreateMatrix();
 
-            // Copy before modifying: the pulled product may be feeding other branches.
-            Matrix paddedSrc = new Matrix((Matrix)pulled);
+            // UC-T01-12: the evaluator's published input is read-only, including aliases behind disabled nodes.
+            // This writer owns one copy; read-only graph pulls and unexecuted branches allocate none.
+            Matrix paddedSrc = mayMutate ? (Matrix)pulled : new Matrix((Matrix)pulled);
             if (stop != null && stop.StopRequested) return null;
 
-            Modify(paddedSrc, padded, stop);
+            ModifyWithTrenchReference(paddedSrc, padded, stop);
             if (stop != null && stop.StopRequested) return null;
 
-            return TileWindows.Crop(paddedSrc, tile, GhostMargin);
+            return TileWindows.Crop(paddedSrc, tile, margin);
+        }
+
+        // UC-T03-02: one additional bounded modifier evaluation only for a river-bearing
+        // field. A filled/flattened trench loses its protection naturally in the difference.
+        private void ModifyWithTrenchReference(Matrix matrix, TileData tile, StopToken stop)
+        {
+            Matrix reference = matrix.trenchReference;
+            Modify(matrix, tile, stop);
+            if (reference == null || (stop != null && stop.StopRequested)) return;
+            Matrix transformed = new Matrix(reference);
+            transformed.trenchReference = null;
+            Modify(transformed, tile, stop);
+            matrix.trenchReference = transformed;
         }
 
         protected abstract void Modify(Matrix m, TileData tile, StopToken stop);
@@ -159,6 +179,8 @@ namespace UniverseCreator.Nodes
     }
 
     /// <summary>Two heights plus optional mask in, one height out. Blend and layer nodes.</summary>
+    /// <remarks>UC-T03-02: when an input carries river relief, the same combine and mask
+    /// also transform the reference ground so terminal guards preserve only surviving cuts.</remarks>
     [System.Serializable]
     public abstract class CombinerNode : Generator
     {
@@ -179,7 +201,17 @@ namespace UniverseCreator.Nodes
             if (a == null) return new Matrix(b);
             if (b == null) return new Matrix(a);
 
-            return Combine(a, b, mask, tile, stop);
+            Matrix result = Combine(a, b, mask, tile, stop);
+            // UC-T03-02: blend both ground references with the authored mask, so replacing
+            // a river branch cannot protect a trench that the composed height no longer has.
+            if (result != null && (a.trenchReference != null || b.trenchReference != null) &&
+                (stop == null || !stop.StopRequested))
+            {
+                Matrix reference = Combine(a.trenchReference ?? a, b.trenchReference ?? b, mask, tile, stop);
+                if (reference != null) reference.trenchReference = null;
+                result.trenchReference = reference;
+            }
+            return result;
         }
 
         protected abstract Matrix Combine(Matrix a, Matrix b, Matrix mask, TileData tile, StopToken stop);

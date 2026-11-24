@@ -358,6 +358,99 @@ Shader "Hidden/UniverseCreator/WaterRipple"
             }
             ENDHLSL
         }
+
+        // -------------------------------------------------------------------
+        //  Pass 5 - Decal (low-tier fallback)
+        //
+        //  The whole wave solve above - propagate, foam field, ping-pong, obstacle
+        //  reflection - is what a mid or high device runs. The lowest tier cannot
+        //  afford five half-float targets and a per-frame solve, so instead of
+        //  DROPPING interactive water it degrades to this: each disturbance is drawn
+        //  once, directly, as an expanding ring stamped straight into the resolved
+        //  packing the surface shader already samples (RG slope, B height, A foam).
+        //  No propagation, no second buffer, no reflection - the ring simply grows
+        //  and fades from parameters the CPU advances. It is the classic normal-map
+        //  ripple decal, generated procedurally so there is no texture to author or
+        //  load, and it costs one clear and one additive mesh draw per frame.
+        //
+        //  Blend One One so overlapping rings interfere rather than overwrite, the
+        //  same reason the impulse pass is additive. Drawn from a mesh whose COLOR
+        //  carries the per-ring state the CPU has already advanced this frame:
+        //    r amplitude (fades with age)  g crest radius 0..1 across the quad
+        //    b foam                        a crest width 0..1
+        // -------------------------------------------------------------------
+        Pass
+        {
+            Name "Decal"
+            Blend One One
+            BlendOp Add
+
+            HLSLPROGRAM
+            #pragma vertex DecalVert
+            #pragma fragment DecalFrag
+
+            // x slope/normal scale, y height scale, z/w unused
+            float4 _DecalParams;
+
+            struct DecalAttributes
+            {
+                float4 positionOS : POSITION;   // already clip space, xy in -1..1
+                float2 disc       : TEXCOORD0;  // -1..1 across the ring quad
+                float4 color      : COLOR;
+            };
+
+            struct DecalVaryings
+            {
+                float4 positionCS : SV_POSITION;
+                float2 disc       : TEXCOORD0;
+                float4 color      : COLOR;
+            };
+
+            DecalVaryings DecalVert(DecalAttributes input)
+            {
+                DecalVaryings o;
+                o.positionCS = float4(input.positionOS.xy, 0.0, 1.0);
+                o.disc = input.disc;
+                o.color = input.color;
+                return o;
+            }
+
+            half4 DecalFrag(DecalVaryings input) : SV_Target
+            {
+                float d = length(input.disc);
+                if (d > 1.0) discard;
+
+                float amp   = input.color.r;
+                float front = input.color.g;
+                float width = max(0.03, input.color.a);
+
+                // A single wave packet: one cosine crest under a gaussian envelope,
+                // centred on the expanding front. Same shape as a real ring, just
+                // placed by the CPU instead of solved.
+                float x    = d - front;
+                float env  = exp(-(x * x) / (width * width));
+                float ph   = x * (3.14159265 / width);
+                float wave = cos(ph) * env;
+
+                float h = wave * amp;
+
+                // Radial slope = d(wave)/d(d) along the outward direction. Analytic
+                // derivative of cos*env so the normal matches the height exactly and
+                // the ring does not shade like a flat disc.
+                float denv  = env * (-2.0 * x / (width * width));
+                float dcos  = -sin(ph) * (3.14159265 / width);
+                float dwave = dcos * env + cos(ph) * denv;
+                float2 dir  = d > 1e-4 ? input.disc / d : float2(0.0, 0.0);
+                float2 slope = dir * dwave * amp;
+
+                // Foam rides the crest and only where the ring is actually moving
+                // (near the front), so it does not paint the whole disc white.
+                float foam = env * input.color.b;
+
+                return half4(slope * _DecalParams.x, h * _DecalParams.y, foam);
+            }
+            ENDHLSL
+        }
     }
 
     Fallback Off

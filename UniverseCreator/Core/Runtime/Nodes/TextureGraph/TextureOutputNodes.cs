@@ -241,7 +241,7 @@ namespace UniverseCreator.Nodes.Texturing
                 for (int i = 0; i < 4; i++)
                 {
                     if (splat.layers[i] == null) continue;
-                    if (i < cap) trimmed.layers[i] = splat.layers[i];
+                    if (i < cap) { trimmed.layers[i] = splat.layers[i]; trimmed.coverage[i] = splat.coverage[i]; } // UC-T07-11: authored memberships reach the final control upload with their material slots.
                     else dropped++;
                 }
 
@@ -371,6 +371,12 @@ namespace UniverseCreator.Nodes.Texturing
 
         [Tooltip("Which shader the material targets. TerrainLit is the one this graph was built for.")]
         public ShaderTarget target = ShaderTarget.UniverseCreatorTerrainLit;
+        /// <summary>UC-T07-07: supported surface-fragment stage; vertex/compute requests are diagnosed at the terminal.</summary>
+        [Tooltip("Surface Fragment is supported; vertex/compute shader programs are unavailable in this material output.")]
+        public ShaderExpressionStage stage = ShaderExpressionStage.SurfaceFragment;
+        public override string SettingsDiagnostic => stage != ShaderExpressionStage.SurfaceFragment ?
+            "Shader Output supports Surface Fragment material parameters; select that stage. Vertex/compute programs are unavailable." :
+            (target != ShaderTarget.UniverseCreatorTerrainLit && target != ShaderTarget.ExistingMaterial ? "Select a supported Shader Output target." : null);
 
         [Tooltip("Name for the generated material asset.")]
         public string materialName = "UC_TerrainMaterial";
@@ -383,6 +389,11 @@ namespace UniverseCreator.Nodes.Texturing
 
         protected override void WriteSurface(SurfaceProduct surface, TileData tile, StopToken stop)
         {
+            surface = surface.Copy(); // UC-T07-02: terminal shader selection belongs to this output, never its shared upstream material.
+            surface.ValidateTextureChannels(); // UC-T07-02: validate declared channels before publishing a supported shader output.
+            surface.PublishLayerParameters(); // UC-T07-06: emission/occlusion/opacity reach the actual material consumer in control-channel order.
+            ShaderOutputDescriptor.ValidateFeatureKeywords(surface); // UC-T07-07: bound feature variants before accepted output publication.
+            surface.ShaderOutput = new ShaderOutputDescriptor(target, stage); // UC-T07-07: reject unsupported stage combinations before publication.
             tile.outputs.surface = surface;
             tile.outputs.surfaceShaderTarget = (int)target;
             tile.outputs.surfaceMaterialName = string.IsNullOrEmpty(materialName)

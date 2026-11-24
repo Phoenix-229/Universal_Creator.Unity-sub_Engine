@@ -1,5 +1,6 @@
 // -----------------------------------------------------------------------------
 //  Universe Creator - Module 2
+//                     Module 3: species selection active
 //  File:    ShrubScatterNode.cs
 //  Purpose: Places bushes, shrubs and ferns. Its own node, and not a setting on
 //           Tree Scatter or Grass Detail Scatter, because a shrub is its own
@@ -67,6 +68,14 @@ namespace UniverseCreator.Nodes.Scatter
         protected override void PlaceInstances(Matrix height, Matrix mask, TileData tile,
                                                List<ScatterInstance> instances, StopToken stop)
         {
+            // Species first, for two reasons. It drops the positions where no shrub can
+            // live, so the clumping and lean work below is only spent on instances that
+            // will actually stand there. And it is the authority on prototypeIndex when
+            // it succeeds, which is why the assignment in the loop became conditional
+            // rather than staying unconditional and overwriting the choice a line later.
+            bool speciesChosen =
+                SpeciesAssignment.TryAssign(tile, height, Channel, seed, instances, stop);
+
             float clumpScale = 1f / Mathf.Max(0.01f, clumpSizeMetres);
 
             // Offset streams so the clump field and the lean angle do not correlate
@@ -79,7 +88,10 @@ namespace UniverseCreator.Nodes.Scatter
                 if (stop != null && (i & 255) == 0 && stop.StopRequested) return;
 
                 ScatterInstance inst = instances[i];
-                inst.prototypeIndex = prototypeIndex;
+
+                // The node's own index is the pre-ecology answer, and still the answer
+                // for a library nobody has described species in.
+                if (!speciesChosen) inst.prototypeIndex = prototypeIndex;
 
                 // Quantised to centimetres before hashing, matching the base solver:
                 // a world position differing in its last float bit between two runs

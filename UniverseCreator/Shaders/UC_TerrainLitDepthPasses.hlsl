@@ -92,6 +92,7 @@ DepthVaryings UCShadowVert(DepthAttributes input)
 half4 UCShadowFrag(DepthVaryings input) : SV_Target
 {
     UNITY_SETUP_INSTANCE_ID(input);
+    UCClipSurface(input.uvControl); // UC-T07-06: opacity clipping matches the forward surface.
 #ifdef _ALPHATEST_ON
     ClipHoles(input.uvControl);
 #endif
@@ -120,6 +121,7 @@ DepthVaryings UCDepthOnlyVert(DepthAttributes input)
 half4 UCDepthOnlyFrag(DepthVaryings input) : SV_Target
 {
     UNITY_SETUP_INSTANCE_ID(input);
+    UCClipSurface(input.uvControl); // UC-T07-06: clipped terrain writes no depth.
 #ifdef _ALPHATEST_ON
     ClipHoles(input.uvControl);
 #endif
@@ -149,6 +151,7 @@ DepthNormalsVaryings UCDepthNormalsVert(DepthAttributes input)
 half4 UCDepthNormalsFrag(DepthNormalsVaryings input) : SV_Target
 {
     UNITY_SETUP_INSTANCE_ID(input);
+    UCClipSurface(input.uvControl); // UC-T07-06: SSAO sees the same clipped surface.
 #ifdef _ALPHATEST_ON
     ClipHoles(input.uvControl);
 #endif

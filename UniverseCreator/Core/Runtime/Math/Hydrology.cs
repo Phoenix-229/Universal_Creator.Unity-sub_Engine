@@ -325,7 +325,15 @@ namespace UniverseCreator
                     cursor = nz * resX + nx;
                 }
 
-                if (channel.Count > 2) channels.Add(channel);
+                // Two cells is one real reach and gets kept. Discarding it used to
+                // leave a GAP: the cells are already marked visited above, so no later
+                // source can retrace them, and a short connector between a side channel
+                // and the trunk it joins simply vanished from the network. Every such
+                // connector is a cell or two of missing trench in the middle of an
+                // otherwise continuous course - the reported "not continuous but zigzag
+                // hole". Only a single cell is dropped now, because one point has no
+                // reach to draw.
+                if (channel.Count > 1) channels.Add(channel);
             }
 
             return channels;
@@ -359,6 +367,36 @@ namespace UniverseCreator
             if (index < 0 || index > 7) { dx = 0; dz = 0; return; }
             dx = NX[index];
             dz = NZ[index];
+        }
+
+        /// <summary>
+        /// Flat cell index a D8 direction CODE points at, or -1 when the cell has no
+        /// downhill neighbour (code -1) or the step leaves the grid.
+        ///
+        /// A `dir` array does NOT hold cell indices. <see cref="FlowDirection"/> stores the
+        /// neighbour index 0..7 in the NX/NZ order above, and every Hydrology pass reads it
+        /// that way. A consumer that uses the value as a cell index does not fail loudly -
+        /// codes 0..7 are valid indices, so it silently reads a cell on the FIRST ROW
+        /// instead: the height difference is negative or zero, the slope comes out 0, and
+        /// any slope-driven feature quietly does nothing. That is exactly how the river
+        /// network came back empty on every world while its hand-built test worlds, which
+        /// also wrote flat indices, passed.
+        /// </summary>
+        public static int DownstreamCell(int[] dir, int index, int resX, int resZ)
+        {
+            if (dir == null || index < 0 || index >= dir.Length) return -1;
+            if (resX < 1 || resZ < 1) return -1;
+
+            int d = dir[index];
+            if (d < 0 || d > 7) return -1;
+
+            int x = index % resX;
+            int z = index / resX;
+            int nx = x + NX[d];
+            int nz = z + NZ[d];
+            if (nx < 0 || nz < 0 || nx >= resX || nz >= resZ) return -1;
+
+            return nz * resX + nx;
         }
 
         /// <summary>

@@ -58,12 +58,36 @@ namespace UniverseCreator.Nodes
         public TextureFilterKind filter = TextureFilterKind.Bilinear;
         public TextureWrapKind wrap = TextureWrapKind.Repeat;
         public float mipBias;
+        internal bool isGenerated; // UC-T02-06: only evaluation-created textures may be persisted/released by the graph's resource owner.
+        internal TileData.TextureResourceOwner resourceOwner; // UC-T07-02: copies share native lifetime, never duplicate byte reservations.
+
+        /// <summary>UC-T07-02: optional captured image semantics; null identifies a legacy/imported reference with unspecified pixel encoding.</summary>
+        public TextureImageDescriptor? ImageDescription { get; internal set; }
 
         public TextureRef() { }
 
         public TextureRef(Texture2D texture)
         {
             this.texture = texture;
+        }
+
+        /// <summary>UC-T01-12: copies sampling intent while borrowing the same native texture.</summary>
+        /// <returns>Independent descriptor, including an absent texture; no native allocation or ownership transfer occurs.</returns>
+        /// <remarks>Descriptor edits are local. Native texture mutation/destruction remains with its asset or bake owner.</remarks>
+        public TextureRef Copy()
+        {
+            return new TextureRef(texture) { filter = filter, wrap = wrap, mipBias = mipBias, isGenerated = isGenerated,
+                ImageDescription = ImageDescription, resourceOwner = resourceOwner }; // UC-T07-02: consumers copy immutable semantics while borrowing the same native owner.
+        }
+
+        /// <summary>Retains a generated native texture beyond its evaluation tile's lifetime.</summary>
+        /// <returns>Main-thread disposable consumer pin, or null for an imported texture whose asset owner controls its lifetime.</returns>
+        /// <exception cref="System.InvalidOperationException">Called off the main thread or after a generated texture retired.</exception>
+        /// <remarks>Acquire before releasing the tile; dispose after the final renderer/preview use. Copy alone does not acquire a pin.</remarks>
+        public System.IDisposable AcquireConsumer()
+        {
+            GraphExecutionGuard.RequireMainThread("Texture consumer acquisition");
+            return resourceOwner?.Acquire();
         }
 
         /// <summary>
@@ -74,7 +98,15 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public void Apply()
         {
+            GraphExecutionGuard.RequireMainThread("Texture sampling intent"); // UC-T07-02: native metadata checks and mutation have one supported thread owner.
             if (texture == null) return;
+            if (ImageDescription.HasValue)
+            {
+                TextureImageDescriptor declared = ImageDescription.Value; declared.Validate();
+                if (texture.width != declared.Width || texture.height != declared.Height ||
+                    (declared.Mips == TextureImageMipPolicy.Generate && texture.mipmapCount <= 1 && declared.PixelCount > 1))
+                    throw new System.ArgumentException("UC-T07-02: native texture no longer matches its captured image contract.");
+            }
 
             FilterMode fm = filter == TextureFilterKind.Point ? FilterMode.Point
                           : filter == TextureFilterKind.Trilinear ? FilterMode.Trilinear

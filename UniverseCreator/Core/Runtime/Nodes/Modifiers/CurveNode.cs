@@ -11,7 +11,7 @@ using UnityEngine;
 namespace UniverseCreator.Nodes.Modifiers
 {
     [System.Serializable]
-    public class CurveNode : ModifierNode
+    public class CurveNode : ModifierNode, IPreparedGraphInputHash
     {
         public override string NodeName { get { return "Curve"; } }
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
@@ -20,6 +20,10 @@ namespace UniverseCreator.Nodes.Modifiers
         public AnimationCurve curve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
 
         private float[] _samples;
+
+        /// <summary>UC-T01-07: fingerprints the actual prepared remap samples, including curve removal.</summary>
+        /// <returns>Deterministic fingerprint; call after main-thread preparation.</returns>
+        public ulong GetPreparedInputHash() { return PreparedRasterInputs.Hash(256, 1, _samples); }
 
         public override void PrepareMainThread()
         {

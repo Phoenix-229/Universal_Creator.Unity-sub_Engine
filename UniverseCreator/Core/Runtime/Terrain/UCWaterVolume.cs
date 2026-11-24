@@ -43,6 +43,7 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Nodes; // UC-T04-09: accepted geometry/profile data shared with rendering.
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -57,6 +58,12 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>World Y of the surface directly above the point, waves included.</summary>
         public float surfaceY;
+
+        /// <summary>UC-T04-09: local still-water column depth in metres, independent of the sample point's submergence.</summary>
+        public float waterDepth;
+
+        /// <summary>UC-T04-09: local accepted bed elevation in world metres.</summary>
+        public float bedY;
 
         /// <summary>Surface normal, for aligning things that float flat.</summary>
         public Vector3 normal;
@@ -76,7 +83,7 @@ namespace UniverseCreator.TerrainSystem
     [AddComponentMenu("Universe Creator/Water Volume")]
     public class UCWaterVolume : MonoBehaviour
     {
-        public enum BodyKind { Ocean = 0, Lake = 1, River = 2, Pool = 3 }
+        public enum BodyKind { Ocean = 0, Lake = 1, River = 2, Pool = 3, Swamp = 4 }
 
         [Header("Body")]
         public BodyKind kind = BodyKind.Lake;
@@ -102,6 +109,43 @@ namespace UniverseCreator.TerrainSystem
                  "y is the water surface elevation there. Empty for still water, which " +
                  "uses Surface Level for the whole body.")]
         public Vector3[] surfaceProfile;
+
+        private WaterQuerySurface acceptedSurface; // UC-T04-09: runtime-only copied mesh/profile index; no static geometry cache.
+        internal WaterQuerySurface AcceptedQuerySurface => acceptedSurface; // UC-T05-06: only immutable accepted queries cross graph domains.
+
+        /// <summary>UC-T04-09: nearest owning UC world captured with this volume, or null for standalone scene water.</summary>
+        public UniverseCreatorObject WorldOwner { get; internal set; }
+
+        /// <summary>UC-T04-09: installs an immutable lookup of the accepted mesh's actual footprint, local depth, flow and displaced triangles.</summary>
+        /// <param name="data">Accepted vertex/index/UV-depth/flow streams; null restores the legacy standalone bounds/reach fallback.</param>
+        /// <param name="localToWorld">Finite transform from the mesh to world metres.</param>
+        /// <param name="vertexFlow">True for encoded river/lake flow, false for the material's uniform current.</param>
+        /// <param name="uniformFlow">Uniform world XZ current in metres per second when vertexFlow is false.</param>
+        /// <exception cref="System.ArgumentException">Invalid streams or exceeded memory/query budgets; the previous lookup remains intact.</exception>
+        /// <remarks>Main-thread setup only. Samples allocate nothing. GPU wind/interactive height is bounded to 5 cm beyond the CPU ambient mesh.</remarks>
+        public void SetAcceptedSurface(WaterBodyData data, Matrix4x4 localToWorld, bool vertexFlow = true, Vector2 uniformFlow = default)
+        {
+            UniverseCreator.Nodes.GraphExecutionGuard.RequireMainThread("Water query surface capture");
+            ReplaceAcceptedSurface(data == null ? null : new WaterQuerySurface(data, localToWorld, vertexFlow, uniformFlow)); // UC-T06-11: validation finishes before publishing the changed water bounds.
+        }
+
+        internal void UseAcceptedSurface(WaterQuerySurface query) => ReplaceAcceptedSurface(query); // UC-T06-11
+
+        private void ReplaceAcceptedSurface(WaterQuerySurface query)
+        {
+            if (ReferenceEquals(acceptedSurface, query)) return;
+            var previous = acceptedSurface; acceptedSurface = query; registryRevision++;
+            if (previous == null && query == null) return;
+            Bounds changed = previous != null ? previous.WorldBounds : query.WorldBounds;
+            if (query != null) changed.Encapsulate(query.WorldBounds);
+            NotifyVegetation(changed);
+        }
+
+        private void NotifyVegetation(Bounds changed)
+        {
+            if (WorldOwner != null && isActiveAndEnabled)
+                WorldOwner.GetComponent<UCWorldGraphBindings>()?.OnAcceptedWaterChanged(changed); // UC-T06-11: commit event only; no camera/wave/time polling or second regeneration owner.
+        }
 
         [Header("Surface")]
         public WaterSurfaceParams surface = WaterSurfaceParams.Default(0f);
@@ -209,11 +253,26 @@ namespace UniverseCreator.TerrainSystem
         // ---------------------------------------------------------------------
 
         private static readonly List<UCWaterVolume> volumes = new List<UCWaterVolume>();
+        // UC-T04-11: streamed replacement can keep the same count; quality consumers need a lifecycle witness.
+        private static ulong registryRevision;
 
         public static IReadOnlyList<UCWaterVolume> All { get { return volumes; } }
 
-        private void OnEnable() { if (!volumes.Contains(this)) volumes.Add(this); }
-        private void OnDisable() { volumes.Remove(this); }
+        /// <summary>UC-T04-11/UC-T06-11: main-thread registry witness advancing on volume addition/removal and accepted geometry replacement.</summary>
+        public static ulong RegistryRevision => registryRevision;
+
+        private void OnEnable()
+        {
+            WorldOwner = GetComponentInParent<UniverseCreatorObject>(true);
+            if (!volumes.Contains(this)) { volumes.Add(this); registryRevision++; }
+            if (acceptedSurface != null) NotifyVegetation(acceptedSurface.WorldBounds); // UC-T06-11: re-enabled accepted water affects its prior resident regions.
+        }
+        private void OnDisable()
+        {
+            if (volumes.Remove(this)) registryRevision++;
+            if (acceptedSurface != null && WorldOwner != null)
+                WorldOwner.GetComponent<UCWorldGraphBindings>()?.OnAcceptedWaterChanged(acceptedSurface.WorldBounds); // UC-T06-11: registry removal precedes capture of the now-dry region.
+        }
 
         // ---------------------------------------------------------------------
         //  Query
@@ -229,6 +288,14 @@ namespace UniverseCreator.TerrainSystem
         /// drops through the surface for one frame.
         /// </summary>
         public static WaterSample Sample(Vector3 worldPosition, float time)
+            => Sample(worldPosition, time, null); // UC-T04-09: preserve the standalone API; scoped actors use the overload below.
+
+        /// <summary>UC-T04-09: samples accepted volumes belonging to one world, preserving the highest-surface selection within that scope.</summary>
+        /// <param name="worldPosition">Finite world position in metres.</param>
+        /// <param name="time">Finite simulation time in seconds.</param>
+        /// <param name="worldOwner">Required owning world, or null for the legacy scene-wide lookup.</param>
+        /// <returns>Local contact sample, or a dry sample when no owned wet footprint covers the position.</returns>
+        public static WaterSample Sample(Vector3 worldPosition, float time, UniverseCreatorObject worldOwner)
         {
             WaterSample best = new WaterSample();
             best.depth = float.NegativeInfinity;
@@ -239,6 +306,7 @@ namespace UniverseCreator.TerrainSystem
             {
                 UCWaterVolume v = volumes[i];
                 if (v == null || !v.isActiveAndEnabled) continue;
+                if (worldOwner != null && v.WorldOwner != worldOwner) continue; // UC-T04-09: overlapping worlds cannot steal a scoped swimmer/hull contact.
 
                 WaterSample s;
                 if (!v.SampleLocal(worldPosition, time, out s)) continue;
@@ -261,6 +329,8 @@ namespace UniverseCreator.TerrainSystem
         public bool SampleLocal(Vector3 worldPosition, float time, out WaterSample sample)
         {
             sample = new WaterSample();
+            if (!RiverChannelSnapshot.Finite(worldPosition.x) || !RiverChannelSnapshot.Finite(worldPosition.y) ||
+                !RiverChannelSnapshot.Finite(worldPosition.z) || !RiverChannelSnapshot.Finite(time)) return false; // UC-T04-09: query inputs cannot propagate NaNs into physics.
 
             // Cheapest possible rejection first. Everything else in this method
             // costs more than the bounds test, and most queries miss.
@@ -279,11 +349,19 @@ namespace UniverseCreator.TerrainSystem
             WaterSurfaceParams p = surface;
             p.level = surfaceLevel;
             p.flow = flow;
+            float localDepth = Mathf.Max(0.01f, maxDepth), acceptedY = 0;
+            Vector3 acceptedNormal = Vector3.up;
 
             // A river answers from the reach the query is under; still water answers
             // from its one level. Both then go through the same wave and depth
             // arithmetic, so a boat cannot tell which kind of body it is floating on.
-            if (surfaceProfile != null && surfaceProfile.Length >= 2)
+            if (acceptedSurface != null)
+            {
+                if (!acceptedSurface.TrySample(new Vector2(worldPosition.x, worldPosition.z), time, p,
+                    out float localLevel, out acceptedY, out localDepth, out Vector2 localFlow, out acceptedNormal)) return false;
+                p.level = localLevel; p.flow = localFlow;
+            }
+            else if (surfaceProfile != null && surfaceProfile.Length >= 2)
                 ReachAt(worldPosition, ref p);
 
             // The floor. Below the bed is rock, and rock is dry however far inside the
@@ -301,9 +379,9 @@ namespace UniverseCreator.TerrainSystem
             // floor turned the underwater view off and the world came back in air.
             // UCWaterBody reads the uncapped depth for this field. See the note at its
             // Assemble call.
-            if (worldPosition.y < p.level - Mathf.Max(0.01f, maxDepth)) return false;
+            if (worldPosition.y < p.level - localDepth) return false; // UC-T04-09: the local bed, not the body's deepest point, owns dry rock.
 
-            float surfaceY = p.level + UCWaterSurface.WaveOffset(
+            float surfaceY = acceptedSurface != null ? acceptedY : p.level + UCWaterSurface.WaveOffset(
                 new Vector2(worldPosition.x, worldPosition.z), time, p);
 
             float depth = surfaceY - worldPosition.y;
@@ -311,13 +389,14 @@ namespace UniverseCreator.TerrainSystem
             // Clamped at the boundary: a point exactly on the bed reports the body's
             // full depth and no more, so a hull resting there receives the buoyant
             // force of the water above it rather than of an imaginary column below.
-            if (depth > maxDepth) depth = maxDepth;
+            if (depth > localDepth) depth = localDepth;
 
             sample.volume = this;
             sample.submerged = depth > 0f;
             sample.depth = depth;
             sample.surfaceY = surfaceY;
-            sample.normal = UCWaterSurface.SurfaceNormal(worldPosition, time, p);
+            sample.waterDepth = localDepth; sample.bedY = p.level - localDepth;
+            sample.normal = acceptedSurface != null ? acceptedNormal : UCWaterSurface.SurfaceNormal(worldPosition, time, p);
 
             Vector3 wave = UCWaterSurface.SurfaceVelocity(worldPosition, time, p);
 
@@ -326,7 +405,7 @@ namespace UniverseCreator.TerrainSystem
             // under a current to cross it and why debris settles in the deep parts
             // of a river bend instead of being swept on.
             float depthFalloff = sample.submerged
-                ? Mathf.Exp(-Mathf.Max(0f, depth) / Mathf.Max(0.5f, maxDepth * 0.25f))
+                ? Mathf.Exp(-Mathf.Max(0f, depth) / Mathf.Max(0.5f, localDepth * 0.25f))
                 : 1f;
 
             sample.velocity = new Vector3(
@@ -497,6 +576,10 @@ namespace UniverseCreator.TerrainSystem
             // under the world root - so untested, selecting the world painted a blue
             // box for every body in the scene, refreshed on every scene-view repaint.
             if (UnityEditor.Selection.activeGameObject != gameObject) return;
+
+            // Off unless the developer asked for the debug bounds. Selecting a water
+            // body to edit it should not paint a box over the water it belongs to.
+            if (!UCWaterGizmos.ShowDebugBounds) return;
 
             Gizmos.color = new Color(0.2f, 0.6f, 0.9f, 0.35f);
             Gizmos.DrawWireCube(worldBounds.center, worldBounds.size);

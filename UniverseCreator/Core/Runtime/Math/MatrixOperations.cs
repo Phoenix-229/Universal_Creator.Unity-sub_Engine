@@ -95,10 +95,12 @@ namespace UniverseCreator
         /// </summary>
         /// <param name="src">Source field. Not modified.</param>
         /// <param name="sigma">Standard deviation in pixels. Values below ~0.05 are a no-op.</param>
-        /// <returns>A new blurred matrix with the source's world placement.</returns>
-        public static Matrix GaussianBlur(Matrix src, float sigma)
+        /// <param name="stop">UC-T07-04: optional cooperative cancellation, checked before allocation and each pass row.</param>
+        /// <returns>A new blurred matrix with the source's world placement, or null when cancelled.</returns>
+        public static Matrix GaussianBlur(Matrix src, float sigma, Nodes.StopToken stop = null)
         {
             if (src == null) throw new ArgumentNullException("src");
+            if (stop != null && stop.StopRequested) return null;
             if (sigma < 0.05f) return src.Copy();
 
             float[] kernel = BuildGaussianKernel(sigma);
@@ -113,6 +115,7 @@ namespace UniverseCreator
             // Horizontal pass.
             for (int z = 0; z < sizeZ; z++)
             {
+                if (stop != null && stop.StopRequested) return null; // UC-T07-04: obsolete membership/preview work retires between rows.
                 int rowStart = z * sizeX;
                 for (int x = 0; x < sizeX; x++)
                 {
@@ -135,6 +138,7 @@ namespace UniverseCreator
             // Vertical pass.
             for (int z = 0; z < sizeZ; z++)
             {
+                if (stop != null && stop.StopRequested) return null; // UC-T07-04: do not publish a partly filtered plane.
                 for (int x = 0; x < sizeX; x++)
                 {
                     float sum = temp.arr[z * sizeX + x] * kernel[0];

@@ -34,14 +34,16 @@ namespace UniverseCreator.Editor.Utilities
         public enum Template
         {
             Empty = 0,
-            SimpleTerrain = 1
+            SimpleTerrain = 1,
+            Islands = 2,
+            Mountains = 3
         }
 
         /// <summary>Display names, index-aligned with the Template enum.</summary>
-        public static readonly string[] DisplayNames = { "Empty Graph", "Simple Terrain" };
+        public static readonly string[] DisplayNames = { "Empty Graph", "Simple Terrain", "Islands", "Mountains" };
 
         /// <summary>Suggested asset file names, index-aligned with the Template enum.</summary>
-        public static readonly string[] FileNames = { "New Graph", "Simple Terrain" };
+        public static readonly string[] FileNames = { "New Graph", "Simple Terrain", "Islands", "Mountains" };
 
         /// <summary>Builds the requested template as an unsaved in-memory asset.</summary>
         public static Graph Create(Template template)
@@ -49,6 +51,8 @@ namespace UniverseCreator.Editor.Utilities
             switch (template)
             {
                 case Template.SimpleTerrain: return CreateSimpleTerrain();
+                case Template.Islands: return CreateIslands();
+                case Template.Mountains: return CreateMountains();
                 default: return CreateEmpty();
             }
         }
@@ -66,6 +70,7 @@ namespace UniverseCreator.Editor.Utilities
         {
             Graph graph = ScriptableObject.CreateInstance<Graph>();
             graph.name = "New Graph";
+            graph.SetDomain(UCGraphDomain.TerrainWater); // UC-T05-01: creation stamps metadata; opening an old asset never does.
 
             HeightOutputNode output = new HeightOutputNode();
             output.editorPosition = new Vector2(520f, 200f);
@@ -86,6 +91,7 @@ namespace UniverseCreator.Editor.Utilities
         {
             Graph graph = ScriptableObject.CreateInstance<Graph>();
             graph.name = "Simple Terrain";
+            graph.SetDomain(UCGraphDomain.TerrainWater); // UC-T05-01: direct preset callers share the same domain contract.
 
             PerlinNoiseNode perlin = new PerlinNoiseNode();
             perlin.size = 2000f;
@@ -111,6 +117,89 @@ namespace UniverseCreator.Editor.Utilities
             graph.nodes.Add(output);
 
             // Port 0 on every node here: Height out -> Height in.
+            graph.AddConnection(new Connection(perlin.id, 0, erosion.id, 0));
+            graph.AddConnection(new Connection(erosion.id, 0, falloff.id, 0));
+            graph.AddConnection(new Connection(falloff.id, 0, output.id, 0));
+
+            return graph;
+        }
+
+        /// <summary>
+        /// Islands: smaller, higher-frequency noise so the land breaks into separate
+        /// masses, a light erosion pass, and a wide world-edge falloff that drops the
+        /// map border to sea level. Same node chain as Simple Terrain, tuned for an
+        /// archipelago starting point the author then reshapes.
+        /// </summary>
+        public static Graph CreateIslands()
+        {
+            Graph graph = ScriptableObject.CreateInstance<Graph>();
+            graph.name = "Islands";
+            graph.SetDomain(UCGraphDomain.TerrainWater); // UC-T05-01: explicit main-graph identity survives save/reload.
+
+            PerlinNoiseNode perlin = new PerlinNoiseNode();
+            perlin.size = 700f;          // smaller features -> many separate land masses
+            perlin.detail = 0.6f;
+            perlin.intensity = 0.7f;
+            perlin.editorPosition = new Vector2(80f, 200f);
+
+            HydraulicErosionNode erosion = new HydraulicErosionNode();
+            erosion.iterations = 2;
+            erosion.editorPosition = new Vector2(300f, 200f);
+
+            WorldEdgeFalloffNode falloff = new WorldEdgeFalloffNode();
+            falloff.falloffMeters = 800f;   // a broad coastal fade
+            falloff.edgeHeight = 0f;        // sea level at the border
+            falloff.editorPosition = new Vector2(520f, 200f);
+
+            HeightOutputNode output = new HeightOutputNode();
+            output.editorPosition = new Vector2(740f, 200f);
+
+            graph.nodes.Add(perlin);
+            graph.nodes.Add(erosion);
+            graph.nodes.Add(falloff);
+            graph.nodes.Add(output);
+
+            graph.AddConnection(new Connection(perlin.id, 0, erosion.id, 0));
+            graph.AddConnection(new Connection(erosion.id, 0, falloff.id, 0));
+            graph.AddConnection(new Connection(falloff.id, 0, output.id, 0));
+
+            return graph;
+        }
+
+        /// <summary>
+        /// Mountains: large, high-amplitude noise and a heavier erosion pass to cut
+        /// ridges and valleys, with the world-edge falloff still last so the range does
+        /// not meet the map border as a sliced wall. Same node chain as Simple Terrain.
+        /// </summary>
+        public static Graph CreateMountains()
+        {
+            Graph graph = ScriptableObject.CreateInstance<Graph>();
+            graph.name = "Mountains";
+            graph.SetDomain(UCGraphDomain.TerrainWater); // UC-T05-01: explicit main-graph identity survives save/reload.
+
+            PerlinNoiseNode perlin = new PerlinNoiseNode();
+            perlin.size = 3000f;         // large massifs
+            perlin.detail = 0.5f;
+            perlin.intensity = 1.0f;     // tall relief
+            perlin.editorPosition = new Vector2(80f, 200f);
+
+            HydraulicErosionNode erosion = new HydraulicErosionNode();
+            erosion.iterations = 6;      // deeper valleys, sharper ridges
+            erosion.editorPosition = new Vector2(300f, 200f);
+
+            WorldEdgeFalloffNode falloff = new WorldEdgeFalloffNode();
+            falloff.falloffMeters = 500f;
+            falloff.edgeHeight = 0f;
+            falloff.editorPosition = new Vector2(520f, 200f);
+
+            HeightOutputNode output = new HeightOutputNode();
+            output.editorPosition = new Vector2(740f, 200f);
+
+            graph.nodes.Add(perlin);
+            graph.nodes.Add(erosion);
+            graph.nodes.Add(falloff);
+            graph.nodes.Add(output);
+
             graph.AddConnection(new Connection(perlin.id, 0, erosion.id, 0));
             graph.AddConnection(new Connection(erosion.id, 0, falloff.id, 0));
             graph.AddConnection(new Connection(falloff.id, 0, output.id, 0));

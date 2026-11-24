@@ -50,6 +50,14 @@ namespace UniverseCreator.Nodes
         public float normalStrength = 1f;
         public float metallic;
         public float smoothness = 0.35f;
+        /// <summary>UC-T07-06: finite occlusion multiplier, 0…1; one preserves the packed mask's occlusion.</summary>
+        public float occlusion = 1;
+        /// <summary>UC-T07-06: linear HDR emission colour; nonnegative RGB, with no baked-in scene lighting.</summary>
+        public Color emission = Color.black;
+        /// <summary>UC-T07-06: finite material opacity, 0…1; TerrainLit supports cutoff clipping, not transparent terrain.</summary>
+        public float opacity = 1;
+        /// <summary>UC-T07-06: explicitly assigns albedo alpha to opacity; smoothness then uses mask alpha or its scalar default.</summary>
+        public bool albedoAlphaIsOpacity;
 
         /// <summary>
         /// Height offset applied to this layer's mask B channel during height
@@ -66,22 +74,56 @@ namespace UniverseCreator.Nodes
         /// about the limit rather than quietly ignoring three of four requests.
         /// </summary>
         public bool triplanarOnSlopes;
+        /// <summary>UC-T07-11: finite world-axis blend exponent, 1…8, shared by cliff and snow projection.</summary>
+        public float triplanarSharpness = 4;
 
+        /// <summary>UC-T07-02: validates declared colour/normal/PBR mask meanings without guessing legacy import semantics.</summary>
+        /// <exception cref="System.ArgumentException">An explicitly described image is wired into an incompatible material channel.</exception>
+        /// <remarks>Albedo accepts Colour, normals accept TangentNormal, and masks accept TerrainMask.
+        /// Imported legacy references with unspecified metadata remain supported; no texture readback or allocation occurs.</remarks>
+        public void ValidateTextureChannels()
+        {
+            ValidateChannel(albedo, TextureImageSemantic.Colour, "base colour");
+            ValidateChannel(normal, TextureImageSemantic.TangentNormal, "tangent normal");
+            ValidateChannel(mask, TextureImageSemantic.TerrainMask, "terrain PBR mask");
+            TextureImageSampling.RequireFinite(tint); TextureImageSampling.RequireFinite(emission);
+            TextureImageSampling.RequireFinite(normalStrength); TextureImageSampling.RequireFinite(heightOffset);
+            TextureImageSampling.RequireFinite(triplanarSharpness);
+            if (triplanarSharpness < 1 || triplanarSharpness > 8) throw new System.ArgumentException("Triplanar sharpness requires a finite exponent 1…8.");
+            ValidateUnit(metallic); ValidateUnit(smoothness); ValidateUnit(occlusion); ValidateUnit(opacity);
+            if (normalStrength < 0 || normalStrength > 4 || emission.r < 0 || emission.g < 0 || emission.b < 0)
+                throw new System.ArgumentException("UC-T07-06: layer normals require strength 0…4 and emission requires nonnegative linear RGB.");
+        }
+
+        private static void ValidateUnit(float value)
+        { TextureImageSampling.RequireFinite(value); if (value < 0 || value > 1) throw new System.ArgumentException("UC-T07-06: material channels require values 0…1."); }
+
+        internal static void ValidateChannel(TextureRef reference, TextureImageSemantic expected, string channel)
+        {
+            if (reference?.ImageDescription == null) return;
+            TextureImageDescriptor descriptor = reference.ImageDescription.Value; descriptor.Validate();
+            if (descriptor.Semantic != expected)
+                throw new System.ArgumentException("UC-T07-02: " + channel + " requires explicit channel conversion from " + descriptor.Semantic + ".");
+        }
+
+        /// <summary>UC-T01-12: copies editable layer/UV/sampling metadata while borrowing native texture handles.</summary>
+        /// <returns>Independent metadata; absent descriptors remain absent and no Unity resource is created or released.</returns>
         public LayerProduct Copy()
         {
             return new LayerProduct
             {
                 name = name,
-                albedo = albedo,
-                normal = normal,
-                mask = mask,
+                albedo = albedo != null ? albedo.Copy() : null,
+                normal = normal != null ? normal.Copy() : null,
+                mask = mask != null ? mask.Copy() : null,
                 uv = uv != null ? uv.Copy() : new UVTransform(),
                 tint = tint,
                 normalStrength = normalStrength,
                 metallic = metallic,
                 smoothness = smoothness,
+                occlusion = occlusion, emission = emission, opacity = opacity, albedoAlphaIsOpacity = albedoAlphaIsOpacity,
                 heightOffset = heightOffset,
-                triplanarOnSlopes = triplanarOnSlopes
+                triplanarOnSlopes = triplanarOnSlopes, triplanarSharpness = triplanarSharpness
             };
         }
     }
@@ -101,12 +143,24 @@ namespace UniverseCreator.Nodes
     public class SplatProduct
     {
         public readonly LayerProduct[] layers = new LayerProduct[4];
+        /// <summary>UC-T07-11: optional independent continuous membership maps in world XZ metres; null slots mean zero when any coverage is authored.</summary>
+        /// <remarks>Borrowed immutable after publication. Apply resamples weights, never category IDs; all-null retains the world's existing control maps.</remarks>
+        public readonly Matrix[] coverage = new Matrix[4];
 
         /// <summary>Whether height blending is requested for this splat set.</summary>
         public bool heightBlend;
 
         /// <summary>0 is a hard cut between layers, 1 a soft cross-fade.</summary>
         public float heightTransition = 0.2f;
+
+        /// <summary>UC-T01-12: copies four ordered layers and their editable descriptors without duplicating textures.</summary>
+        /// <returns>Independent splat metadata preserving null layer slots and blend settings.</returns>
+        public SplatProduct Copy()
+        {
+            var copy = new SplatProduct { heightBlend = heightBlend, heightTransition = heightTransition };
+            for (int i = 0; i < layers.Length; i++) { copy.layers[i] = layers[i] != null ? layers[i].Copy() : null; copy.coverage[i] = coverage[i]; }
+            return copy;
+        }
 
         /// <summary>Number of leading non-null layers. Trailing gaps are not counted.</summary>
         public int Count
@@ -149,6 +203,13 @@ namespace UniverseCreator.Nodes
     public class GradientProduct
     {
         public readonly List<GradientStop> stops = new List<GradientStop>();
+
+        /// <summary>UC-T01-12: copies ordered value-type stops before a branch edits a ramp.</summary>
+        /// <returns>Independent stop list, including an empty list; no sorting or native resource allocation occurs.</returns>
+        public GradientProduct Copy()
+        {
+            var copy = new GradientProduct(); copy.stops.AddRange(stops); return copy;
+        }
 
         /// <summary>Sorted-by-position copy of the stops. Sorting is done here so
         /// nodes may append in any order and users may drag a stop past another.</summary>
@@ -328,6 +389,53 @@ namespace UniverseCreator.Nodes
                  "so the water does not end in a hard line across the ground.")]
         public float edgeSoftenMetres = 0.6f;
 
+        // Shoreline / bank band.
+        //
+        // Where water meets land the ground is not the grass or rock that sits
+        // inland - it is a band of wet, water-worked material: sand on an ocean
+        // beach, gravel or mud on a lake margin, scoured sand on a river bank. The
+        // terrain's own beach band (the _UC_BEACH_ON shader feature) draws this at
+        // the GLOBAL sea level for the ocean. A lake or a river sits at its own
+        // altitude, so the band it wants is described here PER BODY and applied
+        // around that body rather than at one world height. Reading grass straight
+        // into the waterline - the "grass standing in the water" artefact - is what
+        // these fields exist to prevent.
+
+        [Tooltip("Draw a wet shoreline / bank band where this body meets the land, " +
+                 "instead of letting the inland grass or rock run into the water.")]
+        public bool shorelineEnabled;
+
+        [Tooltip("Colour of the wet shoreline band - beach sand, lake gravel or river " +
+                 "bank. Read at the waterline; it dries toward the inland surface " +
+                 "across the band width.")]
+        public Color shorelineColor = new Color(0.62f, 0.57f, 0.44f, 1f);
+
+        [Tooltip("How far the band reaches inland from the waterline, in metres. A surf " +
+                 "beach is tens of metres; a lake margin or a river bank a few.")]
+        public float shorelineWidthMetres = 4f;
+
+        [Tooltip("How much darker the band is right at the waterline, 0 to 1. Wet sand " +
+                 "is markedly darker than dry; about 0.3 is a convincing tide line.")]
+        public float shorelineWetDarkening = 0.3f;
+
+        [Tooltip("Specular smoothness of the wet band. Water-saturated sand is glossy at " +
+                 "the edge and matte where it dries, so this is the wet-end value.")]
+        public float shorelineSmoothness = 0.45f;
+
+        [Tooltip("Optional sand / gravel / bank texture for the band. Empty gives a " +
+                 "flat-coloured band.")]
+        public TextureRef shorelineTexture;
+
+        [Tooltip("River only: derive the bank from the dug trench walls rather than an " +
+                 "altitude band, so the sand follows the channel it was cut into and " +
+                 "grass never ends up standing in the water.")]
+        public bool bankReadsTrench;
+
+        [Tooltip("Slope in degrees below which the bank band is allowed. Above it the " +
+                 "wall is too steep to hold the worked material and the inland surface " +
+                 "shows through, which is what a real cut bank does.")]
+        public float bankSlopeLimitDegrees = 55f;
+
         /// <summary>
         /// Copy, for the same reason SurfaceProduct has one: the water chain is
         /// usually linear, but nothing stops a user fanning one Water Surface into
@@ -336,9 +444,15 @@ namespace UniverseCreator.Nodes
         /// symptom - foam on a lake that has no foam node - would send them
         /// looking at the wrong node entirely.
         /// </summary>
+        /// <returns>UC-T01-12: independent water/sampling metadata; native textures remain borrowed from their original owner.</returns>
         public WaterProduct Copy()
         {
-            return (WaterProduct)MemberwiseClone();
+            var copy = (WaterProduct)MemberwiseClone();
+            copy.normalMap = normalMap != null ? normalMap.Copy() : null;
+            copy.foamTexture = foamTexture != null ? foamTexture.Copy() : null;
+            copy.causticsTexture = causticsTexture != null ? causticsTexture.Copy() : null;
+            copy.shorelineTexture = shorelineTexture != null ? shorelineTexture.Copy() : null;
+            return copy;
         }
     }
 
@@ -353,8 +467,12 @@ namespace UniverseCreator.Nodes
     /// </summary>
     public class SurfaceProduct
     {
+        /// <summary>UC-T07-02: optional immutable supported shader-output contract; absent before a terminal output selects its target.</summary>
+        public ShaderOutputDescriptor ShaderOutput { get; internal set; }
         public readonly Dictionary<string, float> floats = new Dictionary<string, float>();
         public readonly Dictionary<string, Color> colors = new Dictionary<string, Color>();
+        /// <summary>UC-T07-06: finite four-component shader parameters; distinct from colour encoding and image pixels.</summary>
+        public readonly Dictionary<string, Vector4> vectors = new Dictionary<string, Vector4>();
         public readonly Dictionary<string, TextureRef> textures = new Dictionary<string, TextureRef>();
         public readonly HashSet<string> keywords = new HashSet<string>();
 
@@ -417,6 +535,15 @@ namespace UniverseCreator.Nodes
 
         public void SetFloat(string name, float value) { floats[name] = value; }
         public void SetColor(string name, Color value) { colors[name] = value; }
+        /// <summary>UC-T07-06: stores a finite shader vector without touching textures or rebuilding terrain.</summary>
+        /// <param name="name">Nonempty shader property name.</param>
+        /// <param name="value">Four finite scalar components, in the target property's declared units.</param>
+        /// <exception cref="System.ArgumentException">Name is empty or a component is nonfinite.</exception>
+        public void SetVector(string name, Vector4 value)
+        {
+            if (string.IsNullOrEmpty(name)) throw new System.ArgumentException("Shader vector needs a property name.");
+            TextureImageSampling.RequireFinite(new Color(value.x, value.y, value.z, value.w)); vectors[name] = value;
+        }
         public void SetKeyword(string name) { keywords.Add(name); }
 
         public void SetTexture(string name, TextureRef value)
@@ -456,29 +583,66 @@ namespace UniverseCreator.Nodes
         }
 
         /// <summary>
-        /// Shallow copy. Surface features chain rather than branch in normal use,
-        /// but a graph is a graph and nothing stops a user fanning one surface into
-        /// two feature chains. Copying on read means the two branches diverge
-        /// instead of one silently inheriting the other's snow.
+        /// UC-T01-12: copies editable surface/material descriptors so sibling feature chains remain independent.
         /// </summary>
+        /// <returns>Independent dictionaries, stops, splat/water and sampling metadata. Native textures and large baked matrices stay borrowed.</returns>
+        /// <remarks>Baked matrices are immutable after publication; a writer must copy a map before editing its samples.
+        /// Sharing those arrays prevents every scalar material feature from cloning full-resolution baked maps.</remarks>
         public SurfaceProduct Copy()
         {
-            var c = new SurfaceProduct();
+            var c = new SurfaceProduct { ShaderOutput = ShaderOutput }; // UC-T07-02: terminal metadata is immutable across sibling consumers.
             foreach (var kv in floats) c.floats[kv.Key] = kv.Value;
             foreach (var kv in colors) c.colors[kv.Key] = kv.Value;
-            foreach (var kv in textures) c.textures[kv.Key] = kv.Value;
+            foreach (var kv in vectors) c.vectors[kv.Key] = kv.Value;
+            foreach (var kv in textures) c.textures[kv.Key] = kv.Value != null ? kv.Value.Copy() : null;
             foreach (var kv in bakedMaps) c.bakedMaps[kv.Key] = kv.Value;
-            foreach (var kv in bakedGradients) c.bakedGradients[kv.Key] = kv.Value;
+            foreach (var kv in bakedGradients) c.bakedGradients[kv.Key] = kv.Value != null ? kv.Value.Copy() : null;
             foreach (string k in keywords) c.keywords.Add(k);
             for (int i = 0; i < notices.Count; i++) c.notices.Add(notices[i]);
-            c.splat = splat;
-            c.water = water;
+            c.splat = splat != null ? splat.Copy() : null;
+            c.water = water != null ? water.Copy() : null;
             c.vegetationTint = vegetationTint;
             c.vegetationTintSet = vegetationTintSet;
             c.vegetationDryTint = vegetationDryTint;
             c.maxLayers = maxLayers;
             c.qualityLevel = qualityLevel;
             return c;
+        }
+
+        /// <summary>Validates declared layer and water-normal channel semantics before a material consumer mutates assets.</summary>
+        /// <exception cref="System.ArgumentException">Explicit metadata describes incompatible channel data.</exception>
+        public void ValidateTextureChannels()
+        {
+            if (splat != null) foreach (LayerProduct layer in splat.layers) layer?.ValidateTextureChannels();
+            LayerProduct.ValidateChannel(water?.normalMap, TextureImageSemantic.TangentNormal, "water normal");
+        }
+
+        /// <summary>UC-T07-06: publishes ordered reusable layer appearance parameters to TerrainLit without baking image data.</summary>
+        /// <remarks>Absent slots retain opacity/occlusion one and emission zero. Authored control-map order is preserved.</remarks>
+        public void PublishLayerParameters()
+        {
+            Vector4 opacity = Vector4.one, alpha = Vector4.zero, occlusion = Vector4.one;
+            for (int i = 0; i < 4; i++)
+            {
+                LayerProduct layer = splat?.layers[i]; layer?.ValidateTextureChannels();
+                // UC-T07-11: the first layer projection reaches the existing cliff channel; explicit Cliff Surface authoring retains priority.
+                if (layer != null && layer.triplanarOnSlopes && !floats.ContainsKey(UCShaderProps.EnableSlopeBlend))
+                {
+                    EnableFeature(UCShaderProps.EnableSlopeBlend, UCShaderProps.KeywordSlopeBlend);
+                    if (layer.albedo != null) SetTexture(UCShaderProps.SlopeTex, layer.albedo);
+                    if (layer.normal != null) SetTexture(UCShaderProps.SlopeNormal, layer.normal);
+                    SetColor(UCShaderProps.SlopeColor, layer.tint);
+                    SetFloat(UCShaderProps.SlopeSmoothness, layer.smoothness); SetFloat(UCShaderProps.SlopeMetallic, layer.metallic);
+                    SetFloat(UCShaderProps.SlopeNormalStrength, layer.normalStrength);
+                    SetFloat(UCShaderProps.SlopeTriplanarScale, layer.uv != null ? layer.uv.SafeTileSize.x : 8);
+                    SetFloat(UCShaderProps.TriplanarSharpness, layer.triplanarSharpness);
+                }
+                opacity[i] = layer?.opacity ?? 1; alpha[i] = layer != null && layer.albedoAlphaIsOpacity ? 1 : 0;
+                occlusion[i] = layer?.occlusion ?? 1;
+                SetColor(UCShaderProps.LayerEmissionPrefix + i, layer?.emission ?? Color.black);
+            }
+            SetVector(UCShaderProps.LayerOpacity, opacity); SetVector(UCShaderProps.LayerAlphaOpacity, alpha);
+            SetVector(UCShaderProps.LayerOcclusion, occlusion);
         }
     }
 }

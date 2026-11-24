@@ -40,6 +40,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UniverseCreator.Nodes;
+using UniverseCreator.Nodes.Creators;
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -49,7 +50,7 @@ namespace UniverseCreator.TerrainSystem
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Water Body")]
     [DisallowMultipleComponent]
-    public class UCWaterBody : MonoBehaviour, IUCTerrainCarver
+    public partial class UCWaterBody : MonoBehaviour, IUCTerrainCarver // UC-T04-01: versioned body-mode migration shares the existing owner.
     {
         // =====================================================================
         //  ENUMS
@@ -189,6 +190,102 @@ namespace UniverseCreator.TerrainSystem
                  "the scene view, or use the buttons below to seed a shape.")]
         public Polyline outline = new Polyline();
 
+        [Tooltip("Per-course-node hydraulic payload (half-width, depth, discharge, " +
+                 "velocity) for a River Spline body. Each channel is empty (the solver " +
+                 "derives it) or one value per outline node; 0 inherits the previous " +
+                 "node. River Spline only - a lake, pool or ocean ignores it.")]
+        public RiverProfile riverProfile = new RiverProfile();
+
+        [Header("Natural River (River Spline only)")]
+        [Range(0f, 2f)]
+        [Tooltip("How natural the river looks: 0 = clean geometric channel, 1 = natural (pool-and-riffle bed, " +
+                 "wandering banks, uneven flood-plain), 2 = very rugged.")]
+        public float ruggedness = 1f;
+
+        /// <summary>Authored between-point meander strength, 0..3; build-time clamping rejects nonfinite input and preserves endpoints.</summary>
+        [Range(0f, 3f)]
+        [Tooltip("Gentle sideways wander added between your nodes, so a few clicks give a river that bends " +
+                 "like a real one instead of a stiff curve. 0 = follows the nodes exactly. Ends stay on the nodes.")]
+        public float meander = 1f;
+
+        [Tooltip("Seed for the natural variation. Change it for a different but equally natural river.")]
+        public int naturalSeed = 0;
+
+        [Tooltip("Most ground beside the channel that may be raised to meet the water surface, in metres. " +
+                 "This is what keeps the water from ever hanging over a drop-off.")]
+        public float maxBankRaiseMetres = 2f;
+
+        /// <summary>Legacy serialized read-trench flag, retained for migration and recovery; after migration use TerrainMode.</summary>
+        [HideInInspector] // UC-T04-01: keep the serialized name and original value; new authoring has one body mode.
+        public bool followProceduralTrench = false;
+
+        /// <summary>Legacy valley-snap distance in metres; preserved for saved data, no longer used by placement.</summary>
+        [HideInInspector] // UC-T04-05B: author clicks set positions exactly; never relocate them implicitly.
+        public float valleySnapMetres = 10f;
+
+        // The solved bed is remembered with a signature of the course. A rebuild with an unchanged course
+        // REUSES it instead of re-solving from whatever ground is there now - and the ground there now may
+        // already carry this river's own trench (the graph's River Course Input cut it, or the previous
+        // dig did), which made every re-solve cut one channel-depth deeper than the last: a river that
+        // sank a little further each time the scene reloaded or the terrain regenerated.
+        [SerializeField, HideInInspector] private float[] cachedBedY;
+        [SerializeField, HideInInspector] private int cachedBedSig;
+        [SerializeField, HideInInspector] private float cachedBedSlope;
+        [System.NonSerialized] private bool _forceResolveBed;
+
+        /// <summary>Re-solves the bed from the terrain as it is NOW and rebuilds. Use after the terrain has
+        /// been regenerated into a different shape, so the river is re-fitted to the new valley.</summary>
+        public void ResolveBedFromTerrain()
+        {
+            _forceResolveBed = true;
+            cachedBedY = null;
+            Rebuild();
+        }
+
+        private static int BedSignature(List<Vector3> course, float[] depth)
+        {
+            unchecked
+            {
+                int h = 17 + course.Count;
+                for (int i = 0; i < course.Count; i++)
+                {
+                    h = h * 31 + Mathf.RoundToInt(course[i].x * 4f);
+                    h = h * 31 + Mathf.RoundToInt(course[i].z * 4f);
+                    if (depth != null && i < depth.Length) h = h * 31 + Mathf.RoundToInt(depth[i] * 100f);
+                }
+                return h;
+            }
+        }
+
+        /// <summary>True when the authoritative body mode reads committed procedural trench data; legacy settings migrate once on first use.</summary>
+        public bool FollowTrench { get { return TerrainMode == RiverTerrainMode.ReadProceduralTrench; } } // UC-T04-01: child flags no longer change a migrated body's mode.
+        /// <summary>UC-T03-09: latest accepted-channel lookup result for procedural read mode; absence prevents excavation.</summary>
+        public RiverChannelValidity LastChannelValidity { get; private set; } = RiverChannelValidity.NoChannel;
+
+        [Tooltip("LAKES / PONDS: rivers that START at this water body (its outlets). A river whose first " +
+                 "node lies in this body registers itself here automatically. The lake is then the SOURCE " +
+                 "of that river - it gives the river water rather than receiving it - and the river's " +
+                 "first reach is held at the lake's water level so the two surfaces are one sheet.")]
+        public List<UCWaterBody> riverOutlets = new List<UCWaterBody>();
+
+        /// <summary>The lake/pond this river rises from (null if it starts on land). Set at build time.</summary>
+        [System.NonSerialized] public UCWaterBody sourceBody;
+
+        /// <summary>The lake/ocean this river empties into (null if it ends on land or joins a river).</summary>
+        [System.NonSerialized] public UCWaterBody mouthBody;
+
+        /// <summary>Per control node: 1 = flood plain here, ~0 = none. Built from the nodes' Flood Plain ticks.</summary>
+        [System.NonSerialized] public List<float> nodeFloodPlain = new List<float>();
+
+        // UC-T04-06: describe the computational extension and actual geometric acceptance.
+        [Tooltip("Optional receiving river. The generated course extends to its channel without moving authored nodes. " +
+                 "Owned accepted coverage also detects river connections automatically. Pending or incompatible receivers remain diagnostic.")]
+        public UCWaterBody joinsRiver;
+
+        [Tooltip("JOIN: how far along the join the channel is widened and blended, in metres, so the " +
+                 "confluence is a smooth mouth rather than a notch.")]
+        public float confluenceBlendMetres = 25f;
+
         [Tooltip("Raises or lowers the water surface relative to this object, in " +
                  "metres. The object's own Y is the still-water level; this is the " +
                  "fine adjustment you make while looking at the shoreline.")]
@@ -200,174 +297,9 @@ namespace UniverseCreator.TerrainSystem
                  "makes the surface scroll instead of sitting dead still.")]
         public Vector2 currentMetresPerSecond = new Vector2(0.06f, 0.03f);
 
-        // =====================================================================
-        //  RIVER
-        // =====================================================================
 
-        [Header("River (Spline)")]
 
-        [Tooltip("Centre line in local metres, upstream first. The order is the " +
-                 "flow direction when Enforce Downhill is off.")]
-        public Polyline course = new Polyline();
 
-        [Tooltip("Channel width in metres. Per-point weights on the spline scale " +
-                 "this, so a river can widen as it goes.")]
-        public float widthMetres = 12f;
-
-        [Tooltip("Vertices across the channel. 4 is enough for a stream, 8 for a " +
-                 "wide river whose banks need a smooth curve.")]
-        [Range(2, 24)]
-        public int widthSegments = 6;
-
-        [Tooltip("Distance between cross-sections along the course, in metres. " +
-                 "Smaller follows a tight meander better and costs vertices.")]
-        public float pointSpacingMetres = 6f;
-
-        [Tooltip("How deep the channel is under the water surface, at midstream. " +
-                 "Drives the hydraulic radius Manning's equation uses, the depth " +
-                 "colour ramp, and how far down the physics volume reaches.")]
-        public float channelDepthMetres = 1.5f;
-
-        [Tooltip("Bank profile exponent. 2 is a parabolic natural channel, 4 is a " +
-                 "flat bed with steep banks, 1 is a shallow V.")]
-        [Range(1f, 6f)]
-        public float bankProfile = 4f;
-
-        [Tooltip("Forces the water surface never to rise as it goes downstream. " +
-                 "Water cannot run uphill; with this off, a course drawn across a " +
-                 "rise produces a river that climbs it.")]
-        public bool enforceDownhill = true;
-
-        [Tooltip("Smoothing passes over the surface profile. A raw terrain sample " +
-                 "gives the water a stepped surface that reads as a staircase of " +
-                 "tiny waterfalls; a real river surface is smooth even where its bed " +
-                 "is not.")]
-        [Range(0, 12)]
-        public int profileSmoothing = 4;
-
-        // ---- Per-node depth and width ---------------------------------------
-        //
-        //  A river does not have one depth. It starts as a shallow scrape, gathers
-        //  water, and arrives at its mouth deep and wide. These two lists run
-        //  alongside the course points and say what the channel is doing at each
-        //  one; anything left at 0 is not authored and inherits the value carried
-        //  down from the last node that was.
-
-        [Tooltip("Depth at each course node, in metres. One entry per spline point.\n\n" +
-                 "0 means 'not set here' - that node inherits the depth carried down " +
-                 "from the last node above it that was set, and if none was, from " +
-                 "Channel Depth. So you only type numbers where the river actually " +
-                 "changes, and the reach between two set nodes eases from one to the " +
-                 "other rather than stepping.")]
-        public List<float> nodeDepthMetres = new List<float>();
-
-        [Tooltip("Width at each course node, in metres. Same rule as the depths - 0 " +
-                 "inherits from upstream, and the first unset run takes Width.")]
-        public List<float> nodeWidthMetres = new List<float>();
-
-        // ---- Junctions ------------------------------------------------------
-
-        [Tooltip("The body this river runs into: an ocean, a lake, or another river " +
-                 "it joins as a tributary. Pools are refused - a river does not empty " +
-                 "into a swimming pool.\n\n" +
-                 "The mouth is pulled onto the target's edge and held at the target's " +
-                 "surface level, so the two water planes meet with no step and the bed " +
-                 "runs on into the basin instead of stopping at a wall.")]
-        public UCWaterBody joinDownstreamTo;
-
-        [Tooltip("The body this river runs out of - a lake outlet, or the trunk river " +
-                 "this one branches from. Same treatment at the head as the mouth.")]
-        public UCWaterBody joinUpstreamFrom;
-
-        [Tooltip("Distance over which a junction blends, in metres. The channel eases " +
-                 "into the body it meets over this run; too short and the join is a " +
-                 "step, too long and the river loses its own shape before it arrives.")]
-        public float joinBlendMetres = 25f;
-
-        [Tooltip("Deepens the mouth to match what it is joining, so a river arriving " +
-                 "at a lake does not sit in a shallow trench above a deep basin. Off " +
-                 "keeps the channel's own depth all the way to the join.")]
-        public bool joinMatchesDepth = true;
-
-        // =====================================================================
-        //  ROUTING  (optional: let the ground move the drawn line sideways)
-        //
-        //  BOTH OFF BY DEFAULT, AND THAT IS DELIBERATE.
-        //
-        //  These two move the course in XZ - away from where you drew it. The
-        //  elevation work is somewhere else entirely and always runs; what these
-        //  change is the PLAN of the river, not its profile.
-        //
-        //  Left on, the river you see dug is not the river you drew: you place a
-        //  node, the valley fit slides it 30 m downslope and the descent walk takes
-        //  a detour round a spur, and the trench comes out beside your line looking
-        //  like a separate object that happens to start near it. When you are
-        //  clicking nodes onto the terrain, YOUR line is the answer - the ground
-        //  does not get a vote on where it goes, only on how deep it is cut.
-        //
-        //  Turn one on when you want the opposite: a rough line sketched across a
-        //  landscape you have not studied, which you want fitted to whatever is
-        //  actually there. Then the fit happens on a copy at build time, so your
-        //  control points still stay where you put them.
-        // =====================================================================
-
-        [Tooltip("Pulls each point of the course sideways onto the lowest ground near " +
-                 "it, so a line drawn across a valley settles into its floor instead " +
-                 "of lying across the slope.\n\n" +
-                 "OFF by default: it moves the river off the line you drew, and when " +
-                 "you have placed the nodes on the terrain yourself that reads as the " +
-                 "dig ignoring your spline. Turn it on for a rough sketch you want " +
-                 "snapped to the landscape.\n\n" +
-                 "On flat ground there is no lowest point to find, so nothing moves - " +
-                 "which is why a river on a plain stays exactly where you drew it and " +
-                 "one on a hillside snaps into the trench.")]
-        public bool fitToValley;
-
-        [Tooltip("How far to either side the valley seek looks, in metres. About half " +
-                 "a valley width. Too large and the river jumps into the next valley " +
-                 "over; too small and it never finds the floor of the one it is in.")]
-        public float valleySearchMetres = 2000f;
-
-        [Tooltip("How much of the way to the low point each node moves, 0..1. 1 lands " +
-                 "the course exactly on the lowest sample and follows every wobble in " +
-                 "the heightfield; around 0.85 keeps the line the designer drew " +
-                 "recognisable while still sitting in the trench.")]
-        [Range(0f, 1f)] public float valleyPull = 0.85f;
-
-        [Tooltip("Forbids the channel from ever climbing. The course is walked from " +
-                 "the head one step at a time; where the direct line would go uphill " +
-                 "the walk fans out and takes the best descending way round, so the " +
-                 "river goes around a spur into the adjacent valley rather than being " +
-                 "cut through the top of it.\n\n" +
-                 "OFF by default, because the detour it takes is a different path " +
-                 "from the one you drew and the trench ends up somewhere you did not " +
-                 "put it. With it off the river still never runs uphill - Enforce " +
-                 "Downhill above handles that by lowering the water surface along " +
-                 "your line instead of moving the line.\n\n" +
-                 "Turn it on when the line is a rough sketch and you would rather the " +
-                 "river find its own way down than be cut through a ridge.")]
-        public bool routeAroundHighGround;
-
-        [Tooltip("How far off the drawn heading the reroute may swing, in degrees. " +
-                 "Around 70 lets a river turn along the foot of a ridge; near 0 keeps " +
-                 "it on the drawn line and lets it stop instead of detouring.")]
-        [Range(0f, 170f)] public float routeFanDegrees = 70f;
-
-        [Tooltip("Rise treated as level, in metres. A heightfield is not smooth at the " +
-                 "centimetre scale, and a zero tolerance makes the walk zig-zag around " +
-                 "bumps far smaller than the channel it is cutting.")]
-        public float climbToleranceMetres = 0.05f;
-
-        [Tooltip("Length of the fade where a river that found no way down disappears, " +
-                 "in metres. The channel narrows and shallows over this run so it " +
-                 "reads as water sinking underground rather than as a trench that " +
-                 "stops against a wall. Real rivers do this in karst and in desert.")]
-        public float sinkRunMetres = 30f;
-
-        [Tooltip("On Build, if the mouth of the river comes within this many metres of " +
-                 "an ocean or a lake, it joins that body automatically - no need to " +
-                 "set the junction by hand. Pools are ignored. 0 switches it off.")]
-        public float autoConnectMetres = 2000f;
 
         // =====================================================================
         //  PROCEDURAL POLICY  (what happens when the terrain is regenerated)
@@ -469,12 +401,44 @@ namespace UniverseCreator.TerrainSystem
                 if (kind == WaterBodyKind.Ocean) return 0f;
                 if (corridorMetres > 0f) return corridorMetres;
 
-                if (shape == ShapeMode.RiverSpline && valleyWidthMultiple > 0f)
-                    return Mathf.Clamp(widthMetres * valleyWidthMultiple,
-                                       MinValleyCorridorMetres,
-                                       MaxValleyCorridorMetres);
+                // FIX 2026-10-19: the derivation the tooltip above promises had been reduced to
+                // "return 0". With no corridor the dig cut the channel and handed the ground back
+                // raw at the bevel's edge, which is how a river became a slot sawn through a
+                // hillside. A drawn river now derives its valley from its own channel width.
+                // Level bodies are unchanged here (a lake's shore is its bevel; see
+                // LakeBankEaseMetres) so the corridor accessor keeps its documented contract.
+                if (kind == WaterBodyKind.River && shape == ShapeMode.RiverSpline && valleyWidthMultiple > 0f)
+                {
+                    float widest = 0f;
+                    if (carve != null && carve.riverHalfWidth != null)
+                        for (int i = 0; i < carve.riverHalfWidth.Length; i++)
+                            if (carve.riverHalfWidth[i] > widest) widest = carve.riverHalfWidth[i];
+                    if (widest <= 0f) widest = carve != null ? carve.riverDefaultHalfWidthM : 3f;
+
+                    return Mathf.Clamp(valleyWidthMultiple * widest * 2f,
+                                       MinValleyCorridorMetres, MaxValleyCorridorMetres);
+                }
 
                 return 0f;
+            }
+        }
+
+        /// <summary>
+        /// Metres beyond a LAKE's bevel over which the surrounding ground is graded so it rises
+        /// at a valley's rate instead of standing as a wall. FIX 2026-10-19: a lake used the 6 m
+        /// bevel alone, so on a hillside the ground went from waterline to full height in 6 m -
+        /// the sharp-walled pit seen around the lakes. 8 x the bevel, kept between 24 and 96 m,
+        /// is derived here (not stored) so it applies to bodies already in a scene.
+        /// A typed Corridor Metres still wins. Rivers and oceans are not affected.
+        /// </summary>
+        public float LakeBankEaseMetres
+        {
+            get
+            {
+                if (kind == WaterBodyKind.Ocean || kind == WaterBodyKind.River) return 0f;
+                if (shape == ShapeMode.RiverSpline) return 0f;
+                if (corridorMetres > 0f) return corridorMetres;
+                return Mathf.Clamp(shoreBevelMetres * 8f, 24f, 96f);
             }
         }
 
@@ -535,6 +499,15 @@ namespace UniverseCreator.TerrainSystem
                  "bodies only - a river's depth is Channel Depth above.")]
         public float digDepthMetres = 5f;
 
+        [Tooltip("Optional per-node bed depth for a Polygon lake, in metres, one " +
+                 "entry per outline point. A border node over the deep trough asks " +
+                 "for a large depth, one on a shelf a small one, and the carve eases " +
+                 "between them round the shore. 0 means \"not set here\" and inherits " +
+                 "the last authored value, finally Dig Depth. Left empty for a " +
+                 "Rectangle and when nothing is authored, and then the flat Dig Depth " +
+                 "is used throughout.")]
+        public List<float> nodeDepthMetres = new List<float>();
+
         [Tooltip("How far in from the shore the bed reaches full depth, in metres. " +
                  "Past it the floor is flat. This is what makes a lake read as a lake " +
                  "with a floor rather than a funnel with a point at the bottom.")]
@@ -545,6 +518,12 @@ namespace UniverseCreator.TerrainSystem
                  "a real continental shelf is most of the distance to the deep.")]
         [Range(0.02f, 0.95f)]
         public float shelfFraction = 0.25f;
+
+        [Tooltip("Curve of the bed as it falls from the shelf to full depth. 1 is a " +
+                 "straight ramp; higher hugs the shelf and then drops away steeply, " +
+                 "which reads as a more scooped basin with a defined lip.")]
+        [Range(1f, 6f)]
+        public float bankProfile = 2f;
 
         // ---- The bevel: why shorelines stop being sharp ---------------------
 
@@ -609,6 +588,14 @@ namespace UniverseCreator.TerrainSystem
                  "width of one bay or one bar.")]
         public float basinFeatureMetres = 60f;
 
+        /// <summary>Saved basin family for level natural bodies; Legacy retains existing assets' authored profile and depth controls.</summary>
+        [Tooltip("Basin formation model beneath the accepted shoreline. Existing outlines, per-node depths and water levels stay authoritative. Legacy retains the original profile.")]
+        public LakeFormation lakeFormation;
+
+        /// <summary>Later sediment infill smoothing, 0..1; zero retains formation relief. Ignored by Legacy and river/ocean excavation.</summary>
+        [Range(0, 1), Tooltip("0 preserves formation relief; 1 smooths later sediment infill. The waterline and authored maximum depths stay fixed.")]
+        public float lakeSedimentation;
+
         // Shore dressing (rock/plant scatter) and the shore-ripple / bank-drag /
         // ruggedness-whitewater surface fields were declared here but nothing in
         // the project ever read them, so they showed up as live controls in the
@@ -627,12 +614,23 @@ namespace UniverseCreator.TerrainSystem
         [Range(4, 240)]
         public int meshResolution = 64;
 
-        // REMOVED: horizonExtentMetres, "extends a flat plane this far past the body
-        // so the sea reaches the horizon". Nothing in the codebase ever built that
-        // plane - the field was written here, copied into WaterBodyData, shown in the
-        // inspector and set to 4000 by the ocean preset, and no line of code ever read
-        // it to make geometry. An ocean reaching the horizon is what the body's own
-        // extent is for: give it the size you want the sea to be.
+        // SUPERSEDES the old dead `horizonExtentMetres`. That earlier field was written,
+        // serialized, shown in the inspector and set to 4000 by the ocean preset but NO
+        // line of code ever read it to make geometry - a pure dead field, correctly
+        // removed. The §4i.3 Water-Meshing study then grounded the real, mobile-safe win
+        // it was reaching for: a cheap low-vertex Far Distance Mesh that fills ocean-to-
+        // horizon just below the surface so the sea is bounded by the camera's far clip,
+        // not by this body's own mesh edge. Unlike the old field, horizonDistanceMetres
+        // below is actually consumed - BuildOceanHorizon builds the ring from it. Ocean
+        // only; 0 disables it. Default 8000 m: far enough that a raised camera's geometric
+        // sea horizon and a typical far-clip plane fall on the flat ring, not on the body
+        // edge; the author sizes it up for a higher viewpoint.
+        [Tooltip("Ocean only. How far past the body edge a flat, color-matched 'reaches " +
+                 "the horizon' sea ring extends, in metres. 0 turns it off. The ring is a " +
+                 "cheap low-vertex strip just below the surface - it fills the gap between " +
+                 "the body mesh edge and the camera's far clip so the ocean does not " +
+                 "visibly end.")]
+        public float horizonDistanceMetres = 8000f;
 
         // =====================================================================
         //  HYDRAULICS
@@ -764,6 +762,11 @@ namespace UniverseCreator.TerrainSystem
         [System.NonSerialized] private UCWaterVolume volume;
         [System.NonSerialized] private WaterBodyData lastBuild;
 
+        // Ocean-only Far Distance Mesh (§4i.3). A separate low-vertex child so it can use
+        // the same material at a flat, wave-free weight without touching the body mesh.
+        [System.NonSerialized] private GameObject horizonObject;
+        [System.NonSerialized] private Mesh horizonMesh;
+
         /// <summary>Result of the last build, or null if nothing has been built.</summary>
         public WaterBodyData LastBuild { get { return lastBuild; } }
 
@@ -772,6 +775,165 @@ namespace UniverseCreator.TerrainSystem
 
         /// <summary>Triangles in the built mesh, for the inspector's readout.</summary>
         public int BuiltTriangleCount { get { return lastBuild != null ? lastBuild.TriangleCount : 0; } }
+
+        // =====================================================================
+        //  DAM RESERVOIR GOVERNANCE  (Module 6 seam - RaiseWaterBody)
+        // =====================================================================
+        //
+        // Transient, never serialised. A dam request does not edit this body's own
+        // level or outline; it governs them for as long as the request stands, and
+        // DamReservoirReconciler re-derives that governance from the request set on
+        // every settle. Withdraw the dam and rebuild and the body is its authored
+        // self again - the reversibility the whole seam depends on. Only a level body
+        // is ever governed; the river path never reads these.
+
+        [System.NonSerialized] private bool damGoverned;
+        [System.NonSerialized] private float damSurfaceLevelMetres;
+        [System.NonSerialized] private float damTailwaterLevelMetres;
+        [System.NonSerialized] private Vector2 damBarrierCentre;   // world XZ
+        [System.NonSerialized] private Vector2 damUpstreamNormal;  // unit, world XZ
+        [System.NonSerialized] private float damCrestLengthMetres; // span of the dam line, metres
+        [System.NonSerialized] private string damSourceId = string.Empty;
+
+        /// <summary> True while a dam request is holding this body as its reservoir. The spillway illusion (U-2) and the
+        /// inspector read it to show the body is level-governed rather than sitting at its authored surface. </summary>
+        public bool IsDamGoverned { get { return damGoverned; } }
+
+        /// <summary> The tailwater level the governing dam holds below the line, in metres. Meaningful only while
+        /// <see cref="IsDamGoverned"/>; the reservoir-minus-tailwater drop is what the spillway flow (U-2) reads.
+        /// </summary>
+        public float GovernedTailwaterLevelMetres { get { return damTailwaterLevelMetres; } }
+
+        /// <summary> The world XZ midpoint of the dam line governing this reservoir. Meaningful only while
+        /// <see cref="IsDamGoverned"/>. The spillway illusion (U-2) plunges its foam and spray on the downstream side of
+        /// this point; the value is the request's outlet position, carried here by <see cref="GovernAsReservoir"/> so
+        /// U-2 reads U-1's governance and never the inbox a second time. </summary>
+        public Vector2 DamBarrierCentre { get { return damBarrierCentre; } }
+
+        /// <summary> The unit world-XZ normal pointing upstream (into the reservoir) from the dam line. Meaningful only
+        /// while <see cref="IsDamGoverned"/>. Downstream - where the spillway jet lands - is its negation, so U-2 offsets
+        /// the plunge point along <c>-DamUpstreamNormal</c> from <see cref="DamBarrierCentre"/>. </summary>
+        public Vector2 DamUpstreamNormal { get { return damUpstreamNormal; } }
+
+        /// <summary> The span of the governing dam line in metres - the request's crest length. Meaningful only while
+        /// <see cref="IsDamGoverned"/>. U-2 spreads the plunge foam and spray across this width along the barrier axis, so
+        /// a wide dam aerates a wide tailwater and a narrow one a narrow plume, rather than a guessed footprint. </summary>
+        public float GovernedCrestLengthMetres { get { return damCrestLengthMetres; } }
+
+        /// <summary> True for a lake, pool or ocean - a closed ring at one level - and false for a river. A reservoir is
+        /// a level body, so the reconciler governs only these. </summary>
+        public bool IsLevelBody { get { return shape != ShapeMode.RiverSpline; } }
+
+        /// <summary> The world Y of this body's surface: the level a governing dam holds it to, or its own authored
+        /// transform.position.y + surfaceOffsetMetres when no dam governs it. Every level-build site reads the surface
+        /// through here, so the raise is applied in exactly one place and cannot be half-applied. </summary>
+        public float SurfaceWorldY()
+        {
+            return damGoverned ? damSurfaceLevelMetres : transform.position.y + surfaceOffsetMetres;
+        }
+
+        /// <summary> Hold this body as the reservoir of a dam: raise it to <paramref name="surfaceLevelMetres"/> and
+        /// clip it at the dam line through (<paramref name="barrierCentreX"/>, <paramref name="barrierCentreZ"/>) with
+        /// <paramref name="upstreamNormal"/> impounding, spanning <paramref name="crestLengthMetres"/> along the line.
+        /// Returns true if any of the governance actually changed, so the reconciler rebuilds only a body whose reservoir
+        /// moved. Transient: never written to the serialised fields. </summary>
+        public bool GovernAsReservoir(float surfaceLevelMetres, float tailwaterLevelMetres,
+            float barrierCentreX, float barrierCentreZ, Vector2 upstreamNormal, float crestLengthMetres, string sourceId)
+        {
+            Vector2 centre = new Vector2(barrierCentreX, barrierCentreZ);
+            string id = sourceId ?? string.Empty;
+
+            bool changed = !damGoverned
+                || !Mathf.Approximately(damSurfaceLevelMetres, surfaceLevelMetres)
+                || !Mathf.Approximately(damTailwaterLevelMetres, tailwaterLevelMetres)
+                || (damBarrierCentre - centre).sqrMagnitude > 1e-6f
+                || (damUpstreamNormal - upstreamNormal).sqrMagnitude > 1e-6f
+                || !Mathf.Approximately(damCrestLengthMetres, crestLengthMetres)
+                || damSourceId != id;
+
+            damGoverned = true;
+            damSurfaceLevelMetres = surfaceLevelMetres;
+            damTailwaterLevelMetres = tailwaterLevelMetres;
+            damBarrierCentre = centre;
+            damUpstreamNormal = upstreamNormal;
+            damCrestLengthMetres = crestLengthMetres;
+            damSourceId = id;
+            return changed;
+        }
+
+        /// <summary> Release any dam governance so the body returns to its authored level and outline on the next build.
+        /// Returns true if it was governed, so the reconciler rebuilds a body a withdrawn dam just let go. </summary>
+        public bool ClearReservoirGovernance()
+        {
+            if (!damGoverned) { return false; }
+            damGoverned = false;
+            damSurfaceLevelMetres = 0f;
+            damTailwaterLevelMetres = 0f;
+            damBarrierCentre = Vector2.zero;
+            damUpstreamNormal = Vector2.zero;
+            damCrestLengthMetres = 0f;
+            damSourceId = string.Empty;
+            return true;
+        }
+
+        /// <summary> This body's footprint as a plan-view Bounds in world space (the shore ring's XZ extent, the height
+        /// axis flattened). The reconciler uses it to decide which dam impounds this body. False when the body has no
+        /// usable footprint yet. </summary>
+        public bool TryGetPlanBounds(out Bounds bounds)
+        {
+            bounds = new Bounds();
+            List<Vector3> ring = WorldShoreRing();
+            if (ring == null || ring.Count < 3) { return false; }
+
+            float minX = float.MaxValue, maxX = float.MinValue;
+            float minZ = float.MaxValue, maxZ = float.MinValue;
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector3 p = ring[i];
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+
+            bounds = new Bounds(new Vector3((minX + maxX) * 0.5f, 0f, (minZ + maxZ) * 0.5f),
+                                new Vector3(maxX - minX, 0f, maxZ - minZ));
+            return true;
+        }
+
+        /// <summary>
+        /// This body's world footprint as a flat XZ ring plus its plan bounds (§A6). The ring
+        /// is the tight shore outline for a Polygon body, or the rectangle corners otherwise;
+        /// the bounds match <see cref="TryGetPlanBounds"/>. Public so the water manager can push
+        /// real lake footprints into the height graph exactly as it pushes river courses, letting
+        /// the continental-rise guard exempt ONLY ground a real lake actually covers. False when
+        /// the body has no usable footprint yet.
+        /// </summary>
+        public bool TryGetWorldFootprint(out Vector2[] ringXZ, out Bounds planBounds)
+        {
+            ringXZ = null;
+            planBounds = new Bounds();
+
+            List<Vector3> ring = WorldShoreRing();
+            if (ring == null || ring.Count < 3) return false;
+
+            ringXZ = new Vector2[ring.Count];
+            float minX = float.MaxValue, maxX = float.MinValue;
+            float minZ = float.MaxValue, maxZ = float.MinValue;
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector3 p = ring[i];
+                ringXZ[i] = new Vector2(p.x, p.z);
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.z < minZ) minZ = p.z;
+                if (p.z > maxZ) maxZ = p.z;
+            }
+
+            planBounds = new Bounds(new Vector3((minX + maxX) * 0.5f, 0f, (minZ + maxZ) * 0.5f),
+                                    new Vector3(maxX - minX, 0f, maxZ - minZ));
+            return true;
+        }
 
         private const float Gravity = 9.81f;
 
@@ -792,7 +954,16 @@ namespace UniverseCreator.TerrainSystem
 
         private void OnDisable()
         {
+            // UC-T04-07: frozen workers from a deleted/disabled authoring body cannot commit its old course.
+            var owningWorld = CarveWorld;
+            if (owningWorld != null && owningWorld.isActiveAndEnabled &&
+                (placementSaved || !HydrologyGenerator.IsGeneratedBodyName(name)))
+                InvalidatePendingWaterAuthoring(true); // UC-T04-07: retiring graph-generated outputs must not cancel their own generating run.
+            // GetEntityId, not GetInstanceID: the latter is obsolete-as-error in Unity 6.5 and fails
+            // the build outright. The course registry keys on an int, so the EntityId is hashed.
+            RiverCourseInputNode.UnpublishBodyCourse(GetEntityId().GetHashCode());
             WaterCarveRegistry.Unregister(this);
+            ClearWaterJunctions(true); // UC-T04-07: disable retires acceptance while retaining saved endpoint candidates for re-enable.
             Clear();
         }
 
@@ -803,9 +974,6 @@ namespace UniverseCreator.TerrainSystem
             // a NaN mesh Unity refuses to draw with no message about why.
             sizeMetres.x = Mathf.Max(1f, sizeMetres.x);
             sizeMetres.y = Mathf.Max(1f, sizeMetres.y);
-            widthMetres = Mathf.Max(0.2f, widthMetres);
-            pointSpacingMetres = Mathf.Max(0.5f, pointSpacingMetres);
-            channelDepthMetres = Mathf.Max(0.05f, channelDepthMetres);
             flatFloorDepthMetres = Mathf.Max(0.05f, flatFloorDepthMetres);
             minDepthMetres = Mathf.Max(0.001f, minDepthMetres);
             edgeFeatherMetres = Mathf.Max(0.01f, edgeFeatherMetres);
@@ -829,55 +997,315 @@ namespace UniverseCreator.TerrainSystem
             bedRuggednessMetres = Mathf.Max(0f, bedRuggednessMetres);
             ruggednessFeatureMetres = Mathf.Max(0.5f, ruggednessFeatureMetres);
             ruggednessCalmMetres = Mathf.Max(0.01f, ruggednessCalmMetres);
-            joinBlendMetres = Mathf.Max(0f, joinBlendMetres);
 
-            // A river cannot empty into a pool, and nothing can join itself. Cleared
-            // here rather than warned about, because a dangling junction would move
-            // the mouth to a nonsense place and the user would be looking at the
-            // wrong end of the river trying to work out why.
-            if (!CanJoin(joinDownstreamTo)) joinDownstreamTo = null;
-            if (!CanJoin(joinUpstreamFrom)) joinUpstreamFrom = null;
-
+            // A Polygon lake carries an optional per-outline-node bed depth; keep it
+            // the same length as the outline so a newly added point means "inherit"
+            // rather than "suddenly 0 metres deep".
             TrimNodeSeries(nodeDepthMetres);
-            TrimNodeSeries(nodeWidthMetres);
+
+            // A River Spline body carries a per-course-node hydraulic payload on the
+            // same open outline. Keep every authored channel the same length as the
+            // course, with the same "new node inherits" rule as the lake depths above.
+            if (riverProfile != null) riverProfile.Trim(outline);
 
             corridorMetres = Mathf.Max(0f, corridorMetres);
             valleyWidthMultiple = Mathf.Max(0f, valleyWidthMultiple);
-            autoConnectMetres = Mathf.Max(0f, autoConnectMetres);
-
-            // Anything typed in the inspector can change where the course lands, so the
-            // fitted one is dropped and the next build re-fits. Cheap: it is a null,
-            // and the solve only runs when something actually asks for the course.
-            InvalidateSolvedCourse();
         }
 
         /// <summary>
-        /// Whether this river may join that body. Oceans, lakes and other rivers yes;
-        /// pools no, and itself never.
-        /// </summary>
-        public bool CanJoin(UCWaterBody other)
-        {
-            if (other == null) return false;
-            if (other == this) return false;
-
-            return other.kind == WaterBodyKind.Ocean
-                || other.kind == WaterBodyKind.Lake
-                || other.kind == WaterBodyKind.River;
-        }
-
-        /// <summary>
-        /// Keeps a per-node list the same length as the course. Growing it with zeros
-        /// is what makes a newly added spline point mean "inherit" rather than
-        /// "suddenly 0 metres deep".
+        /// Keeps a per-node list the same length as the polygon outline. Growing it
+        /// with zeros is what makes a newly added outline point mean "inherit" rather
+        /// than "suddenly 0 metres deep".
         /// </summary>
         private void TrimNodeSeries(List<float> series)
         {
-            if (series == null || course == null) return;
+            if (series == null || outline == null) return;
 
-            int want = course.Count;
+            int want = outline.Count;
 
             while (series.Count > want) series.RemoveAt(series.Count - 1);
             while (series.Count < want) series.Add(0f);
+        }
+
+        /// <summary>
+        /// Bakes the child <see cref="UCRiverNode"/> handles into this body's open
+        /// <c>outline</c> (positions, body-local) and <c>riverProfile</c> (per-node
+        /// channels), in hierarchy/sibling order. The nodes are the edit-time source
+        /// of truth; this is the one place they become the baked course the solver,
+        /// carve and mesh read, so downstream code never needs to know nodes exist.
+        ///
+        /// Channels are written one value per node (0 = inherit, carried forward at
+        /// Bake); a channel that is 0 on every node forward-fills to nothing and the
+        /// solver derives it. A course needs two nodes to be a line; a single point
+        /// retains its source position but produces no segment or water surface (UC-T04-05B).
+        /// Returns the node count gathered.
+        /// </summary>
+        public int GatherCourseFromNodes()
+        {
+            EnsureRiverTerrainMode(); // UC-T04-01: capture legacy intent before replacing derived course data.
+            if (outline == null) outline = new Polyline();
+            if (riverProfile == null) riverProfile = new RiverProfile();
+
+            outline.points.Clear();
+            outline.weights.Clear();
+            outline.closed = false;
+            riverProfile.halfWidthM.Clear();
+            riverProfile.depthM.Clear();
+            riverProfile.dischargeM3PerS.Clear();
+            riverProfile.velocityMps.Clear();
+
+            // Includes inactive children so a node toggled off in the hierarchy is not
+            // silently dropped from the course mid-edit.
+            UCRiverNode[] nodes = OwnedRiverNodes(); // UC-T04-05: nested water bodies own their own endpoint identities and routes.
+            Transform t = transform;
+
+            // Flood plain: with no Start ticked anywhere the whole river has one. Once any node is a
+            // Start, the plain exists from a Start to the next End (or the river's end) only.
+            if (nodeFloodPlain == null) nodeFloodPlain = new List<float>();
+            nodeFloodPlain.Clear();
+            bool anyStart = false;
+            for (int i = 0; i < nodes.Length; i++) if (nodes[i] != null && nodes[i].floodPlainStart) { anyStart = true; break; }
+            bool inPlain = false;
+
+            ResolveMouthControl(nodes); // UC-T04-07: retire old node-managed/automatic targets before recognizing the current endpoint.
+
+            for (int i = 0; i < nodes.Length; i++)
+            {
+                UCRiverNode n = nodes[i];
+                if (n == null) continue;
+
+                if (!anyStart) nodeFloodPlain.Add(1f);
+                else
+                {
+                    if (n.floodPlainStart) inPlain = true;
+                    nodeFloodPlain.Add(inPlain ? 1f : 0.001f);
+                    if (n.floodPlainEnd) inPlain = false;
+                }
+
+                // World -> body-local, matching how the outline is drawn and carved
+                // (the inspector and dig both go through transform.TransformPoint).
+                outline.points.Add(t.InverseTransformPoint(n.transform.position));
+                riverProfile.halfWidthM.Add(Mathf.Max(0f, n.halfWidthM));
+                riverProfile.depthM.Add(Mathf.Max(0f, n.depthM));
+                riverProfile.dischargeM3PerS.Add(Mathf.Max(0f, n.dischargeM3PerS));
+                riverProfile.velocityMps.Add(Mathf.Max(0f, n.velocityMps));
+            }
+
+            // UC-T04-06: automatic recognition uses owned accepted coverage across grouping parents.
+            if (joinsRiver == null && nodes.Length > 1 && TryAutomaticRiverReceiver(nodes[nodes.Length - 1].transform.position, out var automaticReceiver))
+            { joinsRiver = automaticReceiver; automaticMouthId = automaticReceiver.StableWaterBodyId; }
+            AppendConfluencePoint();
+            return outline.points.Count;
+        }
+
+        /// <summary>
+        /// River-to-river connection. When Joins River is set, a final point is appended at the
+        /// nearest point on that river's own (smoothed) course, so a tributary runs INTO the main
+        /// channel and the two carves overlap at the mouth. Skipped for a self-join or a loop.
+        /// </summary>
+        private void AppendConfluencePoint()
+        {
+            if (!SameJunctionScope(joinsRiver)) return; // UC-T04-05: overlapping worlds cannot append each other's routes.
+            if (joinsRiver.kind != WaterBodyKind.River || joinsRiver.shape != ShapeMode.RiverSpline) return;
+            if (joinsRiver.joinsRiver == this) return;                       // A joins B joins A
+            if (outline.points.Count < 1) return;
+
+            Polyline target = joinsRiver.GetSmoothCourseLocal(6f);
+            if (target == null || target.Count < 2) return;
+
+            Transform tt = joinsRiver.transform;
+            Transform t = transform;
+            Vector3 last = t.TransformPoint(outline.points[outline.points.Count - 1]);
+
+            float best = float.MaxValue; Vector3 bestW = last;
+            for (int i = 0; i + 1 < target.Count; i++)
+            {
+                Vector3 a = tt.TransformPoint(target.points[i]);
+                Vector3 b = tt.TransformPoint(target.points[i + 1]);
+                Vector3 ab = b - a; ab.y = 0f;
+                float len2 = ab.sqrMagnitude;
+                Vector3 lp = last - a; lp.y = 0f;
+                float u = len2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(lp, ab) / len2) : 0f;
+                Vector3 q = a + (b - a) * u;
+                float dx = q.x - last.x, dz = q.z - last.z;
+                float d = dx * dx + dz * dz;
+                if (d < best) { best = d; bestW = q; }
+            }
+            if (best > 1e11f) return;
+            if (best < 1e-6f) return; // UC-T04-06: an endpoint already on the receiver must not acquire a zero-length station.
+
+            // Ground-snapped, a few metres short of the centreline would notch the main channel; ending
+            // exactly on it lets both carves meet. The target's dig lowers the ground there anyway.
+            if (TrySampleSurfaceGround(Terrain.activeTerrains, CarveWorld, bestW.x, bestW.z, out float joinGround)) bestW.y = joinGround; // UC-T04-06: never seat a connection on a foreign world.
+            outline.points.Add(t.InverseTransformPoint(bestW));
+            if (nodeFloodPlain != null && nodeFloodPlain.Count > 0) nodeFloodPlain.Add(nodeFloodPlain[nodeFloodPlain.Count - 1]);
+            outline.weights.Clear();
+            riverProfile.halfWidthM.Add(0f);
+            riverProfile.depthM.Add(0f);
+            riverProfile.dischargeM3PerS.Add(0f);
+            riverProfile.velocityMps.Add(0f);
+        }
+
+        /// <summary>This river's Catmull-Rom smoothed course in body-local space (nodes only, no join).</summary>
+        public Polyline GetSmoothCourseLocal(float tessellationMetres)
+        {
+            UCRiverNode[] nodes = OwnedRiverNodes(); // UC-T04-05: receiver sampling excludes nested bodies' handles.
+            if (nodes.Length < 2) return null;
+            Polyline p = new Polyline();
+            for (int i = 0; i < nodes.Length; i++)
+                if (nodes[i] != null) p.points.Add(transform.InverseTransformPoint(nodes[i].transform.position));
+            p.closed = false;
+            return SplineOperations.TessellateCatmullRom(p, tessellationMetres, 0.5f);
+        }
+
+        /// <summary>
+        /// Adds a gentle, seeded sideways wander to a tessellated river course. Zero at both ends (so
+        /// the river still starts and ends exactly on its nodes), tapering over the first and last 15%,
+        /// with two wavelengths so it never looks like a sine wave. Body-local XZ; Y is left alone.
+        /// </summary>
+        private void ApplyMeander(Polyline smooth)
+        {
+            float amount = float.IsNaN(meander) || float.IsInfinity(meander) ? 0f : Mathf.Clamp(meander, 0f, 3f); // UC-T04-03: external/authored input cannot create unbounded or nonfinite displacement.
+            if (smooth == null || smooth.Count < 4 || amount <= 1e-3f) return;
+            float[] arc = smooth.BuildArcTable();
+            float total = arc[arc.Length - 1];
+            if (total < 20f) return;
+
+            int n = smooth.Count;
+            Vector3[] src = new Vector3[n];
+            for (int i = 0; i < n; i++) src[i] = smooth.points[i];
+
+            float amp = 6f * amount;                         // UC-T04-03: metres; combined noise is bounded by 1.4, endpoints taper to zero.
+
+            // Where the course already lies on a procedural trench the river must FOLLOW that trench,
+            // not wander off it. Mark those points, blur the mark so the wander fades in and out
+            // instead of kinking at the boundary, and scale the offset by what is left.
+            float[] free = new float[n];
+            UniverseCreatorObject channelWorld = CarveWorld; // UC-T02-07: resolve once for this course, outside the sample loop.
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 w = transform.TransformPoint(src[i]);
+                free[i] = (FollowTrench && RiverChannelRegistry.TrySampleCommitted(channelWorld, w.x, w.z, 0,
+                    out var accepted, out _) && accepted.SignedBankDistanceMetres <= 0) ? 0f : 1f; // UC-T03-09: no meander suppression from candidate-only metadata.
+            }
+            for (int pass = 0; pass < 6; pass++)
+            {
+                float[] f2 = (float[])free.Clone();
+                for (int i = 1; i < n - 1; i++) free[i] = 0.25f * f2[i - 1] + 0.5f * f2[i] + 0.25f * f2[i + 1];
+            }
+
+            for (int i = 1; i < n - 1; i++)
+            {
+                Vector3 tan = src[i + 1] - src[i - 1]; tan.y = 0f;
+                if (tan.sqrMagnitude < 1e-8f) continue;
+                tan.Normalize();
+                Vector3 nrm = new Vector3(-tan.z, 0f, tan.x);
+
+                float s = arc[i];
+                float u = s / total;
+                float taper = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(u / 0.15f)) *
+                              Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((1f - u) / 0.15f));
+
+                float w = (Mathf.PerlinNoise(s * 0.011f + naturalSeed * 0.37f, 0.5f) - 0.5f) * 2f
+                        + (Mathf.PerlinNoise(s * 0.037f + naturalSeed * 0.91f, 7.5f) - 0.5f) * 0.8f;
+                smooth.points[i] = src[i] + nrm * (w * amp * taper * free[i]);
+            }
+        }
+
+        /// <summary>
+        /// Bakes this river's hand-drawn course into WORLD-space XZ points and per-point channel
+        /// half-widths, for the graph's River Course Input node to rasterize into a River Mask.
+        /// Reuses the SAME smoothing the carve uses (GatherCourseFromNodes → centripetal
+        /// Catmull-Rom → authored width by arc), coarsened for a mask, so the mask follows the
+        /// identical curve the trench was cut along. Does NOT carve or touch the terrain. Returns
+        /// false (and null outs) when this is not a river or has fewer than two course points.
+        /// </summary>
+        public bool TryBakeWorldCourseXZ(float fallbackHalfWidthM, out Vector2[] pointsXZ, out float[] halfWidthM)
+        {
+            pointsXZ = null;
+            halfWidthM = null;
+            if (kind != WaterBodyKind.River) return false;
+
+            GatherCourseFromNodes();
+            int n = outline != null ? outline.Count : 0;
+            if (n < 2) return false;
+
+            // Coarser than the carve's 5 m tessellation: a mask lives at chunk-pixel resolution,
+            // so a dense curve would only cost segments the rasteriser cannot resolve.
+            const float MaskTessellationMetres = 8f;
+
+            BakedRiverProfile authored = riverProfile != null ? riverProfile.Bake(outline) : null;
+            Polyline smooth = SplineOperations.TessellateCatmullRom(outline, MaskTessellationMetres, 0.5f);
+            ApplyMeander(smooth);
+            int m = smooth != null ? smooth.Count : 0;
+            if (m < 2) return false;
+
+            float[] arc = smooth.BuildArcTable();
+            float smoothTotal = arc.Length > 0 ? arc[arc.Length - 1] : 0f;
+            float ctrlTotal = authored != null ? authored.TotalLengthM : 0f;
+            bool hasW = authored != null && authored.HasWidth;
+
+            float fallback = Mathf.Max(0.01f, fallbackHalfWidthM);
+            Transform t = transform;
+            Vector2[] pts = new Vector2[m];
+            float[] half = new float[m];
+
+            for (int i = 0; i < m; i++)
+            {
+                Vector3 w = t.TransformPoint(smooth.points[i]);
+                pts[i] = new Vector2(w.x, w.z);
+
+                float hw = fallback;
+                if (hasW)
+                {
+                    float arcC = smoothTotal > 1e-4f ? (arc[i] / smoothTotal) * ctrlTotal : 0f;
+                    float authoredHw = authored.SampleAtArc(arcC).halfWidthM;
+                    if (authoredHw > 0f) hw = authoredHw;
+                }
+                half[i] = hw;
+            }
+
+            pointsXZ = pts;
+            halfWidthM = half;
+            return true;
+        }
+
+        /// <summary>
+        /// The river's SOLVED course for the graph: XZ points, half-width, thalweg elevation
+        /// (world metres) and depth - exactly what the scene-side dig uses, so the River Course
+        /// Input node can cut the same channel in the graph. Builds the dig (without re-cutting
+        /// the terrain) when it has not been built yet. False for read mode, disabled excavation, a non-river or an unsolved course.
+        /// </summary>
+        public bool TryGetSolvedCourse(float fallbackHalfWidthM, out Vector2[] pointsXZ, out float[] halfWidthM,
+                                       out float[] bedY, out float[] depthM)
+        {
+            pointsXZ = null; halfWidthM = null; bedY = null; depthM = null;
+            if (kind != WaterBodyKind.River || shape != ShapeMode.RiverSpline || FollowTrench || !digTerrain) return false; // UC-T04-02: a graph carve request can only come from an enabled manual excavator.
+
+            if (carve == null || !carve.isRiver || carve.courseWorld == null || carve.courseWorld.Count < 2 ||
+                carve.riverBedY == null)
+            {
+                if (!digTerrain) return false;
+                BuildDig(false);
+            }
+            if (carve == null || !carve.isRiver || carve.courseWorld == null || carve.courseWorld.Count < 2 ||
+                carve.riverBedY == null || carve.riverBedY.Length != carve.courseWorld.Count)
+                return false;
+
+            int m = carve.courseWorld.Count;
+            pointsXZ = new Vector2[m]; halfWidthM = new float[m]; bedY = new float[m]; depthM = new float[m];
+            float defHalf = fallbackHalfWidthM > 0f ? fallbackHalfWidthM : carve.riverDefaultHalfWidthM;
+            for (int i = 0; i < m; i++)
+            {
+                Vector3 w = carve.courseWorld[i];
+                pointsXZ[i] = new Vector2(w.x, w.z);
+                float hw = (carve.riverHalfWidth != null && i < carve.riverHalfWidth.Length) ? carve.riverHalfWidth[i] : 0f;
+                float dp = (carve.riverDepthM != null && i < carve.riverDepthM.Length) ? carve.riverDepthM[i] : 0f;
+                halfWidthM[i] = hw > 0f ? hw : defHalf;
+                depthM[i] = dp > 0f ? dp : carve.riverDefaultDepthM;
+                bedY[i] = carve.riverBedY[i];
+            }
+            return true;
         }
 
         // =====================================================================
@@ -889,17 +1317,46 @@ namespace UniverseCreator.TerrainSystem
         // =====================================================================
 
         [System.NonSerialized] private WaterCarveLayer carve;
+        [System.NonSerialized] private WaterCarveLayer riverSurfaceFit; // UC-T04-04: fitted widths never mutate the authored excavation request.
+        [System.NonSerialized] private RiverCrossSectionFit.Shoreline riverShoreline; // UC-T04-06: independent bank extents accompany the same fitted course.
+        [System.NonSerialized] private GenerationRunId riverFitRun;
 
-        /// <summary>The world this body may dig, resolved from the hierarchy.</summary>
+        /// <summary>Latest surface-fit failure, or empty after a valid fit; fitting never grants excavation permission.</summary>
+        public string RiverSurfaceDiagnostic { get; private set; } = string.Empty;
+
+        /// <summary>The nearest world owning this body's dig and accepted profiles, including inactive parents used by Editor preparation; null when unowned.</summary>
         public UniverseCreatorObject CarveWorld
         {
-            get { return GetComponentInParent<UniverseCreatorObject>(); }
+            get { return GetComponentInParent<UniverseCreatorObject>(true); } // UC-T03-09: disabling a hierarchy must not erase its world identity.
         }
 
-        /// <summary>The dig, or null when this body is not carving.</summary>
+        /// <summary>The owned terrain excavation request, or null for procedural-read rivers, disabled digging or a missing solve.</summary>
         public WaterCarveLayer CarveLayer
         {
-            get { return digTerrain && carve != null && carve.HasShape ? carve : null; }
+            get { return digTerrain && (shape != ShapeMode.RiverSpline || !FollowTrench) && carve != null && carve.HasShape ? carve : null; } // UC-T04-02: surface fit data cannot enter the terrain registry in read mode.
+        }
+
+        /// <summary>Copies the latest fitted river profile for surface consumers without exposing an excavation request or triggering a build.</summary>
+        /// <param name="courseWorld">World-metre stations, or null when no complete fit exists.</param>
+        /// <param name="bedY">Bed elevations in world metres, matching station count, or null on failure.</param>
+        /// <param name="depthM">Nonnegative fitted water depths in metres, or null on failure.</param>
+        /// <param name="halfWidthM">Fitted channel half-widths in metres, or null on failure.</param>
+        /// <returns>True for a complete fitted river in either mode; arrays are independent copies. Does not write terrain.</returns>
+        public bool TryGetFittedRiverProfile(out Vector3[] courseWorld, out float[] bedY, out float[] depthM, out float[] halfWidthM)
+        {
+            courseWorld = null; bedY = null; depthM = null; halfWidthM = null;
+            WaterCarveLayer fit = riverSurfaceFit; // UC-T04-04: report only validated surface dimensions, separately from the cut.
+            if (shape != ShapeMode.RiverSpline || fit == null || !fit.isRiver || !fit.HasShape) return false;
+            int count = fit.courseWorld.Count;
+            if (fit.riverBedY?.Length != count || fit.riverDepthM?.Length != count || fit.riverHalfWidth?.Length != count) return false;
+            for (int i = 0; i < count; i++)
+                if (!RiverChannelSnapshot.Finite(fit.courseWorld[i].x) || !RiverChannelSnapshot.Finite(fit.courseWorld[i].y) ||
+                    !RiverChannelSnapshot.Finite(fit.courseWorld[i].z) || !RiverChannelSnapshot.Finite(fit.riverBedY[i]) ||
+                    !RiverChannelSnapshot.Finite(fit.riverDepthM[i]) || fit.riverDepthM[i] < 0 ||
+                    !RiverChannelSnapshot.Finite(fit.riverHalfWidth[i]) || fit.riverHalfWidth[i] <= 0) return false;
+            courseWorld = fit.courseWorld.ToArray(); bedY = (float[])fit.riverBedY.Clone();
+            depthM = (float[])fit.riverDepthM.Clone(); halfWidthM = (float[])fit.riverHalfWidth.Clone();
+            return true;
         }
 
         /// <summary>
@@ -925,6 +1382,22 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
+        /// True when this river owns a directed source/mouth record; geometry acceptance is reported separately.
+        /// </summary>
+        public bool IsConnected
+        {
+            get { return waterJunctions != null && waterJunctions.Count > 0; } // UC-T04-05: show the actual persistent connection owner.
+        }
+
+        /// <summary>
+        /// Directed source/mouth kinds for the inspector; empty when unconnected, with separate invalid-state diagnostics.
+        /// </summary>
+        public string ConnectionSummary
+        {
+            get { return IsConnected ? string.Join(", ", waterJunctions.ConvertAll(record => record.Kind.ToString())) : string.Empty; } // UC-T04-05: derived from owned records.
+        }
+
+        /// <summary>
         /// Translates the fields above into a dig the terrain build can apply, then
         /// re-cuts it into whatever terrain is already on screen.
         ///
@@ -944,28 +1417,22 @@ namespace UniverseCreator.TerrainSystem
         /// The settle re-fit passes false and re-cuts once for every body it touched,
         /// because ReapplyCarves rewrites whole chunks - running it per body would
         /// rewrite the same chunk once per water body in reach of it.
+        /// UC-T04-04: river surface fitting also runs when digging is disabled. A manual
+        /// non-excavating course uses authored world Y as its water-level reference and
+        /// must fit real wet ground; a procedural reader uses the accepted bed/level.
         /// </summary>
         public void BuildDig(bool reapplyToTerrain)
         {
             if (carve == null) carve = new WaterCarveLayer();
 
-            // Pressing Build means "fit this to the ground as it is now", so last
-            // build's fitted course is dropped rather than reused. This is the half of
-            // the answer a river with no graph node connected relies on: the terrain
-            // moved, you press Build, the river is re-placed.
-            InvalidateSolvedCourse();
-
             carve.Clear();
-            carve.enabled = digTerrain;
+            riverSurfaceFit = null; RiverSurfaceDiagnostic = string.Empty; // UC-T04-04: a failed replacement exposes no newly accepted fit.
+            carve.enabled = digTerrain && (shape != ShapeMode.RiverSpline || !FollowTrench); // UC-T04-02: read fit data is disabled as a terrain writer from the first branch.
             carve.kind = kind;
             carve.seed = ruggednessSeed;
 
-            if (!digTerrain)
+            if (!digTerrain && shape != ShapeMode.RiverSpline) // UC-T04-04: water fitting still runs with excavation disabled.
             {
-                // Nothing is fitted to anything, so the next settle must not read a
-                // baseline left over from when this body was still digging.
-                fittedGround = null;
-
                 if (reapplyToTerrain) ReapplyToTerrain();
                 return;
             }
@@ -984,25 +1451,607 @@ namespace UniverseCreator.TerrainSystem
             // nothing else, which is how it worked before any of this existed. A river's
             // valley is derived from its width when no absolute metres are typed - all
             // of that lives in the accessor, so this is the only write.
-            carve.corridorMetres = ValleyCorridorMetres;
-            carve.corridorStrength = corridorStrength;
+            carve.corridorMetres = Mathf.Max(ValleyCorridorMetres, LakeBankEaseMetres);
+            carve.corridorStrength = (kind == WaterBodyKind.River || kind == WaterBodyKind.Ocean)
+                ? corridorStrength : Mathf.Max(corridorStrength, 0.85f);
 
-            if (shape == ShapeMode.RiverSpline) BuildRiverDig();
-            else BuildLevelDig();
+            if (shape == ShapeMode.RiverSpline)
+            {
+                BuildRiverDig();
+                // The derived valley needs the solved channel width, which only exists now.
+                carve.corridorMetres = ValleyCorridorMetres;
+            }
+            else
+                BuildLevelDig();
 
             carve.RecomputeBounds();
 
-            // The ground this dig is now fitted to. Read after the course is solved and
-            // before anything is re-cut, which is safe in either order: it reads the
-            // graph's undug output and a re-cut does not touch that.
-            //
-            // Captured here rather than in OnTerrainSettled so that every path which
-            // changes the dig - the Build button, a field edit, a spline nudge - leaves
-            // a baseline behind. A path that changed the dig without recording what it
-            // fitted to would make the next settle compare against stale ground.
-            fittedGround = SampleFittedGround();
-
             if (reapplyToTerrain) ReapplyToTerrain();
+        }
+
+        /// <summary>
+        /// River variant of the dig: gather the course from its child nodes, sample
+        /// the ground under each node, solve the descending bed (step 4), and hand the
+        /// swept channel to the carve layer. The lake/ocean ring path (BuildLevelDig)
+        /// is left completely untouched.
+        /// </summary>
+        private void BuildRiverDig()
+        {
+            LastChannelValidity = RiverChannelValidity.NoChannel; // UC-T04-02: an empty replacement cannot retain a previous valid lookup.
+            var savedSource = SavedJunctionTarget(true); var savedMouth = SavedJunctionTarget(false); // UC-T04-07: recover stable endpoints before retiring the previous fit.
+            ClearWaterJunctions(); // UC-T04-05: edited/deleted endpoints withdraw their previous records and inverse links.
+            RiverSurfaceDiagnostic = "River has no complete fitted course."; // UC-T04-04: early empty/coverage failures remain visible.
+            GatherCourseFromNodes();
+            RiverCourseInputNode.UnpublishBodyCourse(GetEntityId().GetHashCode()); // UC-T04-02: an incomplete replacement cannot retain the previous course's graph excavation.
+            carve.followOnly = FollowTrench; // UC-T03-09: resolve node-authored mode before any missing-data return.
+
+            int n = outline != null ? outline.Count : 0;
+            if (n < 2)
+            {
+                // UC-T04-05B: an incomplete authored course intentionally withdraws its old water.
+                RiverSurfaceDiagnostic = n == 0 ? "Place the first river point to set its source."
+                    : "Source placed. Add a second point to build the first river segment.";
+                return;
+            }
+
+            // §2 / gap #1 DE-FACET: the author's control points are straight-segment, which
+            // reads as a "valley of joined stones" on a meander. Tessellate them through the
+            // centripetal Catmull-Rom curve we already own (cusp/self-intersection-proof) so
+            // the channel, bed and mesh follow a SMOOTH curve. Channels authored per control
+            // node are sampled onto the dense curve by fractional arc.
+            const float RiverTessellationMetres = 5f;
+
+            Transform t = transform;
+            Terrain[] terrains = Terrain.activeTerrains;
+            UniverseCreatorObject channelWorld = CarveWorld; // UC-T02-07: sample only this body's accepted world metadata.
+
+            BakedRiverProfile authored = riverProfile != null ? riverProfile.Bake(outline) : null;
+
+            Polyline smooth = SplineOperations.TessellateCatmullRom(outline, RiverTessellationMetres, 0.5f);
+            ApplyMeander(smooth);
+            int m = smooth != null ? smooth.Count : 0;
+            if (m < 2) return;
+
+            float[] smoothArc = smooth.BuildArcTable();
+            float smoothTotal = smoothArc.Length > 0 ? smoothArc[smoothArc.Length - 1] : 0f;
+            float ctrlTotal = authored != null ? authored.TotalLengthM : 0f;
+
+            bool hasW = authored != null && authored.HasWidth;
+            bool hasD = authored != null && authored.HasDepth;
+            bool hasQ = authored != null && authored.HasDischarge;
+
+            List<Vector3> courseWorld = new List<Vector3>(m);
+            RiverChannelSample[] acceptedCourse = FollowTrench ? new RiverChannelSample[m] : null; // UC-T03-09: one lookup per final station.
+            float[] halfW = hasW ? new float[m] : null;
+            float[] depth = hasD ? new float[m] : null;
+            float[] discharge = hasQ ? new float[m] : null;
+
+            for (int i = 0; i < m; i++)
+            {
+                Vector3 w = t.TransformPoint(smooth.points[i]);
+                if (digTerrain || acceptedCourse != null) w.y = SampleGround(terrains, w, w.y); // UC-T04-04: non-excavating manual water uses the authored level, then validates ground coverage.
+                if (acceptedCourse != null)
+                {
+                    if (!RiverChannelRegistry.TrySampleCommitted(channelWorld, w.x, w.z, 0, out acceptedCourse[i], out var validity))
+                    { LastChannelValidity = validity; return; } // UC-T03-09: expose absence rather than inventing an unrelated profile.
+                    LastChannelValidity = RiverChannelValidity.Valid;
+                    if (i == 0) riverFitRun = acceptedCourse[i].Run; // UC-T04-04: every bank sample must belong to this accepted revision.
+                    else if (!acceptedCourse[i].Run.Equals(riverFitRun))
+                    { RiverSurfaceDiagnostic = "River spans different accepted terrain revisions."; return; }
+                    w.y = acceptedCourse[i].Bed.y;
+                }
+                courseWorld.Add(w);
+
+                if (authored != null)
+                {
+                    // Smooth point's position along the control course, by arc fraction.
+                    float arcC = smoothTotal > 1e-4f ? (smoothArc[i] / smoothTotal) * ctrlTotal : 0f;
+                    RiverSample samp = authored.SampleAtArc(arcC);
+                    if (halfW != null) halfW[i] = samp.halfWidthM;
+                    if (depth != null) depth[i] = samp.depthM;
+                    if (discharge != null) discharge[i] = samp.dischargeM3PerS;
+                }
+            }
+
+            // ---------------------------------------------------------------------------------
+            // NATURAL SIZE: a river never starts at zero width or depth, and it follows the trench.
+            // Applies only to what the author did not type (typed values always win) and when no
+            // discharge was given (a discharge is sized by the hydraulic-geometry path below).
+            //   1. Follow Procedural Trench ON and on a trench -> INHERIT that trench's width and depth, and seat
+            //      the bed on the trench floor, so the water fills the trench instead of digging a
+            //      second one inside it.
+            //   2. Anywhere else                   -> start as a STREAM at the source and GROW
+            //      downstream (stream -> small river -> river -> big river), never zero.
+            // ---------------------------------------------------------------------------------
+            float[] solveDepth = depth;
+            if (!hasQ && (halfW == null || depth == null))
+            {
+                float[] nHalf = new float[m];
+                float[] nDepth = new float[m];
+                bool[] onTrench = new bool[m];
+                int hits = 0;
+
+                float mouthWidth = Mathf.Max(2f * carve.riverDefaultHalfWidthM, RiverCourseSolver.HeadwaterWidthM * 2f);
+
+                for (int i = 0; i < m; i++)
+                {
+                    if (acceptedCourse != null) // UC-T03-09: reuse this station's validated accepted profile.
+                    {
+                        RiverChannelSample accepted = acceptedCourse[i];
+                        nHalf[i] = accepted.HalfWidthMetres; nDepth[i] = accepted.DepthMetres / 0.75f; onTrench[i] = true; hits++;
+                        Vector3 point = courseWorld[i]; point.y = accepted.Bed.y; courseWorld[i] = point;
+                    }
+                    else
+                    {
+                        float tt = smoothTotal > 1e-4f ? smoothArc[i] / smoothTotal : 0f;
+                        RiverCourseSolver.GrowthSection(tt, mouthWidth, out nHalf[i], out nDepth[i]);
+                    }
+                }
+
+                // Light smoothing so the coarse solve grid does not show as steps, then make the width
+                // non-decreasing downstream (a river does not get narrower without losing flow).
+                for (int pass = 0; pass < 3; pass++)
+                {
+                    float[] sh = (float[])nHalf.Clone(); float[] sd = (float[])nDepth.Clone();
+                    for (int i = 1; i < m - 1; i++)
+                    {
+                        if (onTrench[i]) continue; // UC-T03-09: accepted dimensions are immutable; smooth only the authored fallback.
+                        nHalf[i]  = 0.25f * sh[i - 1] + 0.5f * sh[i] + 0.25f * sh[i + 1];
+                        nDepth[i] = 0.25f * sd[i - 1] + 0.5f * sd[i] + 0.25f * sd[i + 1];
+                    }
+                }
+                for (int i = 1; i < m; i++)
+                {
+                    if (onTrench[i]) continue; // UC-T03-09: a neighbouring wider channel cannot widen accepted banks.
+                    if (nHalf[i]  < nHalf[i - 1])  nHalf[i]  = nHalf[i - 1];
+                    if (nDepth[i] < nDepth[i - 1]) nDepth[i] = nDepth[i - 1];
+                }
+                float minHalf = 0.5f * RiverCourseSolver.HeadwaterWidthM;
+                for (int i = 0; i < m; i++)
+                {
+                    if (onTrench[i]) continue; // UC-T03-09: no headwater floor overrides accepted depth.
+                    if (nHalf[i]  < minHalf) nHalf[i]  = minHalf;
+                    if (nDepth[i] < 0.2f)    nDepth[i] = 0.2f;
+                }
+
+                bool inheritsTrench = hits >= Mathf.Max(2, m / 10);
+                bool depthWasNull = depth == null;
+
+                // Following: the water sits BELOW the bank top, in the trench, not brim-full to the
+                // original ground level - so the banks stand above the water on both sides.
+                if (FollowTrench && inheritsTrench)
+                {
+                    // UC-T04-02: the body mode owns excavation permission; inherited dimensions only fit the water.
+                    for (int i = 0; i < m; i++) if (onTrench[i]) nDepth[i] *= 0.75f;
+                }
+                if (halfW == null) halfW = nHalf;
+                if (depth == null) depth = nDepth;
+
+                if (inheritsTrench && depthWasNull)
+                {
+                    // Seat the bed on the trench FLOOR: lowest ground across the channel at each point,
+                    // and ask the bed solve for ~no extra depth there, so the existing trench is the bed.
+                    solveDepth = new float[m];
+                    for (int i = 0; i < m; i++)
+                    {
+                        if (!onTrench[i]) { solveDepth[i] = nDepth[i]; continue; }
+
+                        Vector3 a = courseWorld[Mathf.Max(0, i - 1)];
+                        Vector3 b = courseWorld[Mathf.Min(m - 1, i + 1)];
+                        Vector2 tan = new Vector2(b.x - a.x, b.z - a.z);
+                        tan = tan.sqrMagnitude > 1e-6f ? tan.normalized : Vector2.up;
+                        Vector2 nrm = new Vector2(-tan.y, tan.x);
+
+                        float low = courseWorld[i].y;
+                        for (int k = -2; k <= 2; k++)
+                        {
+                            Vector3 q = courseWorld[i];
+                            q.x += nrm.x * k * 0.3f * nHalf[i];
+                            q.z += nrm.y * k * 0.3f * nHalf[i];
+                            float g = SampleGround(terrains, q, courseWorld[i].y);
+                            if (g < low) low = g;
+                        }
+                        Vector3 cw = courseWorld[i]; cw.y = low; courseWorld[i] = cw;
+                        solveDepth[i] = 0.001f;
+                    }
+                }
+            }
+
+            SolvedRiverBed bed;
+            int bedSig = BedSignature(courseWorld, solveDepth);
+            if (!_forceResolveBed && cachedBedY != null && cachedBedY.Length == m && cachedBedSig == bedSig)
+            {
+                // Unchanged course: keep the bed we already solved (see cachedBedY).
+                float[] arcC = new float[m];
+                for (int i = 1; i < m; i++)
+                {
+                    float dx = courseWorld[i].x - courseWorld[i - 1].x, dz = courseWorld[i].z - courseWorld[i - 1].z;
+                    arcC[i] = arcC[i - 1] + Mathf.Sqrt(dx * dx + dz * dz);
+                }
+                bed = new SolvedRiverBed
+                {
+                    bedElevationM = (float[])cachedBedY.Clone(), arcM = arcC,
+                    channelSlope = cachedBedSlope, sinuosity = 1f, valid = true
+                };
+            }
+            else
+            {
+                bed = RiverCourseSolver.SolveBedProfile(courseWorld, solveDepth, carve.riverDefaultDepthM);
+                if (!bed.valid) return;
+                cachedBedY = (float[])bed.bedElevationM.Clone();
+                cachedBedSig = bedSig;
+                cachedBedSlope = bed.channelSlope;
+            }
+            _forceResolveBed = false;
+
+            // Guarantee C (G-C1): where the author gave a discharge but not an explicit
+            // width/depth, SIZE the channel by hydraulic geometry (Leopold-Maddock width
+            // = a·Q^0.5, depth ∝ width^0.8, Shields grain-stability floor) using the
+            // solved channel slope - shape follows flow. Then re-solve the bed against the
+            // derived depth so the thalweg and waterline agree. Authored values always win.
+            if (discharge != null && (halfW == null || depth == null))
+            {
+                float[] dw = new float[m];
+                float[] dd = new float[m];
+                for (int i = 0; i < m; i++)
+                    RiverCourseSolver.HydraulicGeometry(discharge[i], bed.channelSlope, out dw[i], out dd[i]);
+
+                if (halfW == null) halfW = dw;
+                if (depth == null)
+                {
+                    depth = dd;
+                    bed = RiverCourseSolver.SolveBedProfile(courseWorld, depth, carve.riverDefaultDepthM);
+                    if (!bed.valid) return;
+                }
+            }
+
+            // ---------------------------------------------------------------------------------
+            // WATER-PLANE WELDS. Every place this river's water meets other water, the two surfaces
+            // must be ONE level, or a step shows (water standing proud of the lake, or a tributary
+            // hanging above its main river). At each such end the bed, width and depth are blended
+            // over a run of channel so the waterline arrives exactly at the other water's level.
+            //   * river mouth in a lake or the ocean     -> waterline = that body's surface
+            //   * river source in a lake / pond          -> the lake is the SOURCE; first reach held at its level
+            //   * last node welded to another river      -> waterline = that river's waterline there
+            // The old mouth blend only pulled the BED to the lake surface, which left the river's WATER
+            // a full channel-depth ABOVE the lake - the step. The blend now targets the waterline.
+            // ---------------------------------------------------------------------------------
+            sourceBody = null; mouthBody = null;
+            float[] bedArr = bed.bedElevationM;
+            float[] arcArr = bed.arcM;
+            if (halfW == null) { halfW = new float[m]; for (int i = 0; i < m; i++) halfW[i] = carve.riverDefaultHalfWidthM; }
+            if (depth == null) { depth = new float[m]; for (int i = 0; i < m; i++) depth[i] = carve.riverDefaultDepthM; }
+
+            float blendRun = Mathf.Max(4f, confluenceBlendMetres);
+
+            if (joinsRiver == null && savedMouth != null && !savedMouth.IsLevelBody)
+            { joinsRiver = savedMouth; automaticMouthId = savedMouth.StableWaterBodyId; } // UC-T04-07: restore the saved receiving river after a reload.
+
+            UCWaterBody endBody;
+            float endLevel;
+            if (joinsRiver != null && TryGetRiverJoinLevel(joinsRiver, courseWorld[m - 1], out endLevel, out float mainHalf))
+            {
+                WeldChannelEnd(bedArr, arcArr, halfW, depth, endLevel, mainHalf, blendRun, false);
+            }
+            else if (savedMouth != null && savedMouth.IsLevelBody)
+            {
+                mouthBody = savedMouth;
+                WeldChannelEnd(bedArr, arcArr, halfW, depth, savedMouth.SurfaceWorldY(), 0f, blendRun, false);
+            }
+            else if (TryFindLevelBodyAt(courseWorld[m - 1], Mathf.Max(2f, halfW[m - 1] * 2f), out endBody, out endLevel))
+            {
+                mouthBody = endBody;
+                WeldChannelEnd(bedArr, arcArr, halfW, depth, endLevel, 0f, blendRun, false);
+            }
+
+            UCWaterBody startBody = null; float startLevel = 0;
+            // UC-T04-06: explicit source direction is resolved before taper/fitting, not only in a saved record.
+            var endpointNodes = OwnedRiverNodes();
+            var explicitSource = endpointNodes.Length > 0 && endpointNodes[0].connectJunction ? endpointNodes[0].junctionTarget : savedSource; // UC-T04-07: stable saved sources survive reload without proximity rebinding.
+            bool sourceFound = false;
+            if (SameJunctionScope(explicitSource) && explicitSource.kind != WaterBodyKind.Ocean)
+            {
+                startBody = explicitSource;
+                sourceFound = explicitSource.IsLevelBody ? RiverChannelSnapshot.Finite(startLevel = explicitSource.SurfaceWorldY())
+                    : TryGetRiverJoinLevel(explicitSource, courseWorld[0], out startLevel, out _);
+            }
+            else sourceFound = TryFindLevelBodyAt(courseWorld[0], Mathf.Max(2f, halfW[0] * 2f), out startBody, out startLevel);
+            if (sourceFound && startBody.kind != WaterBodyKind.Ocean)
+            {
+                sourceBody = startBody;
+                if (startBody.riverOutlets == null) startBody.riverOutlets = new List<UCWaterBody>();
+                if (!startBody.riverOutlets.Contains(this)) startBody.riverOutlets.Add(this);
+                WeldChannelEnd(bedArr, arcArr, halfW, depth, startLevel, 0f, blendRun, true);
+            }
+
+            // FOLLOWING: fit the water's width to the trench actually in the ground, so the ribbon never
+            // overhangs a bank (the "floating water" gap). Walk outward from the centreline until the
+            // ground rises above the waterline; the ribbon is as wide as the trench is at that level.
+            if (acceptedCourse != null)
+            {
+                // UC-T04-02/UC-T03-09: read mode consumes accepted bed/level without a second excavation flag.
+                if (depth == null) depth = new float[m];
+                if (halfW == null) halfW = new float[m];
+                for (int i = 0; i < m; i++)
+                { bedArr[i] = acceptedCourse[i].Bed.y; depth[i] = acceptedCourse[i].DepthMetres; halfW[i] = acceptedCourse[i].HalfWidthMetres; }
+            }
+            carve.followOnly = FollowTrench;
+
+            // UC-T04-06: an unfed manual spring introduces depth/width gradually;
+            // lake-fed and accepted procedural profiles keep their actual source geometry.
+            if (!FollowTrench && digTerrain && sourceBody == null)
+            {
+                float introduction = Mathf.Min(arcArr[m - 1] * 0.35f, Mathf.Max(2f, halfW[0] * 4f));
+                if (introduction > 0.001f)
+                    for (int i = 0; i < m && arcArr[i] < introduction; i++)
+                    {
+                        float weight = Mathf.SmoothStep(0, 1, arcArr[i] / introduction);
+                        float level = bedArr[i] + depth[i];
+                        depth[i] = Mathf.Lerp(Mathf.Min(0.02f, depth[i]), depth[i], weight);
+                        halfW[i] = Mathf.Lerp(Mathf.Min(0.15f, halfW[i]), halfW[i], weight);
+                        bedArr[i] = level - depth[i];
+                    }
+            }
+
+            // UC-T04-06: a short endpoint blend may dip below a feasible downstream
+            // level. Raise only that dip, in one bounded backward pass, while keeping
+            // both bed and waterline non-increasing and respecting source/ground caps.
+            if (!FollowTrench && (sourceBody != null || mouthBody != null || joinsRiver != null))
+                for (int i = m - 2; i >= 0; i--)
+                {
+                    float minimum = Mathf.Max(bedArr[i + 1], bedArr[i + 1] + depth[i + 1] - depth[i]);
+                    if (bedArr[i] >= minimum) continue;
+                    // A receiving waterline may submerge low mouth ground; the bed may reach that ground, without inventing ground above it.
+                    float ceiling = i == 0 && sourceBody != null ? startLevel - depth[i] : courseWorld[i].y;
+                    if (minimum > ceiling + 0.001f)
+                    { RiverSurfaceDiagnostic = $"Receiving/source level requires an uphill river bed above the available source/ground at station {i}."; return; }
+                    bedArr[i] = minimum;
+                }
+
+            // A genuinely uphill source/receiver pair remains invalid.
+            if (!FollowTrench)
+                for (int i = 1; i < m; i++)
+                    if (bedArr[i] > bedArr[i - 1] + 0.001f)
+                    { RiverSurfaceDiagnostic = $"Receiving/source level requires an uphill river bed at station {i}: {bedArr[i - 1]:F3} to {bedArr[i]:F3} m (source {bedArr[0]:F3}, mouth {bedArr[m - 1]:F3})."; return; } // UC-T04-06: report the actual infeasible span.
+
+            // Flood plain only where the nodes ask for it.
+            float[] flood = null;
+            if (nodeFloodPlain != null && nodeFloodPlain.Count == outline.Count)
+            {
+                bool allOne = true;
+                for (int i = 0; i < nodeFloodPlain.Count; i++) if (nodeFloodPlain[i] < 0.999f) { allOne = false; break; }
+                if (!allOne)
+                {
+                    RiverProfile fp = new RiverProfile();
+                    for (int i = 0; i < nodeFloodPlain.Count; i++) fp.halfWidthM.Add(Mathf.Max(0.001f, nodeFloodPlain[i]));
+                    BakedRiverProfile fb = fp.Bake(outline);
+                    if (fb != null)
+                    {
+                        flood = new float[m];
+                        for (int i = 0; i < m; i++)
+                        {
+                            float arcC = smoothTotal > 1e-4f ? (smoothArc[i] / smoothTotal) * fb.TotalLengthM : 0f;
+                            flood[i] = Mathf.Clamp01(fb.SampleAtArc(arcC).halfWidthM);
+                        }
+                    }
+                }
+            }
+
+            carve.riverRuggedness = ruggedness;
+            carve.riverSeed = naturalSeed;
+            carve.riverMaxRaiseM = maxBankRaiseMetres;
+            carve.SetRiverCourse(courseWorld, bed.bedElevationM, bed.arcM, halfW, depth);
+            carve.riverFloodWeight = flood;
+            FitWidthToTrench(!FollowTrench && digTerrain); // UC-T04-04: fit a separate read-only shape, using the prospective cut only before native reapplication.
+            CaptureWaterJunctions(); // UC-T04-05: persistent identity/direction/dimensions accompany every solved source/mouth.
+
+            // Publish this river's solved course so the graph's River Course Input node always has it,
+            // whatever order a regenerate runs in. A river that FOLLOWS a procedural trench publishes the
+            // mask only (no bed / depth), so the node never cuts a second trench beside the real one.
+            {
+                Vector2[] pxz = new Vector2[m];
+                for (int i = 0; i < m; i++) pxz[i] = new Vector2(courseWorld[i].x, courseWorld[i].z);
+                RiverCourseInputNode.ManualRiverCourse pub = new RiverCourseInputNode.ManualRiverCourse
+                {
+                    pointsXZ = pxz,
+                    halfWidthM = (float[])halfW.Clone(),
+                    bedY = FollowTrench || !digTerrain ? null : (float[])bedArr.Clone(), // UC-T04-02: body authority controls graph publication even with explicit dimensions/discharge.
+                    depthM = FollowTrench || !digTerrain ? null : (float[])depth.Clone()
+                };
+                RiverCourseInputNode.PublishBodyCourse(GetEntityId().GetHashCode(), pub);
+            }
+
+            // G-X1: per-node curvature so the carve skews the pool to the outer bank of a bend.
+            carve.SetRiverCurvature(RiverCourseSolver.SignedCurvature(courseWorld));
+        }
+
+        /// <summary>
+        /// Fits a separate surface profile to both wetted banks; absent terrain and unsupported geometry fail explicitly.
+        /// </summary>
+        private bool FitWidthToTrench(bool prospectiveCut)
+        {
+            riverSurfaceFit = null; riverShoreline = null;
+            if (carve == null || !carve.HasShape) return false;
+            Terrain[] terrains = Terrain.activeTerrains;
+            var world = CarveWorld;
+            bool read = FollowTrench;
+            bool Sample(float x, float z, out float y)
+            {
+                y = 0;
+                if (read) return world != null && RiverChannelRegistry.TrySampleGround(riverFitRun.WorldId, x, z, riverFitRun.Revision, out y, out var run) && run.Equals(riverFitRun);
+                if (!TrySampleSurfaceGround(terrains, world, x, z, out y)) return false;
+                if (prospectiveCut) y = carve.HeightAt(x, z, y);
+                return true;
+            }
+            if (!RiverCrossSectionFit.TryFitShoreline(carve.courseWorld, carve.riverBedY, carve.riverDepthM, carve.riverHalfWidth,
+                Sample, out var shoreline, out var diagnostic))
+            { RiverSurfaceDiagnostic = diagnostic; return false; }
+            // UC-T04-06: legacy width consumers receive the conservative half-width; mesh edges keep both actual banks.
+            var width = new float[shoreline.Course.Count];
+            for (int i = 0; i < width.Length; i++) width[i] = Mathf.Min(shoreline.Left[i], shoreline.Right[i]);
+            var fit = new WaterCarveLayer { enabled = false, followOnly = true, kind = WaterBodyKind.River };
+            fit.SetRiverCourse(shoreline.Course, shoreline.Bed, shoreline.Arc, width, shoreline.Depth);
+            riverShoreline = shoreline; riverSurfaceFit = fit; RiverSurfaceDiagnostic = string.Empty; return true;
+        }
+
+        // UC-T04-04: never use an authored Y as proof of ground coverage or sample another world's terrain.
+        private static bool TrySampleSurfaceGround(Terrain[] terrains, UniverseCreatorObject world, float x, float z, out float y)
+        {
+            y = 0;
+            if (terrains == null) return false;
+            foreach (Terrain terrain in terrains)
+            {
+                if (terrain == null || terrain.terrainData == null || terrain.GetComponentInParent<UniverseCreatorObject>(true) != world) continue;
+                Vector3 origin = terrain.transform.position, size = terrain.terrainData.size;
+                if (x < origin.x || z < origin.z || x > origin.x + size.x || z > origin.z + size.z) continue;
+                float u = (x - origin.x) / size.x, v = (z - origin.z) / size.z;
+                int holes = terrain.terrainData.holesResolution;
+                if (holes > 0 && terrain.terrainData.IsHole(Mathf.Min(holes - 1, (int)(u * holes)), Mathf.Min(holes - 1, (int)(v * holes)))) return false;
+                y = origin.y + terrain.terrainData.GetInterpolatedHeight(u, v);
+                return RiverChannelSnapshot.Finite(y);
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Blends one end of a channel so its WATERLINE arrives at <paramref name="level"/>, over
+        /// <paramref name="runMetres"/> of channel, and (for a river junction) widens it toward the
+        /// other channel's half-width. At the junction the waterline equals the other water exactly, so
+        /// the two surfaces are one plane; further back the blend eases out so the bed keeps its own
+        /// shape. Mutates the arrays.
+        /// </summary>
+        private static void WeldChannelEnd(float[] bed, float[] arc, float[] halfW, float[] depth,
+                                           float level, float otherHalfWidth, float runMetres, bool atStart)
+        {
+            int m = bed.Length;
+            if (m < 2 || arc == null || arc.Length != m) return;
+            float total = arc[m - 1];
+            int end = atStart ? 0 : m - 1;
+
+            float delta = level - (bed[end] + depth[end]);          // how far the waterline must move
+            float run = Mathf.Max(1f, Mathf.Min(runMetres, total));
+
+            for (int i = 0; i < m; i++)
+            {
+                float d = atStart ? arc[i] : total - arc[i];
+                if (d > run) continue;
+                float u = Mathf.SmoothStep(0f, 1f, 1f - d / run);   // 1 at the weld, 0 at the run's far end
+                bed[i] += delta * u;
+                if (otherHalfWidth > 0f)
+                    halfW[i] = Mathf.Lerp(halfW[i], Mathf.Max(halfW[i], 0.9f * otherHalfWidth), u);
+            }
+        }
+
+        /// <summary>Reads a prepared receiving river's local level and width without recursively rebuilding it.</summary>
+        private bool TryGetRiverJoinLevel(UCWaterBody main, Vector3 endWorld, out float waterlineY, out float halfWidthM)
+        {
+            waterlineY = 0f; halfWidthM = 0f;
+            if (!SameJunctionScope(main) || main.shape != ShapeMode.RiverSpline) return false; // UC-T04-05: reject foreign-world receiver lookups.
+            if (main.joinsRiver == this) return false;                         // A joins B joins A
+
+            // UC-T04-07: the explicit dependency owner prepares receivers before incoming rivers.
+            if (main.carve == null || !main.carve.isRiver) return false;
+
+            float bedY, lat;
+            return main.carve.TryRiverSurfaceAt(endWorld.x, endWorld.z, out waterlineY, out bedY, out halfWidthM, out lat);
+        }
+
+        /// <summary>The lake / pond / ocean whose water covers (or is within slack of) a world point,
+        /// with its surface level. Uses the body's real shore ring, not a bounding radius, so a river
+        /// that merely passes near a lake's bounding circle is not mistaken for entering it.</summary>
+        private bool TryFindLevelBodyAt(Vector3 world, float slackMetres, out UCWaterBody found, out float surfaceY)
+        {
+            found = null; surfaceY = 0f;
+            UCWaterBody[] bodies = ScopedJunctionBodies(); // UC-T04-06: scope by actual world/scene, not sibling organization.
+
+            float bestD = float.MaxValue;
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                UCWaterBody b = bodies[i];
+                if (!SameJunctionScope(b) || !b.IsLevelBody) continue; // UC-T04-05: level-footprint overlap alone cannot connect different worlds.
+
+                List<Vector3> ring = b.WorldShoreRing();
+                float d;
+                if (ring != null && ring.Count >= 3)
+                {
+                    bool inside = PointInRingXZ(ring, world.x, world.z);
+                    if (inside) d = 0f;
+                    else
+                    {
+                        Vector3 q;
+                        d = NearestOnPolyline(ring, true, world, out q)
+                            ? Mathf.Sqrt((q.x - world.x) * (q.x - world.x) + (q.z - world.z) * (q.z - world.z))
+                            : float.MaxValue;
+                    }
+                }
+                else continue; // UC-T04-06: a bounding circle is not a receiving shoreline.
+
+                if (d <= slackMetres && Mathf.Abs(d - bestD) <= 0.001f)
+                { WaterJunctionDiagnostic = "River endpoint has ambiguous standing-water receivers."; found = null; return false; }
+                if (d <= slackMetres && d < bestD) { bestD = d; found = b; surfaceY = b.SurfaceWorldY(); }
+            }
+            return found != null;
+        }
+
+        /// <summary>
+        /// Finds a lake/ocean/pool whose footprint the river mouth reaches and returns
+        /// its water-surface elevation, for the step-7 mouth blend. Scans sibling water
+        /// bodies under the same parent (the WaterSystem root); self and other rivers
+        /// are skipped. Returns false when the mouth ends in dry land.
+        /// </summary>
+        private bool TryFindMouthJoinSurface(Vector3 mouthWorld, out float surfaceY)
+        {
+            surfaceY = 0f;
+
+            Transform root = transform.parent != null ? transform.parent : transform;
+            UCWaterBody[] bodies = root.GetComponentsInChildren<UCWaterBody>(true);
+
+            Vector2 mouthXZ = new Vector2(mouthWorld.x, mouthWorld.z);
+            float best = float.MaxValue;
+            bool found = false;
+
+            for (int i = 0; i < bodies.Length; i++)
+            {
+                UCWaterBody b = bodies[i];
+                if (b == null || b == this) continue;
+                if (!b.IsLevelBody) continue;   // only a still body receives a river mouth
+
+                Vector3 c = b.transform.position;
+                float reach = b.JoinReachMetres();
+                float d = Vector2.Distance(mouthXZ, new Vector2(c.x, c.z));
+                if (d <= reach + MouthJoinSlackMetres && d < best)
+                {
+                    best = d;
+                    surfaceY = b.SurfaceWorldY();
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>Slack past a body's reach within which a river mouth still counts as joining it.</summary>
+        private const float MouthJoinSlackMetres = 5f;
+
+        /// <summary>
+        /// How far this body's edge reaches from its own origin, in metres - a Polygon
+        /// from its outline, a Rectangle from half its footprint. Used to decide whether
+        /// a river mouth has arrived at it.
+        /// </summary>
+        public float JoinReachMetres()
+        {
+            if (shape == ShapeMode.Polygon && outline != null && outline.points != null && outline.Count > 0)
+            {
+                float reach = 0f;
+                for (int i = 0; i < outline.points.Count; i++)
+                {
+                    Vector3 p = outline.points[i];
+                    float d = Mathf.Sqrt(p.x * p.x + p.z * p.z);
+                    if (d > reach) reach = d;
+                }
+                return reach;
+            }
+            return 0.5f * Mathf.Max(sizeMetres.x, sizeMetres.y);
         }
 
         /// <summary>Protect a hand-adjusted body from the next regeneration. The
@@ -1040,541 +2089,49 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public bool OnTerrainSettled()
         {
-            if (!isActiveAndEnabled || !digTerrain) return false;
-            if (onRegenerate != ProceduralResponse.RefitAutomatically) return false;
-
-            // WaitForBuild and HoldPlacement both mean "do not move", and a body with
-            // no graph node behind it has no automatic trigger by the user's own rule:
-            // no node connected means press Build again.
-            if (!IsGraphLinked) return false;
-
-            if (shape != ShapeMode.RiverSpline) return false;
-
-            // There has to be a course before there is ground under it to probe. After
-            // a domain reload there is not, and solving here is what gives the compare
-            // below something to measure.
-            if (!EnsureSolvedCourse()) return false;
-
-            float[] now = SampleFittedGround();
-
-            // NO UNDUG RECORD, NO MOVEMENT.
-            //
-            // Without one the only ground available is the live terrain, which already
-            // carries this river's own channel - and fitting a course to its own channel
-            // is how a river sinks a depth deeper on every pass. Declining costs a
-            // re-fit that waits until the cell is baked again. Accepting would cost the
-            // shape of the river. Same trade, and the same reasoning, as
-            // Chunk.bakedThisSession.
-            if (now == null) return false;
-
-            // The course is derived from this ground and nothing else, so unchanged
-            // ground means the solve would return the answer it already has. Saying no
-            // here is what keeps 25 settles from doing 25 identical re-fits.
-            if (GroundProbesMatch(fittedGround, now)) return false;
-
-            BuildDig(false);
-            return true;
+            // River auto-refit has been removed. Lakes, pools and oceans use
+            // HoldPlacement - their footprint is a placement, re-cut in place by the
+            // chunk build - so no body re-fits its route on settle and nothing here
+            // owes the terrain a re-cut.
+            return false;
         }
 
-        /// <summary>
-        /// The river channel: a course in world space carrying a width, a depth and a
-        /// water surface elevation at every point.
-        ///
-        /// The surface profile is the same one the mesh uses - sampled from the
-        /// ground, forced never to run uphill, then smoothed - so the water plane and
-        /// the channel under it are derived from one set of numbers and cannot
-        /// disagree. That is what makes the river sit IN its bed rather than above it.
-        ///
-        /// Width and depth are per node with inheritance, so one river can be a
-        /// shallow scrape at its head and a deep run at its mouth without being cut
-        /// into three separate bodies.
-        /// </summary>
-        private void BuildRiverDig()
-        {
-            carve.isCourse = true;
-            carve.profile = BedProfile.RiverChannel;
-            carve.bankExponent = bankProfile;
-            carve.shelfFraction = shelfFraction;
-            carve.maxDepthMetres = channelDepthMetres;
-
-            // THE VALLEY (T17a) is already in carve: the shared setup above writes
-            // ValleyCorridorMetres, which derives a river's corridor from its own width
-            // whenever no absolute metres are typed, because a valley floor scales with
-            // the channel that cut it - the same reasoning that sizes width from
-            // catchment.
-            //
-            // Before that derivation existed, the field's 0 default left the corridor
-            // OFF for every river, procedural and hand-placed alike: past the bevel the
-            // dig handed back raw generated ground, so a channel crossing a hillside
-            // read as a slot sawn through a cliff rather than a river in a valley. A
-            // level body is untouched - a lake's shore is its bevel.
-
-            carve.ruggednessMetres = bedRuggednessMetres;
-            carve.ruggednessFeatureMetres = ruggednessFeatureMetres;
-            carve.ruggednessOctaves = ruggednessOctaves;
-            carve.ruggednessPersistence = ruggednessPersistence;
-            carve.ruggednessCalmMetres = ruggednessCalmMetres;
-
-            if (!SolveRiverCourse()) return;
-
-            for (int i = 0; i < solvedPoints.Count; i++)
-            {
-                carve.coursePoints.Add(solvedPoints[i]);
-                carve.courseWidths.Add(Mathf.Max(0.2f, solvedWidths[i]));
-                carve.courseDepths.Add(Mathf.Max(0.05f, solvedDepths[i]));
-                carve.courseSurfaceY.Add(solvedSurfaceY[i]);
-            }
-        }
-
-        // =====================================================================
-        //  THE SOLVED COURSE
-        //
-        //  The channel and the water in it are two views of one river, and they
-        //  are built by two different methods a thousand lines apart. Let each
-        //  work the course out for itself and they drift: the mesh resamples the
-        //  raw spline while the dig resamples a valley-fitted one, and the result
-        //  is a ribbon of water lying beside the trench that was cut for it.
-        //
-        //  So the course is solved once and both read the answer. This is the only
-        //  place the fitted geometry of a river exists.
-        // =====================================================================
-
-        [System.NonSerialized] private List<Vector3> solvedPoints;
-        [System.NonSerialized] private List<float> solvedWidths;
-        [System.NonSerialized] private List<float> solvedDepths;
-        [System.NonSerialized] private float[] solvedSurfaceY;
-
-        /// <summary>Throws away the last solve, so the next thing that needs the course
-        /// re-fits it against the ground as it is now.</summary>
-        private void InvalidateSolvedCourse()
-        {
-            solvedPoints = null;
-            solvedWidths = null;
-            solvedDepths = null;
-            solvedSurfaceY = null;
-        }
-
-        /// <summary>Solves the course if it has not been solved since the last change.</summary>
-        private bool EnsureSolvedCourse()
-        {
-            if (solvedPoints != null && solvedPoints.Count >= 2) return true;
-            return SolveRiverCourse();
-        }
-
-        // =====================================================================
-        //  "DID THE GROUND ACTUALLY MOVE?"
-        //
-        //  A settle happens once per chunk that finishes, so a 25-cell world
-        //  settles 25 times per build. Re-fitting on all of them means re-solving
-        //  the course, rebuilding the water mesh and rewriting every chunk the
-        //  river crosses, 25 times over, to reach the same answer the first pass
-        //  already had - and, while the solve was reading the live terrain, to
-        //  reach a DIFFERENT and steadily deeper answer each time.
-        //
-        //  So a body keeps a record of the ground it is currently fitted to and
-        //  compares before it moves. The record is the undug ground, which only
-        //  changes when a cell is genuinely re-baked - which is exactly and only
-        //  when a re-fit is owed.
-        // =====================================================================
-
-        // x, z and undug ground height per probe, in course order. Null means "not
-        // fitted to anything I can verify": either nothing has been baked yet, or part
-        // of the course sits on a cell with no undug record. Not serialised - it
-        // describes this session's terrain, and claiming it survived a reload is the
-        // mistake Chunk.bakedThisSession exists to refuse.
-        [System.NonSerialized] private float[] fittedGround;
-
-        // Enough to catch a valley moving under any part of a course, cheap enough to
-        // take on every settle. A long river solves to a few hundred points, so this
-        // samples roughly every third or fourth one.
-        private const int MaxGroundProbes = 96;
-
-        // A centimetre. Below this the ground did not move, it was re-quantised by the
-        // 16-bit heightmap it came back through.
-        private const float GroundProbeEpsilon = 0.01f;
-
-        // Where across the bevel corridor the containment pass looks for the bank, as
-        // fractions of the bevel out from the channel edge. The waterline itself, the
-        // middle of the blend, and the far edge where the corridor gives way to
-        // untouched ground: three samples per side is enough to catch a bank that falls
-        // away, and few enough that a several-hundred-node river still solves in one
-        // frame. See ContainToBanks.
-        private static readonly float[] BankProbeFractions = { 0f, 0.5f, 1f };
-
-        /// <summary>
-        /// The undug ground along the solved course, or null when it cannot all be
-        /// read.
-        /// </summary>
-        /// <remarks>
-        /// All or nothing on purpose. A partial baseline would compare the half of a
-        /// course it can still see against the half that moved and call that unchanged,
-        /// which is a river left cutting a trench across a hillside.
-        /// </remarks>
-        private float[] SampleFittedGround()
-        {
-            if (solvedPoints == null || solvedPoints.Count < 2) return null;
-
-            UniverseCreatorObject world = CarveWorld;
-            ChunkManager chunks = world != null ? world.Chunks : null;
-            if (chunks == null) return null;
-
-            int n = solvedPoints.Count;
-            int stride = Mathf.Max(1, Mathf.CeilToInt(n / (float)MaxGroundProbes));
-
-            List<float> probe = new List<float>();
-
-            for (int i = 0; i < n; i += stride)
-            {
-                Vector3 p = solvedPoints[i];
-
-                float y;
-                if (!chunks.TrySampleGraphHeight(p.x, p.z, out y)) return null;
-
-                probe.Add(p.x);
-                probe.Add(p.z);
-                probe.Add(y);
-            }
-
-            return probe.Count > 0 ? probe.ToArray() : null;
-        }
-
-        /// <summary>
-        /// True when two probes describe the same ground under the same course, so the
-        /// solve would return the answer it already returned.
-        /// </summary>
-        /// <remarks>
-        /// Written as !(diff &lt;= eps) rather than (diff &gt; eps) deliberately. A NaN
-        /// difference fails every comparison it is put through, so the &gt; form would
-        /// read it as "close enough" and skip a re-fit the world may well owe. This way
-        /// a NaN reports movement, which errs towards doing the work rather than
-        /// towards silently not doing it.
-        ///
-        /// Public because it is the whole gate, and a gate that decides whether the
-        /// terrain gets rewritten is worth a test.
-        /// </remarks>
-        public static bool GroundProbesMatch(float[] a, float[] b)
-        {
-            if (a == null || b == null) return false;
-            if (a.Length != b.Length || a.Length == 0) return false;
-
-            for (int i = 0; i < a.Length; i++)
-                if (!(Mathf.Abs(a[i] - b[i]) <= GroundProbeEpsilon)) return false;
-
-            return true;
-        }
-
-        /// <summary>
-        /// Fits the drawn line to the ground, carries it into whatever it joins, and
-        /// works out the water surface along the result.
-        /// </summary>
-        private bool SolveRiverCourse()
-        {
-            InvalidateSolvedCourse();
-
-            // The world's chunk manager is looked up again for this solve. Holding it
-            // across solves would survive a domain reload as a dead reference and send
-            // every ground query to the fallback without saying so.
-            groundSourceResolved = false;
-
-            List<float> widths;
-            List<float> depths;
-            List<Vector3> world = WorldCourse(out widths, out depths);
-            if (world == null || world.Count < 2) return false;
-
-            // Junctions extend the course onto whatever it meets, so the channel is
-            // actually cut all the way to the water it empties into rather than
-            // stopping a few metres short with a bank between them.
-            ExtendToJunction(world, widths, depths, false);
-            ExtendToJunction(world, widths, depths, true);
-
-            int n = world.Count;
-            float[] surf = new float[n];
-
-            for (int i = 0; i < n; i++)
-                surf[i] = RawSurfaceAt(world[i]);
-
-            // Water cannot run uphill. Without this a course drawn across a rise
-            // produces a river that climbs it, and a channel dug to match would be a
-            // trench going up a hill with water in it.
-            EnforceDownhill(surf);
-
-            // A raw ground sample gives a stepped surface that reads as a staircase of
-            // tiny waterfalls. A real river surface is smooth even where its bed is not.
-            for (int pass = 0; pass < profileSmoothing; pass++)
-            {
-                // Endpoints held: smoothing them would drag the mouth off the level it
-                // was placed at, and the mouth is the end a designer cares about.
-                for (int i = 1; i < n - 1; i++)
-                    surf[i] = (surf[i - 1] + surf[i] * 2f + surf[i + 1]) * 0.25f;
-            }
-
-            // Again after smoothing: the average of a step can lift a point above its
-            // upstream neighbour, and one uphill metre reads as water running the wrong way.
-            EnforceDownhill(surf);
-
-            // Then hold the water inside its own banks, which is the only place the
-            // hanging-water fault can be fixed. See ContainToBanks.
-            ContainToBanks(world, widths, depths, surf);
-            EnforceDownhill(surf);
-
-            // Last, so nothing downstream of here can pull the mouth back off the
-            // level of the body it joins. A step of even a few centimetres at a
-            // junction is visible as a seam between two water planes.
-            BlendJunction(world, surf, depths, true);
-            BlendJunction(world, surf, depths, false);
-
-            solvedPoints = world;
-            solvedWidths = widths;
-            solvedDepths = depths;
-            solvedSurfaceY = surf;
-
-            return true;
-        }
-
-        /// <summary>
-        /// The water surface elevation a course point implies, before the solve's
-        /// downhill, smoothing, containment and junction passes get hold of it.
-        /// </summary>
-        /// <remarks>
-        /// A flat-floor river measures its surface down from the line as drawn and never
-        /// asks the terrain anything - that is the whole point of the mode, and it is why
-        /// Y is preserved through the reroute. Every other mode reads the ground, because
-        /// a real river's elevation is set by the land it crosses and not by where a
-        /// spline was dropped.
-        ///
-        /// One implementation, called by the solve and by the inspector's per-node
-        /// readout. They disagreed before: the readout showed the raw local Y of the
-        /// point, which in every mode but flat-floor is discarded here, so the elevation
-        /// box in the node panel displayed a number that changed nothing and bore no
-        /// relation to where the water actually was.
-        /// </remarks>
-        private float RawSurfaceAt(Vector3 world)
-        {
-            float ground = bedSource == BedSource.FlatFloor
-                ? world.y - flatFloorDepthMetres
-                : SampleGround(world.x, world.z);
-
-            return ground + surfaceOffsetMetres;
-        }
-
-        /// <summary>
-        /// Makes the surface profile monotonically non-increasing from head to mouth.
-        /// </summary>
-        /// <remarks>
-        /// One implementation, called at each of the three points in the solve where the
-        /// profile can have been lifted: after the ground samples, after smoothing, and
-        /// after containment. Three copies of the same two lines is how they end up
-        /// disagreeing when one of them is later changed.
-        /// </remarks>
-        private void EnforceDownhill(float[] surf)
-        {
-            if (!enforceDownhill || surf == null) return;
-
-            for (int i = 1; i < surf.Length; i++)
-                if (surf[i] > surf[i - 1]) surf[i] = surf[i - 1];
-        }
-
-        /// <summary>
-        /// Lowers the water surface to whatever its own banks can actually hold.
-        /// </summary>
-        /// <remarks>
-        /// THE FAULT THIS FIXES
-        /// A river's surface is authored from the ground under its CENTRELINE. Where the
-        /// course runs along a hillside rather than down a valley floor, the ground one
-        /// bank width out on the low side is below that centreline - so the water plane
-        /// stands over open ground and the terrain never comes up to meet it. That is the
-        /// reported water hanging in the air with a gap at the bank.
-        ///
-        /// WHY IT CANNOT BE FIXED IN THE CARVE
-        /// WaterCarveLayer is cut-only, on purpose: it may pull a bank down to the
-        /// waterline but never push one up, because raising ground would build a dam
-        /// around every pond dropped on a slope. So the bank cannot rise to the water,
-        /// which leaves exactly one honest answer - the water comes down to the bank.
-        /// That is also what real water does: a channel's stage cannot exceed its lowest
-        /// containing bank, because past that point it spills over it.
-        ///
-        /// HOW THE BANK IS FOUND
-        /// Sampled perpendicular to the local flow direction, both sides, out across the
-        /// bevel corridor - the same reach WaterCarveLayer blends over, so what is
-        /// measured here is precisely what gets cut there. The lowest sample is the
-        /// containing level.
-        ///
-        /// WHY THE DROP IS CAPPED
-        /// Where a hillside falls further over one bank width than the channel is deep,
-        /// the course is not on a river's ground at all, and following it down would
-        /// gouge a canyon instead of cutting a channel. So the drop stops at one channel
-        /// depth below the centreline. A gap can survive that cap, and this is the right
-        /// place for it to survive: no surface elevation contains water on a slope that
-        /// steep - the course is in the wrong place, and the valley seek is what moves it.
-        ///
-        /// A flat-floor river is excluded because it measures itself from the drawn line
-        /// and never asks the terrain anything, which is the entire point of that mode.
-        /// </remarks>
-        private void ContainToBanks(List<Vector3> world, List<float> widths,
-                                    List<float> depths, float[] surf)
-        {
-            if (bedSource == BedSource.FlatFloor) return;
-            if (world == null || surf == null || world.Count != surf.Length) return;
-
-            int n = world.Count;
-            float bevel = Mathf.Max(0f, shoreBevelMetres);
-
-            for (int i = 0; i < n; i++)
-            {
-                // Plan-view bank normal: perpendicular to the flow through this node.
-                // Taken across the neighbours rather than from one segment, so a node on
-                // a bend measures the bank of the curve instead of the bank of whichever
-                // segment it happens to be indexed against.
-                Vector3 a = world[i > 0 ? i - 1 : 0];
-                Vector3 b = world[i < n - 1 ? i + 1 : n - 1];
-
-                float tx = b.x - a.x;
-                float tz = b.z - a.z;
-                float len = Mathf.Sqrt(tx * tx + tz * tz);
-                if (len < 1e-4f) continue;
-
-                float nx = -tz / len;
-                float nz = tx / len;
-
-                float half = 0.5f * Mathf.Max(0.2f, widths != null && i < widths.Count
-                                                        ? widths[i] : 1f);
-
-                float centre = SampleGround(world[i].x, world[i].z);
-                float depth = Mathf.Max(0.5f, depths != null && i < depths.Count
-                                                  ? depths[i] : 1f);
-
-                float lowest = surf[i];
-
-                for (int s = 0; s < BankProbeFractions.Length; s++)
-                {
-                    float reach = half + bevel * BankProbeFractions[s];
-
-                    float left = SampleGround(world[i].x + nx * reach,
-                                              world[i].z + nz * reach);
-                    float right = SampleGround(world[i].x - nx * reach,
-                                               world[i].z - nz * reach);
-
-                    if (left < lowest) lowest = left;
-                    if (right < lowest) lowest = right;
-                }
-
-                float limit = centre - depth;
-                if (lowest < limit) lowest = limit;
-
-                if (lowest < surf[i]) surf[i] = lowest;
-            }
-        }
-
-        // =====================================================================
-        //  JUNCTIONS
-        //
-        //  A river has to arrive somewhere. Left alone it ends in mid-terrain with
-        //  a wall of ground between its last cross-section and the lake it was
-        //  drawn towards, and no amount of tuning the channel fixes that, because
-        //  the problem is that the two bodies were never told about each other.
-        // =====================================================================
-
-        /// <summary>
-        /// Walks the course out to the edge of the body it joins, adding points at the
-        /// authored spacing so the dig carries on into the junction.
-        /// </summary>
-        private void ExtendToJunction(List<Vector3> world, List<float> widths,
-                                      List<float> depths, bool downstream)
-        {
-            UCWaterBody target = ResolveJoin(downstream);
-            if (target == null) return;
-            if (world.Count == 0) return;
-
-            int end = downstream ? world.Count - 1 : 0;
-            Vector3 from = world[end];
-
-            Vector3 snapped;
-            float targetY, targetDepth;
-            if (!target.NearestEdgePoint(from, joinBlendMetres, out snapped, out targetY, out targetDepth))
-                return;
-
-            float gap = new Vector2(snapped.x - from.x, snapped.z - from.z).magnitude;
-            if (gap < 0.25f) return;
-
-            // Beyond this the two bodies are not neighbours and joining them would
-            // trench a channel across whatever happens to lie between. Left alone
-            // rather than forced, so the fix is to drag the spline closer.
-            float reach = Mathf.Max(50f, joinBlendMetres * 4f);
-            if (gap > reach) return;
-
-            int steps = Mathf.Max(1, Mathf.CeilToInt(gap / Mathf.Max(0.5f, pointSpacingMetres)));
-
-            for (int s = 1; s <= steps; s++)
-            {
-                float t = s / (float)steps;
-                Vector3 p = Vector3.Lerp(from, snapped, t);
-
-                if (downstream)
-                {
-                    world.Add(p);
-                    widths.Add(widths[widths.Count - 1]);
-                    depths.Add(depths[depths.Count - 1]);
-                }
-                else
-                {
-                    // Inserted at the head in increasing t, which lands them in
-                    // upstream-first order with the snapped point at index 0.
-                    world.Insert(0, p);
-                    widths.Insert(0, widths[0]);
-                    depths.Insert(0, depths[0]);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Eases the surface and the depth into the body being joined over the blend
-        /// distance, so the channel does not arrive as a step.
-        /// </summary>
-        private void BlendJunction(List<Vector3> world, float[] surf, List<float> depths,
-                                   bool downstream)
-        {
-            UCWaterBody target = ResolveJoin(downstream);
-            if (target == null) return;
-
-            int n = world.Count;
-            if (n < 2) return;
-
-            int end = downstream ? n - 1 : 0;
-
-            Vector3 snapped;
-            float targetY, targetDepth;
-            if (!target.NearestEdgePoint(world[end], joinBlendMetres, out snapped, out targetY, out targetDepth))
-                return;
-
-            float blend = Mathf.Max(0.01f, joinBlendMetres);
-
-            float travelled = 0f;
-            int step = downstream ? -1 : 1;
-
-            for (int i = end; i >= 0 && i < n; i += step)
-            {
-                if (i != end)
-                {
-                    Vector3 a = world[i];
-                    Vector3 b = world[i - step];
-                    travelled += new Vector2(b.x - a.x, b.z - a.z).magnitude;
-                }
-
-                if (travelled > blend) break;
-
-                // 1 at the junction, 0 a blend-length back up the river. Smoothstep
-                // rather than linear so the surface arrives tangent instead of with a
-                // crease at the point the blend runs out.
-                float w = Mathf.SmoothStep(0f, 1f, 1f - travelled / blend);
-
-                surf[i] = Mathf.Lerp(surf[i], targetY, w);
-
-                // Deepen only. A river meeting a lake should reach the lake's bed, but
-                // a deep river meeting a shallow shore must not be filled in.
-                if (joinMatchesDepth && targetDepth > depths[i])
-                    depths[i] = Mathf.Lerp(depths[i], targetDepth, w);
-            }
-        }
+        // River channel dig was removed in the Phase 0 teardown and then REBUILT:
+        // BuildRiverDig is live again (defined ~line 1033, called from the shape
+        // dispatch ~line 1018) and digs the manual spline channel. What stayed gone
+        // is ConfineTargetAt and the standalone course solver's internals (see the
+        // block below). Lake/ocean digs are built by BuildLevelDig below.
+
+        // The solved-course machinery (solved* arrays, the WaterfallReach struct,
+        // the course solver and its cascade detection) was removed in the river
+        // teardown.
+
+        // The river course solver and all of its helpers (SolveRiverCourse,
+        // BuildBankAwareReadChannel, DetectCascades, BuildManualCascades,
+        // RawSurfaceAt, EnforceDownhill, ApplyCoastalTaper, ContainToBanks, the
+        // junction extension/blend, hydraulic geometry and node-series sampling)
+        // were removed in the river teardown. Rivers are being rebuilt from
+        // scratch; lake/ocean level bodies never used this machinery.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        // ExtendToJunction and BlendJunction (river-only course welding onto the
+        // body a mouth/head joins) were removed in the river teardown.
+
+
 
         /// <summary>
         /// Closest point on this body's water edge to a world position, with the
@@ -1588,25 +2145,35 @@ namespace UniverseCreator.TerrainSystem
                                      out Vector3 point, out float surfaceY, out float depthAtJoin)
         {
             point = fromWorld;
-            surfaceY = transform.position.y + surfaceOffsetMetres;
+            surfaceY = SurfaceWorldY();
             depthAtJoin = 0f;
-
-            if (shape == ShapeMode.RiverSpline)
-            {
-                List<Vector3> line = ToWorld(course);
-                if (line == null || line.Count < 2) return false;
-
-                if (!NearestOnPolyline(line, false, fromWorld, out point)) return false;
-
-                surfaceY = SampleGround(point.x, point.z) + surfaceOffsetMetres;
-                depthAtJoin = Mathf.Max(0.05f, channelDepthMetres);
-                return true;
-            }
 
             List<Vector3> ring = WorldShoreRing();
             if (ring == null || ring.Count < 3) return false;
 
-            if (!NearestOnPolyline(ring, true, fromWorld, out point)) return false;
+            // Refinement #4 (P3) - a river joining a LAKE snaps to the nearest lake POLYGON
+            // NODE, not to an interpolated point along an edge. A polygon lake's ring IS its
+            // authored outline (WorldShoreRing returns ToWorld(outline) for a Polygon), so its
+            // vertices are exactly the nodes the author dropped. Landing the mouth on a node
+            // makes the two bodies touch where the lake was actually pinned, so they read as
+            // one sheet instead of the river ending at a gizmo edge a little off the node. The
+            // OCEAN carries no node connection (the author never places its outline the same
+            // way), and a rectangle has no meaningful "nodes", so both keep the edge-point snap.
+            if (shape == ShapeMode.Polygon && kind != WaterBodyKind.Ocean)
+            {
+                int best = -1;
+                float bestD2 = float.MaxValue;
+                for (int i = 0; i < ring.Count; i++)
+                {
+                    float ex = fromWorld.x - ring[i].x;
+                    float ez = fromWorld.z - ring[i].z;
+                    float d2 = ex * ex + ez * ez;
+                    if (d2 < bestD2) { bestD2 = d2; best = i; }
+                }
+                if (best < 0) return false;
+                point = ring[best];
+            }
+            else if (!NearestOnPolyline(ring, true, fromWorld, out point)) return false;
 
             // How deep this basin is one blend-length in from its own shore. A river
             // arriving at a lake should be as deep as the lake is where it arrives,
@@ -1662,13 +2229,12 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         private void BuildLevelDig()
         {
-            carve.isCourse = false;
             carve.profile = bedProfile;
             carve.bankExponent = bankProfile;
             carve.shelfFraction = shelfFraction;
             carve.maxDepthMetres = digDepthMetres;
             carve.shoreRunMetres = shoreRunMetres;
-            carve.surfaceY = transform.position.y + surfaceOffsetMetres;
+            carve.surfaceY = SurfaceWorldY();
 
             // What stops the basin being a funnel with a point at the bottom. The
             // depth still increases inward from every part of the shore, but it does
@@ -1687,7 +2253,44 @@ namespace UniverseCreator.TerrainSystem
             List<Vector3> ring = WorldShoreRing();
             if (ring == null || ring.Count < 3) return;
 
+            // A governing dam impounds only the upstream side of its line, so the basin is
+            // cut there and not through the wall. Clipping the ring here - the one place the
+            // dig's bound is built - keeps the excavation, the island mask and the mesh cull
+            // all reading the same clipped footprint. Fewer than three points left means the
+            // dam holds back nothing placed here, and the dig honestly cuts nothing.
+            if (damGoverned)
+            {
+                ClipRingUpstream(ring);
+                if (ring.Count < 3) return;
+            }
+
             for (int i = 0; i < ring.Count; i++) carve.ringPoints.Add(ring[i]);
+
+            // UC-T08-15: capture axes once per accepted ring; samples reuse the shared immutable formation tables.
+            carve.PrepareLakeFormation(lakeFormation, lakeSedimentation);
+
+            // PER-RING-NODE DEPTH (the rugged basin). A Polygon lake's ring points are
+            // its outline points in order (WorldShoreRing returns ToWorld(outline)), so
+            // nodeDepthMetres[i] describes ring node i: a border node over the deep
+            // trough asks for a large depth, one on a shelf a small one, and the carve
+            // eases between them round the shore (RingDepthAt). Same carry-forward rule
+            // as a river's node depths - 0 means "not set here", inheriting the last
+            // authored value and finally digDepthMetres - so a designer types depths
+            // only where the bed actually changes. Left empty for a Rectangle (four
+            // corners, no meaningful per-node bed) and when nothing is authored, and
+            // then RingDepthAt falls back to the flat digDepthMetres exactly as before.
+            if (!damGoverned && shape == ShapeMode.Polygon &&
+                nodeDepthMetres != null && nodeDepthMetres.Count > 0 &&
+                ring.Count == (outline != null ? outline.Count : -1))
+            {
+                float carried = Mathf.Max(0.05f, digDepthMetres);
+                for (int i = 0; i < ring.Count; i++)
+                {
+                    float v = i < nodeDepthMetres.Count ? nodeDepthMetres[i] : 0f;
+                    if (v > 1e-4f) carried = v;
+                    carve.ringDepths.Add(carried);
+                }
+            }
 
             // Keep large projections inside the ring as islands; the carve steps around
             // them and the water routes around them. Small ones carry no mask and are
@@ -1721,6 +2324,52 @@ namespace UniverseCreator.TerrainSystem
             rect.Add(transform.TransformPoint(new Vector3(-hx, 0f,  hz)));
 
             return rect;
+        }
+
+        /// <summary>
+        /// Clips a shore ring to the upstream side of a governing dam's line, in place.
+        ///
+        /// Sutherland-Hodgman against the single half-plane (p - barrierCentre) . upstreamNormal
+        /// >= 0: vertices on the impounded side are kept, and each edge that crosses the line
+        /// contributes its intersection point, so the ring closes cleanly along the wall. The
+        /// same predicate the mesh cull and the tool's own flood fill use, so all three agree on
+        /// which side the water is. Fewer than three points left means the body lies wholly
+        /// downstream and impounds nothing - the honest zero of a dam holding back no placed lake.
+        /// Only called while <see cref="damGoverned"/>.
+        /// </summary>
+        private void ClipRingUpstream(List<Vector3> ring)
+        {
+            if (ring == null || ring.Count < 3) return;
+
+            List<Vector3> kept = new List<Vector3>(ring.Count + 2);
+            float cx = damBarrierCentre.x, cz = damBarrierCentre.y;
+            float nx = damUpstreamNormal.x, nz = damUpstreamNormal.y;
+
+            for (int i = 0; i < ring.Count; i++)
+            {
+                Vector3 cur = ring[i];
+                Vector3 prev = ring[(i - 1 + ring.Count) % ring.Count];
+
+                float dCur = (cur.x - cx) * nx + (cur.z - cz) * nz;
+                float dPrev = (prev.x - cx) * nx + (prev.z - cz) * nz;
+                bool curIn = dCur >= 0f;
+                bool prevIn = dPrev >= 0f;
+
+                // Signs differ => the edge crosses the line and dPrev - dCur is non-zero, so the
+                // parameter is safe from a divide by zero; equal signs never take that branch.
+                if (curIn)
+                {
+                    if (!prevIn) kept.Add(Vector3.LerpUnclamped(prev, cur, dPrev / (dPrev - dCur)));
+                    kept.Add(cur);
+                }
+                else if (prevIn)
+                {
+                    kept.Add(Vector3.LerpUnclamped(prev, cur, dPrev / (dPrev - dCur)));
+                }
+            }
+
+            ring.Clear();
+            ring.AddRange(kept);
         }
 
         private List<Vector3> ToWorld(Polyline line)
@@ -1866,296 +2515,26 @@ namespace UniverseCreator.TerrainSystem
             return inside;
         }
 
-        /// <summary>
-        /// The course in world space, resampled to the authored spacing, carrying the
-        /// width and depth that apply at every resampled point.
-        ///
-        /// Resampled rather than used raw because the carve interpolates width, depth
-        /// and surface between consecutive points: two points a hundred metres apart
-        /// would blend across the whole span and lose every bend between them.
-        ///
-        /// This is also where the drawn line becomes a line water could follow - the
-        /// valley seek and the descent walk run here, on the resampled points, so the
-        /// mesh and the dig are both built from the fitted course and cannot end up
-        /// describing two different rivers.
-        /// </summary>
-        public void ApplyValleyReroute()
-        {
-            if (course == null || course.Count < 2) return;
-            
-            List<Vector3> worldPoints = ToWorld(course);
-            RiverCourseSolver.GroundSampler ground = SampleGround;
-            
-            RiverCourseSolver.SnapToValley(worldPoints, ground, valleySearchMetres, valleyPull, 12);
-            RiverCourseSolver.Relax(worldPoints, 2);
-            
-            for (int i = 0; i < worldPoints.Count; i++)
-            {
-                course.points[i] = transform.InverseTransformPoint(worldPoints[i]);
-            }
-        }
+        // The river read-mode trench scanners (MeasureTrenchWidths, ScanTrenchWall),
+        // the course resample/solve helpers (WorldCourse, ApplyHydraulicGeometry,
+        // NaturalDepthForWidth, ComputeNaturalChannel, ApplySourceStreamProfile,
+        // ValleyConfinement), the per-node series helpers (ResolveNodeSeries,
+        // SmoothBetweenAuthored, SampleNodeSeries, SampleFloodplainAlong,
+        // ResampleSeriesAlong) and their *ForTest wrappers were removed in the river
+        // teardown. Lake/ocean bodies read their bed from WorldShoreRing, not a course.
 
-        private List<Vector3> WorldCourse(out List<float> widths, out List<float> depths)
-        {
-            widths = null;
-            depths = null;
 
-            if (course == null || course.Count < 2) return null;
 
-            List<Vector3> world = ToWorld(course);
+        // The downstream hydraulic-geometry pass (ApplyHydraulicGeometry), the natural
+        // channel / source-stream helpers (NaturalDepthForWidth, ComputeNaturalChannel,
+        // ApplySourceStreamProfile), the valley-confinement probe (ValleyConfinement),
+        // their hydraulic constants (BaseWidthDepthRatio, WidthAreaExponent,
+        // GorgeRatioSpan) and the editor-only *ForTest seams were removed in the river
+        // teardown. Lake/ocean bodies size their bed from the shore ring, not a course.
 
-            // Per-node width and depth resolved with inheritance BEFORE the resample,
-            // because inheritance is defined on the nodes the user placed. Resolving
-            // it afterwards would inherit from interpolated points, which is a
-            // different and meaningless thing.
-            float[] nodeW = ResolveNodeSeries(nodeWidthMetres, widthMetres);
-            float[] nodeD = ResolveNodeSeries(nodeDepthMetres, channelDepthMetres);
 
-            // Packed into the spline's weight channel so the resample carries them
-            // through for free: weight is width, and depth is recovered from the
-            // width fraction afterwards using the same node interpolation.
-            Polyline line = new Polyline();
-            for (int i = 0; i < world.Count; i++)
-                line.Add(world[i], nodeW[Mathf.Min(i, nodeW.Length - 1)]);
 
-            // Centripetal Catmull-Rom, not the uniform one. A river bends through its
-            // nodes; it does not run in straight reaches between them with a corner at
-            // each. Uniform parameterisation would overshoot wherever two consecutive
-            // spans are very different lengths - which is every hand-placed line - and
-            // an overshooting river digs a trench outside its own bank.
-            //
-            // Tessellated at half the final spacing so the resample below is walking
-            // an already-curved line. Resampling a chord at any spacing only ever
-            // produces points on that chord, so doing it the other way round would
-            // give evenly spaced corners rather than a curve.
-            Polyline smooth = SplineOperations.TessellateCatmullRom(
-                line, Mathf.Max(0.25f, pointSpacingMetres * 0.5f));
 
-            Polyline spaced = SplineOperations.Resample(smooth, Mathf.Max(0.5f, pointSpacingMetres), true);
-            if (spaced == null || spaced.Count < 2) return null;
-
-            List<Vector3> result = new List<Vector3>(spaced.Count);
-            for (int i = 0; i < spaced.Count; i++) result.Add(spaced.PointAt(i));
-
-            // position rather than read off the resampled line. The tessellation does
-            // carry the weight channel, but depth has no channel to ride in and both
-            // have to come from the same place or they can disagree at a node.
-            widths = new List<float>(result.Count);
-            depths = new List<float>(result.Count);
-            SampleNodeSeries(world, result, nodeW, nodeD, widths, depths);
-
-            // ---- Fitting the drawn line to the ground ------------------------
-
-            // Gathered before the walk, because the walk asks about them at every step
-            // and a scene search per step would dominate the build.
-            RefreshJoinCandidates();
-
-            if (fitToValley || routeAroundHighGround)
-            {
-                RiverCourseSolver.GroundSampler ground = SampleGround;
-
-                if (fitToValley)
-                {
-                    RiverCourseSolver.SnapToValley(result, ground,
-                                                   valleySearchMetres, valleyPull, 12);
-                    RiverCourseSolver.Relax(result, 2);
-                }
-
-                if (routeAroundHighGround)
-                {
-                    List<Vector3> walked = new List<Vector3>(result.Count + 16);
-
-                    lastDescentEnding = RiverCourseSolver.WalkDownhill(
-                        result, walked, ground,
-                        Mathf.Max(0.5f, pointSpacingMetres),
-                        routeFanDegrees, climbToleranceMetres,
-                        autoConnectMetres > 0f ? IsAtJoinableWater : null);
-
-                    if (walked.Count >= 2)
-                    {
-                        // The walk emits its own point count - it swings wide round a
-                        // spur and it stops early where the ground closes in - so the
-                        // width and depth series are re-sampled against the walked
-                        // path rather than carried across by index.
-                        List<float> w2 = new List<float>(walked.Count);
-                        List<float> d2 = new List<float>(walked.Count);
-                        ResampleSeriesAlong(result, widths, depths, walked, w2, d2);
-
-                        result = walked;
-                        widths = w2;
-                        depths = d2;
-
-                        RiverCourseSolver.Relax(result, 1);
-                    }
-                }
-            }
-            else
-            {
-                lastDescentEnding = RiverCourseSolver.DescentEnding.ReachedEnd;
-            }
-
-            // A river that found no way down does not stop dead in a wall of ground.
-            // It thins out and sinks, the way one does when it runs into karst or into
-            // a desert - and that is the honest answer here, because the alternative
-            // is to climb, which water does not do.
-            if (lastDescentEnding == RiverCourseSolver.DescentEnding.NoWayDown)
-                RiverCourseSolver.TaperSink(result, widths, depths, sinkRunMetres);
-
-            return result;
-        }
-
-        /// <summary>Where the last build's descent walk ended. Reported by the
-        /// inspector, because "the river stops here" is worth knowing about.</summary>
-        [System.NonSerialized]
-        private RiverCourseSolver.DescentEnding lastDescentEnding =
-            RiverCourseSolver.DescentEnding.ReachedEnd;
-
-        public RiverCourseSolver.DescentEnding LastDescentEnding { get { return lastDescentEnding; } }
-
-        /// <summary>
-        /// Fills in the unset entries of a per-node series from the last node above
-        /// them that was set.
-        ///
-        /// Inheritance runs downstream only, which is the direction the value has a
-        /// meaning in: a river carries what it has gathered so far. The run before the
-        /// first authored node takes the body-wide default, so a course with nothing
-        /// typed on it behaves exactly as it did before per-node values existed.
-        /// </summary>
-        private float[] ResolveNodeSeries(List<float> authored, float fallback)
-        {
-            int n = course.Count;
-            float[] resolved = new float[Mathf.Max(1, n)];
-
-            float carried = Mathf.Max(0.05f, fallback);
-
-            for (int i = 0; i < n; i++)
-            {
-                float v = authored != null && i < authored.Count ? authored[i] : 0f;
-
-                // Non-zero is authored. Zero means "not set here", which is the whole
-                // point: a designer types a number at the three places the river
-                // actually changes and leaves the rest alone.
-                if (v > 1e-4f) carried = v;
-
-                resolved[i] = carried;
-            }
-
-            // Between two authored nodes the value eases rather than steps. A river
-            // does not double in depth at one cross-section, and a step in the dig
-            // shows as a shelf across the channel.
-            SmoothBetweenAuthored(authored, resolved);
-
-            return resolved;
-        }
-
-        /// <summary>
-        /// Blends each unset run from the value above it to the value below it, so an
-        /// inherited stretch is a transition rather than a plateau ending in a step.
-        /// </summary>
-        private void SmoothBetweenAuthored(List<float> authored, float[] resolved)
-        {
-            int n = resolved.Length;
-
-            int prevSet = -1;
-
-            for (int i = 0; i < n; i++)
-            {
-                bool set = authored != null && i < authored.Count && authored[i] > 1e-4f;
-                if (!set) continue;
-
-                if (prevSet >= 0 && i - prevSet > 1)
-                {
-                    float a = resolved[prevSet];
-                    float b = resolved[i];
-
-                    for (int k = prevSet + 1; k < i; k++)
-                    {
-                        float t = (k - prevSet) / (float)(i - prevSet);
-                        resolved[k] = Mathf.Lerp(a, b, Mathf.SmoothStep(0f, 1f, t));
-                    }
-                }
-
-                prevSet = i;
-            }
-        }
-
-        /// <summary>
-        /// Reads the node width and depth at every resampled point, by nearest
-        /// position along the original course.
-        /// </summary>
-        private static void SampleNodeSeries(List<Vector3> nodes, List<Vector3> sampled,
-                                             float[] nodeW, float[] nodeD,
-                                             List<float> widths, List<float> depths)
-        {
-            // Cumulative arc length of the authored nodes, so a point halfway along
-            // the course reads the value halfway along the node list even when the
-            // nodes are unevenly spaced.
-            int n = nodes.Count;
-            float[] arc = new float[n];
-
-            for (int i = 1; i < n; i++)
-                arc[i] = arc[i - 1] + new Vector2(nodes[i].x - nodes[i - 1].x,
-                                                  nodes[i].z - nodes[i - 1].z).magnitude;
-
-            float total = Mathf.Max(1e-4f, arc[n - 1]);
-
-            int m = sampled.Count;
-            float travelled = 0f;
-
-            for (int s = 0; s < m; s++)
-            {
-                if (s > 0)
-                    travelled += new Vector2(sampled[s].x - sampled[s - 1].x,
-                                             sampled[s].z - sampled[s - 1].z).magnitude;
-
-                float u = Mathf.Clamp01(travelled / total) * total;
-
-                int seg = 0;
-                while (seg < n - 2 && arc[seg + 1] < u) seg++;
-
-                float span = Mathf.Max(1e-4f, arc[seg + 1] - arc[seg]);
-                float t = Mathf.Clamp01((u - arc[seg]) / span);
-
-                widths.Add(Mathf.Lerp(nodeW[seg], nodeW[Mathf.Min(seg + 1, n - 1)], t));
-                depths.Add(Mathf.Lerp(nodeD[seg], nodeD[Mathf.Min(seg + 1, n - 1)], t));
-            }
-        }
-
-        /// <summary>
-        /// Carries a width and depth series from one path onto another by nearest
-        /// point. Used after the descent walk, which produces a path of its own
-        /// length that no longer lines up with the input index for index.
-        ///
-        /// It also carries the drawn elevation back onto the walked path. The walk
-        /// writes ground height into Y as it goes, but Y on this course means the
-        /// height the designer drew at - which is what a flat-floor river measures its
-        /// surface down from - so it has to survive the reroute.
-        /// </summary>
-        private static void ResampleSeriesAlong(List<Vector3> from, List<float> fromW, List<float> fromD,
-                                                List<Vector3> to, List<float> toW, List<float> toD)
-        {
-            for (int i = 0; i < to.Count; i++)
-            {
-                Vector3 p = to[i];
-
-                int best = 0;
-                float bestD2 = float.MaxValue;
-
-                for (int j = 0; j < from.Count; j++)
-                {
-                    float dx = from[j].x - p.x;
-                    float dz = from[j].z - p.z;
-                    float d2 = dx * dx + dz * dz;
-
-                    if (d2 < bestD2) { bestD2 = d2; best = j; }
-                }
-
-                toW.Add(best < fromW.Count ? fromW[best] : 1f);
-                toD.Add(best < fromD.Count ? fromD[best] : 1f);
-
-                to[i] = new Vector3(p.x, from[best].y, p.z);
-            }
-        }
 
         /// <summary>Ground elevation at a world XZ. The solver's view of the world.</summary>
         /// <remarks>
@@ -2201,105 +2580,15 @@ namespace UniverseCreator.TerrainSystem
         [System.NonSerialized] private bool groundSourceResolved;
 
         // =====================================================================
-        //  AUTO CONNECT
-        //
-        //  A river drawn towards a lake should end in the lake. Making the designer
-        //  also pick that lake out of a dropdown is asking them to say the same
-        //  thing twice, and it is the kind of thing that gets forgotten - which
-        //  shows up as a river stopping in a bank of ground a few metres short of
-        //  water.
-        //
-        //  So the descent walk asks, at every step, whether it has arrived at
-        //  water. When it has, that body becomes the junction target for this
-        //  build. The serialised field still wins when it is set, because an
-        //  explicit choice must beat a guess.
+        //  AUTO CONNECT (river-only) removed in the river teardown. The join
+        //  candidate gather, ResolveJoin, RefreshJoinCandidates, SubmergedFloorY
+        //  and the river->ocean/lake proximity read (IsAtJoinableWater), together
+        //  with the TouchingJoinables / IsJoinedTo / SetJoinTicked tick machinery
+        //  and the joinCandidates/autoJoinDownstream state, are gone. Lakes and
+        //  oceans are placed footprints that do not "join"; IsConnected /
+        //  ConnectionSummary below are neutralised so the shared inspector status
+        //  line still compiles.
         // =====================================================================
-
-        /// <summary>Bodies this river might arrive at, gathered once per build rather
-        /// than searched for at every step of the walk.</summary>
-        [System.NonSerialized] private UCWaterBody[] joinCandidates;
-
-        /// <summary>What the walk found, if it found anything. Not serialised: it is a
-        /// result of the last build, not a setting.</summary>
-        [System.NonSerialized] private UCWaterBody autoJoinDownstream;
-
-        /// <summary>The body this river joins at one end - the authored one if there is
-        /// one, otherwise whatever the walk ran into.</summary>
-        private UCWaterBody ResolveJoin(bool downstream)
-        {
-            UCWaterBody authored = downstream ? joinDownstreamTo : joinUpstreamFrom;
-            if (CanJoin(authored)) return authored;
-
-            // Upstream is never guessed. A river's head is where the designer put it;
-            // arriving at water going downhill is a discovery, starting in it is not.
-            if (downstream && CanJoin(autoJoinDownstream)) return autoJoinDownstream;
-
-            return null;
-        }
-
-        /// <summary>
-        /// Collects the bodies auto-connect may consider, and forgets last build's
-        /// guess so a river dragged away from a lake stops joining it.
-        /// </summary>
-        private void RefreshJoinCandidates()
-        {
-            autoJoinDownstream = null;
-            joinCandidates = null;
-
-            if (autoConnectMetres <= 0f) return;
-
-            // Scoped to the world this river belongs to when there is one, so two
-            // worlds open in one scene cannot connect to each other's water.
-            UniverseCreatorObject world = CarveWorld;
-
-            // No sort mode: Unity 6 deprecated the overload that takes one, and this
-            // list never depended on order anyway - auto-connect picks the nearest
-            // candidate, not the first.
-            joinCandidates = world != null
-                ? world.GetComponentsInChildren<UCWaterBody>(false)
-                : Object.FindObjectsByType<UCWaterBody>(FindObjectsInactive.Exclude);
-        }
-
-        /// <summary>
-        /// Whether this point has reached standing water the river can join. Handed to
-        /// the descent walk, which stops there and reports ReachedWater.
-        ///
-        /// Oceans and lakes only. Pools are decorative and a river running into one
-        /// should carry on past it; river-to-river junctions are set on the nodes,
-        /// where the designer can say which one joins which.
-        /// </summary>
-        private bool IsAtJoinableWater(Vector3 p)
-        {
-            if (joinCandidates == null) return false;
-
-            float reach = Mathf.Max(0f, autoConnectMetres);
-            if (reach <= 0f) return false;
-
-            for (int i = 0; i < joinCandidates.Length; i++)
-            {
-                UCWaterBody other = joinCandidates[i];
-
-                if (other == null || other == this) continue;
-                if (other.kind != WaterBodyKind.Ocean && other.kind != WaterBodyKind.Lake) continue;
-
-                Vector3 edge;
-                float surfaceAt, depthAt;
-                if (!other.NearestEdgePoint(p, joinBlendMetres, out edge, out surfaceAt, out depthAt))
-                    continue;
-
-                float gap = new Vector2(edge.x - p.x, edge.z - p.z).magnitude;
-                if (gap > reach) continue;
-
-                // First match wins rather than nearest. The walk moves a fraction of a
-                // step at a time, so by the time anything is in reach at all it is the
-                // one the river is arriving at, and scoring them all every step would
-                // cost far more than it could ever change.
-                autoJoinDownstream = other;
-                return true;
-            }
-
-            return false;
-        }
 
         /// <summary>
         /// Asks the world to re-cut every dig into the terrain that is already built.
@@ -2309,11 +2598,14 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public void ReapplyToTerrain()
         {
+            if (shape == ShapeMode.RiverSpline && FollowTrench) return; // UC-T04-02: surface refitting never requests a native terrain rewrite.
             UniverseCreatorObject world = CarveWorld;
             if (world == null || world.Chunks == null) return;
 
             world.Chunks.ReapplyCarves();
         }
+
+
 
         // =====================================================================
         //  BUILD
@@ -2325,13 +2617,7 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public void Rebuild()
         {
-            // The dig is rebuilt first and the surface second, because the surface
-            // has to sit on the bed the dig describes. Build them the other way round
-            // and the mesh is placed against last build's ground, which is exactly the
-            // gap between water and terrain this whole path exists to close.
-            BuildDig();
-
-            RebuildSurface();
+            RebuildWithJunctionDependencies(); // UC-T04-07: one bounded nonrecursive owner prepares receivers and affected incoming bodies.
         }
 
         /// <summary>
@@ -2344,10 +2630,18 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public void RebuildSurface()
         {
-            Clear();
-
+            // UC-T04-05B: deleting the final segment is not a failed replacement fit.
+            if (shape == ShapeMode.RiverSpline && (outline == null || outline.Count < 2)) { Clear(); return; }
             WaterBodyData body = BuildData();
-            if (body == null) return;
+            if (body == null)
+            {
+                // UC-T04-07: a rejected fit cannot preserve a surface from a retired world revision.
+                var world = CarveWorld;
+                if (world != null && !world.GenerationScheduler.CurrentRun.Equals(junctionAcceptedRun)) Clear();
+                return;
+            }
+            var querySurface = generateVolume ? new WaterQuerySurface(body, transform.localToWorldMatrix, kind != WaterBodyKind.Ocean, water.flowMetresPerSecond) : null; // UC-T04-09: validate query budgets before retiring the accepted mesh.
+            Clear(); // UC-T04-04: preserve the last accepted native mesh/volume until replacement data validates.
 
             lastBuild = body;
 
@@ -2357,11 +2651,15 @@ namespace UniverseCreator.TerrainSystem
             // Never serialised. It is rebuilt from these fields on every enable, so
             // saving it would mean a scene that grows by every water surface it has
             // ever shown and duplicates them on the next build.
-            surfaceObject.hideFlags = HideFlags.DontSave;
+            surfaceObject.hideFlags = HideFlags.DontSave | HideFlags.NotEditable; // UC-T04-05B: derived children stay read-only without writing Editor Undo history.
             surfaceObject.transform.SetParent(transform, false);
             surfaceObject.transform.localPosition = Vector3.zero;
             surfaceObject.transform.localRotation = Quaternion.identity;
             surfaceObject.transform.localScale = Vector3.one;
+
+            // UC-T04-05B: SceneVisibilityManager.DisablePicking records an Undo operation.
+            // Calling it while refreshing an undone course clears the user's Redo branch.
+            // Use native read-only flags for these temporary render children instead.
 
             mesh = new Mesh();
             mesh.name = "UC Water Mesh";
@@ -2389,6 +2687,7 @@ namespace UniverseCreator.TerrainSystem
             filter.sharedMesh = mesh;
 
             MeshRenderer renderer = surfaceObject.AddComponent<MeshRenderer>();
+            readinessSurfaceRenderer = renderer; // UC-T09-03: cache the derived renderer for dependency presentation without per-pump component lookup.
             renderer.sharedMaterial = ResolveMaterial(body);
 
             // Transparent water casting a hard shadow is wrong, and receiving one
@@ -2398,17 +2697,45 @@ namespace UniverseCreator.TerrainSystem
             renderer.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
             renderer.allowOcclusionWhenDynamic = false;
 
-            if (generateVolume) AttachVolume(body);
+            if (generateVolume) AttachVolume(body, querySurface); // UC-T04-09: rendering and gameplay publish one accepted footprint.
+
+            // Far Distance Mesh (§4i.3): an ocean fills to the camera's far clip, not to
+            // its own mesh edge. Built from the same material at zero wave weight so it is
+            // flat and color-matched, and cheap (two loops of the body outline). Ocean
+            // only, and only when horizonDistanceMetres > 0.
+            BuildOceanHorizon(body);
+
+            AcceptWaterJunctionGeometry(); // UC-T04-06: clipped/contained preparation is now an accepted native surface.
+            nativeWaterPublications[this] = new WaterPublicationOwner(gameObject.scene.handle.GetRawData(), GetEntityId().GetHashCode()); // UC-T04-07: retain the full supported scene handle; native and graph keys retire never-active bodies.
+            waterPublicationWorld = CarveWorld; // UC-T04-07: capture the actual owner before hierarchy changes.
+            RegisterStreamingPresentation(); // UC-T09-03: newly rebuilt water inherits this world's settlement hold before any frame can render it.
+
+            // Waterfalls were a river-course feature (driven by a river's solved cascades).
+            // The river teardown removed the course solve, its cascades, and the waterfall
+            // effect component itself; no body produces falls now, so there is nothing to
+            // attach or tear down here. The rebuilt river system will reintroduce falls on
+            // its own terms.
         }
 
         /// <summary>Destroys everything Rebuild created. Leaves the settings alone.</summary>
         public void Clear()
         {
+            RetireJunctionDependents(); // UC-T04-07: explicit clear retires affected incoming surfaces without recursion.
+            ClearNativeGeometry();
+        }
+
+        private void ClearNativeGeometry()
+        {
+            RetireStreamingPresentation(); // UC-T09-03: retired/rebound native water cannot remain in a former world's presentation list.
+            waterPublicationWorld = null; // UC-T04-07: release the former world's runtime ownership witness.
+            nativeWaterPublications.Remove(this); // UC-T04-07: stop retaining this retired scene publication.
             if (volume != null) { DestroySafe(volume); volume = null; }
 
             // The mesh first. Destroying the GameObject leaves the Mesh resident -
             // it is an asset object, not a component, and nothing collects it.
             if (mesh != null) { DestroySafe(mesh); mesh = null; }
+            if (horizonMesh != null) { DestroySafe(horizonMesh); horizonMesh = null; }
+            if (horizonObject != null) { DestroySafe(horizonObject); horizonObject = null; }
             if (material != null) { DestroySafe(material); material = null; }
             if (surfaceObject != null) { DestroySafe(surfaceObject); surfaceObject = null; }
 
@@ -2435,9 +2762,14 @@ namespace UniverseCreator.TerrainSystem
         {
             Terrain[] terrains = bedSource == BedSource.Terrain ? Terrain.activeTerrains : null;
 
+            // A river's surface is a descending swept ribbon along its course; every
+            // other body is a level sheet. The river branch reuses the SAME grid +
+            // Assemble path as a lake, only its per-cell surface descends and its wet
+            // mask is the channel band - so there is one mesh builder, not two.
             WaterBodyData body = shape == ShapeMode.RiverSpline
-                ? BuildRiver(terrains)
+                ? BuildRiverBody(terrains)
                 : BuildLevelBody(terrains);
+
 
             if (body == null) return null;
 
@@ -2447,12 +2779,23 @@ namespace UniverseCreator.TerrainSystem
             body.maxFlowSpeed = Mathf.Max(0.01f, maxFlowSpeed);
             body.product = useOwnMaterial ? water : null;
 
+            // UC-T04-06: remove receiver coverage before native publication; shared edges use its actual level.
+            if (shape == ShapeMode.RiverSpline && !TryJoinRiverSurface(body, out body)) return null;
+            if (!ApplyJunctionWaveContacts(body)) return null; // UC-T04-09: receiver patches and incoming shared edges have coherent still geometry.
+
             return body;
         }
 
         // ---------------------------------------------------------------------
         //  Level body
         // ---------------------------------------------------------------------
+
+        private WaterBodyData BuildRiverBody(Terrain[] terrains)
+        {
+            // UC-T04-04: a grid extending past the bank cannot represent a thin channel.
+            // The bounded fitted strip shares WaterBodyData/material attributes with level bodies.
+            return FitWidthToTrench(false) ? BuildFittedRiverSurface(terrains) : null;
+        }
 
         private WaterBodyData BuildLevelBody(Terrain[] terrains)
         {
@@ -2509,9 +2852,16 @@ namespace UniverseCreator.TerrainSystem
             float[] depth = new float[n];
             bool[] wet = new bool[n];
 
-            float surfaceY = transform.position.y + surfaceOffsetMetres;
+            float surfaceY = SurfaceWorldY();
 
             bool usePolygon = shape == ShapeMode.Polygon && outline != null && outline.closed && outline.Count >= 3;
+
+            // A governing dam impounds only the upstream side of its line. The dig ring was clipped to that half-plane;
+            // the mesh must cull the same way, or the flat raised surface would flood over the natural ground the dig
+            // deliberately left standing downstream of the wall.
+            bool clipDam = damGoverned;
+            float damCx = damBarrierCentre.x, damCz = damBarrierCentre.y;
+            float damNx = damUpstreamNormal.x, damNz = damUpstreamNormal.y;
 
             // Trim the surface to the bed the water will actually sit on. When this body
             // digs, that bed is the carved basin solved in BuildDig (run immediately
@@ -2549,6 +2899,9 @@ namespace UniverseCreator.TerrainSystem
 
                     bool inside = !usePolygon || SplineOperations.ContainsXZ(outline, lx, lz);
 
+                    // Downstream of the dam line the reservoir does not reach, so its wet mask stops at the wall.
+                    if (clipDam && (world.x - damCx) * damNx + (world.z - damCz) * damNz < 0f) inside = false;
+
                     // Cull at the waterline (this REPLACES the old flood-the-whole-polygon
                     // rule): a vertex whose bed is at or above the surface is dry - a bank,
                     // a kept island, or ground the ring merely bounds - and carries no water
@@ -2570,6 +2923,7 @@ namespace UniverseCreator.TerrainSystem
             // Seat the shore edge into the ground and bound the depth. The named
             // constants are the single source for both figures - passing literals
             // here is how the two water paths drifted apart before. (Spec 4.2/4.3.)
+            float[] shoreDepth = (float[])depth.Clone(); // UC-T07-11: keep physical sign crossings before the skirt clamps dry depth and moves geometry.
             ShorelineConformer.ConformGrid(surf, depth, n,
                                           ShorelineConformer.SkirtDropMetres,
                                           ShorelineConformer.MaxSkirtDepthMetres);
@@ -2583,6 +2937,8 @@ namespace UniverseCreator.TerrainSystem
 
             WaterBodyData built = Assemble(gx, gz, cell, centreX, centreZ, halfX, halfZ,
                                            surf, depth, wet, flowDir, speed, 0f);
+            if (built != null) built.shorelineSegmentsLocal = WaterShorelineBuilder.Grid(shoreDepth, wet, gx, gz,
+                new Vector2(centreX - halfX, centreZ - halfZ), cell, surfaceY, transform.localToWorldMatrix); // UC-T07-11: retained wet connectivity and actual bed crossings define source shores, not expanded skirt edges.
 
             // THE BODY'S FLOOR IS THE WATER, NOT THE SKIRT  (T18)
             //
@@ -2616,6 +2972,41 @@ namespace UniverseCreator.TerrainSystem
         {
             int[] index = new int[gx * gz];
             for (int i = 0; i < index.Length; i++) index[i] = -1;
+
+            // ONE BASIN, ONE SURFACE.
+            //
+            // A lake or a pool is a single body of standing water. Anything in its
+            // footprint that reads wet but does not join it is not part of it, and
+            // rendering it paints a scrap of water shader on dry land beside the real
+            // lake - the reported "small box shader below the nodes". Reduced to the
+            // one region the body actually is, before a single quad is counted.
+            //
+            // Rivers are exempt: a course sampled across a riffle can read one dry
+            // cell mid-channel, and pruning to the largest region there would delete
+            // half the river to remove nothing. The ocean is exempt because a
+            // world-sized sea legitimately floods several basins its own coastline
+            // separates, and they are all the same ocean.
+            if (shape != ShapeMode.RiverSpline && kind != WaterBodyKind.Ocean)
+                KeepLargestBody(wet, gx, gz);
+
+            // THE SEA REACHES ONLY WHAT THE SEA CAN REACH  (R11).
+            //
+            // An ocean is a world-sized flood plane culled by a per-vertex depth test:
+            // any point whose ground is below the sea surface reads wet. That floods a
+            // real coastline correctly - several bays are all one sea - but it ALSO
+            // floods a landlocked hollow that merely happens to sit below sea level, so a
+            // basin the sea has no path into still shows ocean water with no shore. Real
+            // water cannot teleport into a closed bowl.
+            //
+            // The open sea is the water touching the world edge (the ocean plane spans
+            // the whole world, so its own boundary is the coastline out to open water).
+            // Keep every wet cell the sea can walk to from that edge across other wet
+            // cells, and drop the rest. A hollow with no wet path to the edge is left dry
+            // here - to be filled by a LAKE instead, which is the correct body for water
+            // with no connection to the sea. Ocean only, and only when a real edge is wet,
+            // so a fully-enclosed inland sea the user placed on purpose is untouched.
+            if (kind == WaterBodyKind.Ocean)
+                KeepSeaConnected(wet, gx, gz);
 
             // A quad joins if any corner is wet, which is what makes the mesh reach
             // one cell past the waterline and gives the alpha fade room to work.
@@ -2752,213 +3143,168 @@ namespace UniverseCreator.TerrainSystem
             return body;
         }
 
-        // ---------------------------------------------------------------------
-        //  River
-        // ---------------------------------------------------------------------
-
-        private WaterBodyData BuildRiver(Terrain[] terrains)
+        /// <summary>
+        /// Reduces a wet lattice to its single largest connected region, clearing the
+        /// rest.
+        /// </summary>
+        /// <remarks>
+        /// Why it is needed at all: Assemble emits a quad whenever ANY of its four
+        /// corners is wet, which is what lets the mesh reach one cell past the
+        /// waterline for the shore fade. The same rule means ONE stray wet vertex
+        /// paints the four quads around it - a two-cell square of water shader
+        /// standing on dry ground. A node dragged below the surface, a dip in the bed
+        /// under the shore ring, or near-level ground crossing the waterline all
+        /// produce such strays, and each arrives as its own little box of water
+        /// beside the real lake.
+        ///
+        /// Eight-connected, because a quad binds its diagonal corners as well as its
+        /// orthogonal ones: two diagonally adjacent wet vertices already share a quad
+        /// and are therefore one surface, so counting them as two regions would let
+        /// this delete water that is genuinely attached.
+        ///
+        /// Iterative with an explicit stack. A lattice is up to 512x512, and a
+        /// recursive fill over a quarter of a million connected cells overflows the
+        /// stack rather than returning an answer.
+        /// </remarks>
+        private static void KeepLargestBody(bool[] wet, int gx, int gz)
         {
-            if (course == null || course.Count < 2) return null;
+            int n = gx * gz;
+            if (n <= 0) return;
 
-            // The same fitted course the dig uses. The mesh and the channel are built
-            // from the same points, widths, depths and surface, so the ribbon cannot
-            // drift off the trench that was cut for it.
-            if (!EnsureSolvedCourse()) return null;
+            // 0 means unvisited; regions are numbered from 1.
+            int[] region = new int[n];
+            int[] stack = new int[n];
 
-            int count = solvedPoints.Count;
+            int largest = 0;
+            int largestSize = 0;
+            int current = 0;
 
-            // The surface is already a built thing on the solved course - forced
-            // downhill, smoothed with the ends held, blended into whatever the river
-            // joins - so the mesh reads it rather than deriving a second one that could
-            // disagree by a few centimetres and show a seam between two water planes.
-            float[] surface = solvedSurfaceY;
-
-            float[] centreDepth = new float[count];
-            Vector2[] tangent = new Vector2[count];
-            float[] arcStep = new float[count];
-            float[] halfWidth = new float[count];
-
-            for (int i = 0; i < count; i++)
+            for (int seed = 0; seed < n; seed++)
             {
-                int prev = Mathf.Max(i - 1, 0);
-                int next = Mathf.Min(i + 1, count - 1);
+                if (!wet[seed] || region[seed] != 0) continue;
 
-                Vector3 a = solvedPoints[prev];
-                Vector3 b = solvedPoints[next];
+                current++;
+                int size = 0;
+                int top = 0;
 
-                Vector2 t2 = new Vector2(b.x - a.x, b.z - a.z);
-                tangent[i] = t2.sqrMagnitude > 1e-8f ? t2.normalized : Vector2.right;
+                // Labelled as it is pushed, never as it is popped, so no cell can be
+                // pushed twice and the stack cannot exceed the lattice.
+                region[seed] = current;
+                stack[top++] = seed;
 
-                // Already metres, not a multiplier: the node series resolves against
-                // widthMetres as its fallback, so scaling by it again would square it.
-                halfWidth[i] = Mathf.Max(0.1f, solvedWidths[i]) * 0.5f;
-
-                float run = t2.magnitude;
-                arcStep[i] = Mathf.Max(0.01f, run / Mathf.Max(1, next - prev));
-            }
-
-            // Hydraulics per cross-section.
-            float invN = 1f / Mathf.Max(0.005f, manningRoughness);
-            float cap = Mathf.Max(0.05f, hydraulicRadiusCap);
-
-            float[] speed = new float[count];
-            float[] whitewater = new float[count];
-
-            for (int i = 0; i < count; i++)
-            {
-                centreDepth[i] = Mathf.Max(minDepthMetres, solvedDepths[i]);
-
-                int prev = Mathf.Max(i - 1, 0);
-                int next = Mathf.Min(i + 1, count - 1);
-
-                float run = arcStep[i] * Mathf.Max(1, next - prev);
-                float drop = surface[prev] - surface[next];
-
-                // Surface slope, not bed slope. A reach ponded behind a rise has a
-                // level surface and does not flow however steep the ground under it
-                // is - that one choice is why a lake and a river are the same code.
-                float slope = run > 1e-4f ? Mathf.Max(0f, drop / run) : 0f;
-
-                float radius = Mathf.Min(centreDepth[i], cap);
-                float v = invN * Mathf.Pow(radius, 0.6666667f) * Mathf.Sqrt(slope);
-                speed[i] = Mathf.Clamp(v, 0f, 40f);
-
-                // Froude number. Above about 1 the flow is supercritical and stands
-                // up in a hydraulic jump - standing white water - so the whitening
-                // ramps in around there rather than being painted by hand.
-                float froude = speed[i] / Mathf.Sqrt(Gravity * Mathf.Max(0.05f, centreDepth[i]));
-                whitewater[i] = Mathf.Clamp01((froude - 0.8f) / 0.6f);
-            }
-
-            // Ribbon.
-            int across = Mathf.Clamp(widthSegments, 2, 24) + 1;
-            int vertexCount = count * across;
-            if (vertexCount < 4) return null;
-
-            WaterBodyData body = new WaterBodyData();
-            body.vertices = new Vector3[vertexCount];
-            body.normals = new Vector3[vertexCount];
-            body.tangents = new Vector4[vertexCount];
-            body.uv = new Vector2[vertexCount];
-            body.colors = new Color[vertexCount];
-            body.triangles = new int[(count - 1) * (across - 1) * 6];
-
-            float feather = Mathf.Max(0.01f, edgeFeatherMetres);
-            float invMax = 1f / Mathf.Max(0.01f, maxFlowSpeed);
-            float exponent = Mathf.Clamp(bankProfile, 1f, 6f);
-
-            Bounds worldBounds = new Bounds();
-            bool boundsStarted = false;
-
-            float surfSum = 0f;
-            Vector2 flowSum = Vector2.zero;
-            float deepest = 0f;
-
-            for (int i = 0; i < count; i++)
-            {
-                Vector3 centre = solvedPoints[i];
-                Vector2 t = tangent[i];
-                Vector2 side = new Vector2(-t.y, t.x);
-
-                // Along-stream surface derivative, so the surface normal tilts
-                // downstream. A level normal on a sloping run puts the sun's
-                // reflection where it would be on flat water, which reads as a
-                // painted texture rather than a moving surface.
-                int prev = Mathf.Max(i - 1, 0);
-                int next = Mathf.Min(i + 1, count - 1);
-                float run = arcStep[i] * Mathf.Max(1, next - prev);
-                float dSurf = run > 1e-4f ? (surface[next] - surface[prev]) / run : 0f;
-
-                Vector3 worldNormal = new Vector3(-t.x * dSurf, 1f, -t.y * dSurf).normalized;
-                Vector3 localNormal = transform.InverseTransformDirection(worldNormal).normalized;
-
-                // World +X orthogonalised, not flow aligned. A flow-aligned tangent
-                // rotates the wave normal map through every meander, and the rotation
-                // shows as the texture spinning under itself where the channel turns.
-                Vector3 tan = Vector3.right - worldNormal * Vector3.Dot(worldNormal, Vector3.right);
-                if (tan.sqrMagnitude < 1e-6f) tan = Vector3.forward;
-                tan = transform.InverseTransformDirection(tan.normalized).normalized;
-
-                float normalisedSpeed = Mathf.Clamp01(speed[i] * invMax);
-                Color colour = new Color(t.x * 0.5f + 0.5f, t.y * 0.5f + 0.5f, normalisedSpeed, 1f);
-
-                surfSum += surface[i];
-                flowSum += t * speed[i];
-
-                for (int j = 0; j < across; j++)
+                while (top > 0)
                 {
-                    float u = across > 1 ? (j / (float)(across - 1)) * 2f - 1f : 0f;
+                    int i = stack[--top];
+                    size++;
 
-                    // Extend the water mesh slightly past the carved width to ensure it intersects 
-                    // the terrain perfectly and prevents gaps/holes in the banks.
-                    float extendWidth = halfWidth[i] + feather;
+                    int x = i % gx;
+                    int z = i / gx;
 
-                    // Channel cross-section. exponent 2 is the parabola a natural
-                    // stream cuts; 4 is a flat bed with steep banks; 1 is a shallow V.
-                    float d = centreDepth[i] * (1f - Mathf.Pow(Mathf.Abs(u), exponent));
-                    if (d < 0f) d = 0f;
-                    
-                    // Same conformer as the level bodies, applied per vertex because a
-                    // ribbon's surface follows its own gradient rather than one level:
-                    // bound the depth, then drop the dry bank edge into the ground.
-                    d = ShorelineConformer.CapDepth(d, ShorelineConformer.MaxSkirtDepthMetres);
+                    for (int dz = -1; dz <= 1; dz++)
+                    {
+                        int nz = z + dz;
+                        if (nz < 0 || nz >= gz) continue;
 
-                    float skirtY = ShorelineConformer.CalculateSkirtHeight(
-                                       surface[i], d, ShorelineConformer.SkirtDropMetres);
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int nx = x + dx;
+                            if (nx < 0 || nx >= gx) continue;
 
-                    Vector3 world = new Vector3(centre.x + side.x * u * extendWidth,
-                                                skirtY,
-                                                centre.z + side.y * u * extendWidth);
+                            int ni = nz * gx + nx;
+                            if (!wet[ni] || region[ni] != 0) continue;
 
-                    int v = i * across + j;
-
-                    body.vertices[v] = transform.InverseTransformPoint(world);
-                    body.normals[v] = localNormal;
-                    body.tangents[v] = new Vector4(tan.x, tan.y, tan.z, -1f);
-
-                    if (d > deepest) deepest = d;
-
-                    body.uv[v] = new Vector2(whitewater[i], d);
-
-                    Color c = colour;
-                    c.a = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(d / feather));
-                    body.colors[v] = c;
-
-                    if (!boundsStarted) { worldBounds = new Bounds(world, Vector3.zero); boundsStarted = true; }
-                    else worldBounds.Encapsulate(world);
+                            region[ni] = current;
+                            stack[top++] = ni;
+                        }
+                    }
                 }
+
+                if (size > largestSize) { largestSize = size; largest = current; }
             }
 
-            int idx = 0;
-            for (int i = 0; i < count - 1; i++)
-            {
-                for (int j = 0; j < across - 1; j++)
-                {
-                    int v0 = i * across + j;
-                    int v1 = v0 + 1;
-                    int v2 = v0 + across;
-                    int v3 = v2 + 1;
+            // Nothing was wet. Assemble's own quad count then returns null, which is
+            // the honest "this body holds no water", so there is nothing to prune.
+            if (largest == 0) return;
 
-                    body.triangles[idx++] = v0;
-                    body.triangles[idx++] = v2;
-                    body.triangles[idx++] = v1;
-
-                    body.triangles[idx++] = v1;
-                    body.triangles[idx++] = v2;
-                    body.triangles[idx++] = v3;
-                }
-            }
-
-            body.surfaceLevel = surfSum / count;
-            body.maxDepth = Mathf.Max(0.1f, deepest);
-            body.meanFlow = flowSum / count;
-
-            // Surface extent only - see the note in Assemble. One writer for the
-            // downward reach, in UCWaterVolume.ExtendDown.
-            body.worldBounds = worldBounds;
-
-            return body;
+            for (int i = 0; i < n; i++)
+                if (wet[i] && region[i] != largest) wet[i] = false;
         }
+
+        /// <summary>
+        /// Keeps only the wet cells the open sea can reach, and clears the rest. The open
+        /// sea is every wet cell on the lattice boundary; the flood spreads inward across
+        /// wet neighbours from all of them at once. A below-sea-level hollow with no wet
+        /// path to the edge is dropped, so the ocean shader never appears in a basin the
+        /// sea cannot flow into (R11). Ocean-only: called after the depth cull has set
+        /// <paramref name="wet"/>.
+        ///
+        /// If NO boundary cell is wet - a sea whose footprint sits entirely inland, which
+        /// is a deliberately placed enclosed body - nothing is connected and the mask is
+        /// left exactly as it was rather than emptied, so the placed body is not erased.
+        /// </summary>
+        private static void KeepSeaConnected(bool[] wet, int gx, int gz)
+        {
+            int n = gx * gz;
+            if (n <= 0) return;
+
+            bool[] reached = new bool[n];
+            int[] stack = new int[n];
+            int top = 0;
+
+            // Seed from every wet boundary cell - the whole edge is open water, because
+            // the ocean plane is sized to span the world.
+            for (int x = 0; x < gx; x++)
+            {
+                int bottom = x;                 // z = 0
+                int topRow = (gz - 1) * gx + x;  // z = gz-1
+                if (wet[bottom] && !reached[bottom]) { reached[bottom] = true; stack[top++] = bottom; }
+                if (wet[topRow] && !reached[topRow]) { reached[topRow] = true; stack[top++] = topRow; }
+            }
+            for (int z = 0; z < gz; z++)
+            {
+                int left = z * gx;              // x = 0
+                int right = z * gx + (gx - 1);  // x = gx-1
+                if (wet[left] && !reached[left]) { reached[left] = true; stack[top++] = left; }
+                if (wet[right] && !reached[right]) { reached[right] = true; stack[top++] = right; }
+            }
+
+            // No open-water edge at all: an enclosed placed sea. Leave it be.
+            if (top == 0) return;
+
+            while (top > 0)
+            {
+                int i = stack[--top];
+                int x = i % gx;
+                int z = i / gx;
+
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int nz = z + dz;
+                    if (nz < 0 || nz >= gz) continue;
+
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int nx = x + dx;
+                        if (nx < 0 || nx >= gx) continue;
+
+                        int ni = nz * gx + nx;
+                        if (!wet[ni] || reached[ni]) continue;
+
+                        reached[ni] = true;
+                        stack[top++] = ni;
+                    }
+                }
+            }
+
+            for (int i = 0; i < n; i++)
+                if (wet[i] && !reached[i]) wet[i] = false;
+        }
+
+        // ---------------------------------------------------------------------
+        //  River  (implementation removed in the river teardown; the mesh/carve
+        //  builder is gone. WaterBodyKind.River / ShapeMode.RiverSpline remain as
+        //  inert taxonomy for the weather/ice/wave/ecology systems.)
+        // ---------------------------------------------------------------------
 
         // =====================================================================
         //  SCENE PLUMBING
@@ -3027,14 +3373,233 @@ namespace UniverseCreator.TerrainSystem
             // uniform flow. Everything else follows its own vertex stream.
             material.SetFloat(UCWaterProps.UseVertexFlow, kind == WaterBodyKind.Ocean ? 0f : 1f);
 
+            // Spectral richness by body kind, keyed off the kind like the flow above and
+            // mirrored into the physics surface in AttachVolume so a boat sits on the same
+            // swell it is drawn on. An open ocean carries a broad set of wave trains, a
+            // lake a simpler pair, a decorative pool barely a ripple. A river advects that
+            // swell downstream (the only kind that does); still water keeps _WaveFlowAdvect
+            // at 0 so it stays a line-for-line match for the CPU buoyancy mirror.
+            material.SetFloat(UCWaterProps.WaveOctaves, WaveOctavesFor(kind));
+            material.SetFloat(UCWaterProps.WaveFlowAdvect, kind == WaterBodyKind.River ? 1f : 0f);
+
+            // Calm to begin with; the weather layer raises it in a storm (UCWaterWeatherCoupling).
+            material.SetFloat(UCWaterProps.WaveStormAmp, 1f);
+
             return material;
         }
 
-        private void AttachVolume(WaterBodyData body)
+        /// <summary>
+        /// How many ambient wave trains a body of this kind runs, 1..4. An open ocean
+        /// carries the broadest swell spectrum, a lake a calmer pair, a pool a single
+        /// ripple; a river reads like a moving lake. Feeds both the material
+        /// (_WaveOctaves) and the physics surface (WaterSurfaceParams.octaves), which
+        /// must agree - see UC_WaterInput.hlsl / UCWaterSurface.WaveOffset.
+        ///
+        /// Public and static so the quality-tier driver (W8) can recompute a body's
+        /// AUTHORED octave count straight from its kind and cap it per tier, without
+        /// reading the possibly-already-capped live value - that is what lets a lowered
+        /// tier be raised again and restore the full spectrum.
+        /// </summary>
+        public static float WaveOctavesFor(WaterBodyKind k)
+        {
+            switch (k)
+            {
+                case WaterBodyKind.Ocean: return 4f;
+                case WaterBodyKind.Lake:  return 2f;
+                case WaterBodyKind.River: return 2f;
+                default:                  return 1f;   // Pool and anything decorative
+            }
+        }
+
+        // Builds the ocean Far Distance Mesh (§4i.3): a flat, color-matched ring that
+        // extends the sea from the body outline out by horizonDistanceMetres, sitting a
+        // hair below the surface so the body's own swell wins at the seam. Two loops of
+        // the outline (so a rectangle ocean is 8 verts), wave-free, ocean only. The water
+        // shader is Cull Off, so winding is immaterial here; normals point up for lighting.
+        private void BuildOceanHorizon(WaterBodyData body)
+        {
+            if (kind != WaterBodyKind.Ocean) return;
+            if (horizonDistanceMetres <= 0.01f) return;
+            if (surfaceObject == null || body == null) return;
+
+            MeshRenderer bodyRenderer = surfaceObject.GetComponent<MeshRenderer>();
+            Material mat = bodyRenderer != null ? bodyRenderer.sharedMaterial : null;
+            if (mat == null) return;   // nothing to color-match to; skip rather than guess
+
+            List<Vector3> ring = WorldShoreRing();
+            if (ring == null || ring.Count < 3) return;
+
+            int n = ring.Count;
+
+            // Centre in world XZ so the outward push is radial from the body middle.
+            float cx = 0f, cz = 0f;
+            for (int i = 0; i < n; i++) { cx += ring[i].x; cz += ring[i].z; }
+            cx /= n; cz /= n;
+
+            // A hair below the surface: the body mesh (which rides the swell) stays on top
+            // at the seam, so there is no z-fight and no visible lip between the two.
+            float y = body.surfaceLevel - 0.05f;
+
+            Vector3[] verts = new Vector3[n * 2];
+            Vector3[] norms = new Vector3[n * 2];
+            Vector4[] tans  = new Vector4[n * 2];
+            Vector2[] uvs   = new Vector2[n * 2];
+            Color[]   cols  = new Color[n * 2];
+
+            // R=G=0.5, A=0: UCDecodeWaterVertex sees non-zero data (so it does NOT fall back
+            // to "fully wet") and reads weight w=0, which zeroes BOTH the Gerstner vertical
+            // and the new horizontal term -> a dead-flat, color-matched horizon at no wave
+            // cost. uv.y large so the depth-tinted colour reads as open deep sea.
+            Color flat = new Color(0.5f, 0.5f, 0f, 0f);
+
+            Vector3 upL = transform.InverseTransformDirection(Vector3.up).normalized;
+            Vector3 rtL = transform.InverseTransformDirection(Vector3.right);
+            if (rtL.sqrMagnitude < 1e-6f) rtL = Vector3.right;
+            rtL.Normalize();
+            Vector4 tan = new Vector4(rtL.x, rtL.y, rtL.z, -1f);
+
+            // WORLD-EDGE DERIVED REACH (author report 2026-10-06: "the horizon is at 8k by 8k
+            // and the world is 4k by 4k - it should be at the end of the world", then: "do not
+            // hard code it ... what if I have a 40k by 40k or 1k by 1k world").
+            //
+            // The ring's job is that the sea never visibly ends. The physical scale of that job
+            // is the geometric horizon, d = sqrt(2*R*h + h*h) with R = 6 371 000 m (Earth mean
+            // radius) - ~4.7 km at a 1.7 m eye height, ~8 km at 5 m, ~35 km from a 100 m hill.
+            // That equation is why the authored default is thousands of metres rather than tens.
+            //
+            // But a FINITE world ends sooner than the planet does, and no single constant fits
+            // every world: 8 km dwarfs a 1 km world and falls short inside a 40 km one. So the
+            // reach is MEASURED from the live terrain bounds instead of authored - the ring
+            // stops exactly at the world edge whatever that edge is. The authored metres remain
+            // only as the no-terrain fallback and the 0 = off switch.
+            bool hasWorld = false;
+            float wMinX = 0f, wMaxX = 0f, wMinZ = 0f, wMaxZ = 0f;
+            Terrain[] worldTerrains = Terrain.activeTerrains;
+            if (worldTerrains != null)
+            {
+                for (int i = 0; i < worldTerrains.Length; i++)
+                {
+                    Terrain tr = worldTerrains[i];
+                    if (tr == null || tr.terrainData == null) continue;
+
+                    Vector3 tp = tr.transform.position;
+                    Vector3 ts = tr.terrainData.size;
+
+                    if (!hasWorld)
+                    {
+                        wMinX = tp.x; wMaxX = tp.x + ts.x;
+                        wMinZ = tp.z; wMaxZ = tp.z + ts.z;
+                        hasWorld = true;
+                    }
+                    else
+                    {
+                        if (tp.x < wMinX) wMinX = tp.x;
+                        if (tp.z < wMinZ) wMinZ = tp.z;
+                        if (tp.x + ts.x > wMaxX) wMaxX = tp.x + ts.x;
+                        if (tp.z + ts.z > wMaxZ) wMaxZ = tp.z + ts.z;
+                    }
+                }
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 p = ring[i];
+                float dx = p.x - cx, dz = p.z - cz;
+                float len = Mathf.Sqrt(dx * dx + dz * dz);
+                float ux = len > 1e-4f ? dx / len : 0f;
+                float uz = len > 1e-4f ? dz / len : 0f;
+
+                // How far this vertex may travel before it leaves the world box: the 2D
+                // ray-box exit distance along (ux, uz). A vertex already outside the box, or
+                // pointing along a zero axis, yields no travel on that axis.
+                //
+                // When the world is measurable this IS the reach - not a minimum against the
+                // authored metres. A fixed number cannot serve a 1 km world and a 40 km world
+                // at once: on the small one it overshoots into empty space, on the large one it
+                // stops short and the sea visibly ends mid-world. Deriving it from the terrain
+                // bounds makes the ring end at the world edge at EVERY world size, which is
+                // what the author asked for. horizonDistanceMetres survives only as the
+                // fallback for when there is no terrain to measure (and as the on/off switch).
+                float reach = horizonDistanceMetres;
+                if (hasWorld)
+                {
+                    float tx = ux > 1e-6f  ? (wMaxX - p.x) / ux
+                             : ux < -1e-6f ? (wMinX - p.x) / ux
+                                           : float.MaxValue;
+                    float tz = uz > 1e-6f  ? (wMaxZ - p.z) / uz
+                             : uz < -1e-6f ? (wMinZ - p.z) / uz
+                                           : float.MaxValue;
+
+                    float exit = tx < tz ? tx : tz;
+                    if (exit < 0f) exit = 0f;
+                    if (exit < float.MaxValue) reach = exit;
+                }
+
+                Vector3 innerW = new Vector3(p.x, y, p.z);
+                Vector3 outerW = new Vector3(p.x + ux * reach, y, p.z + uz * reach);
+
+                verts[i]     = transform.InverseTransformPoint(innerW);
+                verts[i + n] = transform.InverseTransformPoint(outerW);
+                norms[i] = upL;             norms[i + n] = upL;
+                tans[i]  = tan;             tans[i + n]  = tan;
+                uvs[i]   = new Vector2(0f, 50f); uvs[i + n] = new Vector2(0f, 50f);
+                cols[i]  = flat;            cols[i + n]  = flat;
+            }
+            // HORIZON_BUILD_TAIL
+            int[] tris = new int[n * 6];
+            int t = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int a  = i;
+                int b  = (i + 1) % n;
+                int ao = i + n;
+                int bo = ((i + 1) % n) + n;
+                tris[t++] = a;  tris[t++] = b;  tris[t++] = bo;
+                tris[t++] = a;  tris[t++] = bo; tris[t++] = ao;
+            }
+
+            horizonMesh = new Mesh();
+            horizonMesh.name = "UC Water Horizon";
+            horizonMesh.hideFlags = HideFlags.DontSave;
+            horizonMesh.vertices = verts;
+            horizonMesh.normals  = norms;
+            horizonMesh.tangents = tans;
+            horizonMesh.uv       = uvs;
+            horizonMesh.colors   = cols;
+            horizonMesh.triangles = tris;
+
+            Bounds hb = new Bounds(verts[0], Vector3.zero);
+            for (int i = 1; i < verts.Length; i++) hb.Encapsulate(verts[i]);
+            hb.Expand(new Vector3(0f, 1f, 0f));
+            horizonMesh.bounds = hb;
+
+            horizonObject = new GameObject("UC Water Horizon");
+            horizonObject.layer = gameObject.layer;
+            horizonObject.hideFlags = HideFlags.DontSave | HideFlags.NotEditable; // UC-T04-05B: an ocean refresh must preserve the same global Redo branch.
+            horizonObject.transform.SetParent(transform, false);
+            horizonObject.transform.localPosition = Vector3.zero;
+            horizonObject.transform.localRotation = Quaternion.identity;
+            horizonObject.transform.localScale = Vector3.one;
+
+            MeshFilter hf = horizonObject.AddComponent<MeshFilter>();
+            hf.sharedMesh = horizonMesh;
+
+            MeshRenderer hr = horizonObject.AddComponent<MeshRenderer>();
+            readinessHorizonRenderer = hr; // UC-T09-03: the far mesh follows the same accepted-water presentation hold.
+            hr.sharedMaterial = mat;   // the body's own material -> SRP-batched, color-matched
+            hr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            hr.receiveShadows = false;
+            hr.motionVectorGenerationMode = MotionVectorGenerationMode.ForceNoMotion;
+            hr.allowOcclusionWhenDynamic = false;
+        }
+
+        private void AttachVolume(WaterBodyData body, WaterQuerySurface querySurface)
         {
             volume = surfaceObject.AddComponent<UCWaterVolume>();
+            volume.WorldOwner = CarveWorld; // UC-T04-09: inactive/native publications retain their actual world scope too.
 
             volume.kind = (UCWaterVolume.BodyKind)(int)kind;
+            volume.UseAcceptedSurface(querySurface); // UC-T06-11: freeze/notify accepted water only after its owning world and category are assigned.
             volume.surfaceLevel = body.surfaceLevel;
             volume.maxDepth = Mathf.Max(0.1f, body.maxDepth);
 
@@ -3049,13 +3614,6 @@ namespace UniverseCreator.TerrainSystem
             volume.viscosityScale = viscosityScale;
             volume.emitRipples = emitRipples;
 
-            // A river's surface falls from head to mouth, so it hands the volume the
-            // profile the solve already produced. One level for a reach that drops
-            // hundreds of metres is a wall of water over half of it and dry over the
-            // rest. Still water passes null and keeps its single level.
-            if (kind == WaterBodyKind.River)
-                volume.SetReachProfile(solvedPoints, solvedSurfaceY);
-
             // One description drives both the look and the physics. Reading the wave
             // from anywhere else is how a boat ends up floating a hand's width above
             // the visible surface.
@@ -3063,9 +3621,15 @@ namespace UniverseCreator.TerrainSystem
             volume.surface.waveHeight = water.waveHeightMetres;
             volume.surface.waveLength = water.waveLengthMetres;
             volume.surface.waveSpeed = water.waveSpeed;
+            // Mirror the material's per-kind octave count and calm-start storm scale, so
+            // buoyancy reads the exact swell the shader draws (see ConfigureMaterial).
+            volume.surface.octaves = WaveOctavesFor(kind);
+            volume.surface.stormAmp = 1f;
             volume.surface.flow = body.meanFlow != Vector2.zero
                 ? body.meanFlow
                 : water.flowMetresPerSecond;
+            volume.surface.flowAdvection = kind == WaterBodyKind.River ? 1 : 0; // UC-T04-09: mirror material phase transport.
+            volume.surface.horizontalDisplacement = true;
 
             // Salt water is about 2.5% denser than fresh, and that is enough to change
             // what floats: it is why a boat sits measurably higher at sea than in a
@@ -3078,6 +3642,33 @@ namespace UniverseCreator.TerrainSystem
             volume.underwaterColor = underwaterColor;
             volume.visibilityMetres = Mathf.Max(0.5f, visibilityMetres);
             volume.underwaterBrightness = underwaterBrightness;
+
+            // A river bends, so its flow does too. Hand the volume the solved centreline
+            // and the water surface along it; UCWaterVolume.ReachAt then answers a query
+            // with the flow pointing the way the water actually goes at the nearest point
+            // on the course, instead of the single head->mouth vector set above. The speed
+            // stays the body's authored hydraulic value - the reach only decides direction.
+            // Opt-in and non-breaking: a null/short course leaves surfaceProfile null and
+            // the volume answers as still water exactly as before, so lake/ocean are
+            // untouched (their carve has no river course). This is what makes the per-reach
+            // flow live - SetReachProfile had no caller until here.
+            if (kind == WaterBodyKind.River && riverSurfaceFit != null && riverSurfaceFit.isRiver &&
+                riverSurfaceFit.courseWorld != null && riverSurfaceFit.courseWorld.Count >= 2) // UC-T04-04: queries consume the accepted surface, not excavation dimensions.
+            {
+                List<Vector3> pts = riverSurfaceFit.courseWorld;
+                float[] surfY = new float[pts.Count];
+                for (int i = 0; i < pts.Count; i++)
+                {
+                    float wl, bed, hw, lat;
+                    // The surface at the centreline is the channel water level there; if the
+                    // sample falls outside the carved band (shouldn't on the centreline) keep
+                    // the course point's own elevation rather than inventing one.
+                    surfY[i] = riverSurfaceFit.TryRiverSurfaceAt(pts[i].x, pts[i].z, out wl, out bed, out hw, out lat)
+                        ? wl
+                        : pts[i].y;
+                }
+                volume.SetReachProfile(pts, surfY);
+            }
         }
 
         // =====================================================================
@@ -3113,7 +3704,6 @@ namespace UniverseCreator.TerrainSystem
         public void SnapCourseToGround()
         {
             Terrain[] terrains = Terrain.activeTerrains;
-            SnapToGround(course, terrains);
             SnapToGround(outline, terrains);
         }
 
@@ -3127,226 +3717,6 @@ namespace UniverseCreator.TerrainSystem
                 world.y = SampleGround(terrains, world, world.y);
                 line.points[i] = transform.InverseTransformPoint(world);
             }
-        }
-
-        /// <summary>
-        /// The course as the carve will actually follow it in XZ: the same centripetal
-        /// Catmull-Rom tessellation WorldCourse runs, in world space, with none of the
-        /// ground work.
-        ///
-        /// This exists so the scene view can draw the curve instead of the control
-        /// polygon. Drawing straight lines between the nodes was the reason the river
-        /// looked like "a separate object" from its own spline - the line on screen was
-        /// the polygon, and the trench was the curve through it, and on a bend those
-        /// are metres apart. Now both come out of the same function.
-        ///
-        /// Deliberately does NOT sample the ground or run the valley fit, because this
-        /// is called from a scene-view repaint, which happens as fast as the mouse
-        /// moves. It is list arithmetic and nothing else.
-        [System.NonSerialized]
-        private List<Vector3> cachedPreviewCurve;
-        [System.NonSerialized]
-        private int cachedPreviewCourseHash;
-        [System.NonSerialized]
-        private Vector3 cachedPreviewTransformPos;
-
-        /// <summary>
-        /// The curve the water body will follow, interpolated and in world space.
-        /// </summary>
-        public List<Vector3> PreviewCourseWorld()
-        {
-            if (course == null || course.Count < 2) return null;
-
-            int currentHash = course.points.Count;
-            if (course.points.Count > 0)
-            {
-                currentHash ^= course.points[0].GetHashCode();
-                currentHash ^= course.points[course.points.Count - 1].GetHashCode();
-            }
-
-            if (cachedPreviewCurve != null && cachedPreviewCourseHash == currentHash && cachedPreviewTransformPos == transform.position)
-            {
-                return cachedPreviewCurve;
-            }
-
-            Polyline curve = new Polyline(course.points.Count);
-            for (int i = 0; i < course.points.Count; i++)
-                curve.Add(course.points[i]);
-
-            curve = SplineOperations.Smooth(curve, SmoothMethod.MovingAverage, 4);
-            curve = SplineOperations.Subdivide(curve, 4);
-
-            List<Vector3> worldPoints = new List<Vector3>(curve.points.Count);
-            for (int i = 0; i < curve.points.Count; i++)
-                worldPoints.Add(transform.TransformPoint(curve.points[i]));
-
-            cachedPreviewCurve = worldPoints;
-            cachedPreviewCourseHash = currentHash;
-            cachedPreviewTransformPos = transform.position;
-
-            return worldPoints;
-        }
-
-        /// <summary>Total course length in world metres, for the inspector readout.</summary>
-        public float CourseLengthMetres()
-        {
-            if (course == null || course.Count < 2) return 0f;
-
-            float total = 0f;
-            for (int i = 1; i < course.Count; i++)
-                total += Vector3.Distance(transform.TransformPoint(course.points[i - 1]),
-                                          transform.TransformPoint(course.points[i]));
-
-            return total;
-        }
-
-        /// <summary>
-        /// Estimated surface drop over the whole course, in metres. Negative means
-        /// the course was drawn uphill - worth reporting, because the fix is to
-        /// reverse the points rather than to change any setting.
-        /// </summary>
-        public float CourseDropMetres()
-        {
-            if (course == null || course.Count < 2) return 0f;
-
-            Terrain[] terrains = Terrain.activeTerrains;
-
-            Vector3 first = transform.TransformPoint(course.points[0]);
-            Vector3 last = transform.TransformPoint(course.points[course.Count - 1]);
-
-            return SampleGround(terrains, first, first.y) - SampleGround(terrains, last, last.y);
-        }
-
-        // =====================================================================
-        //  PER-NODE READOUTS  (T23)
-        //
-        //  A road node in RoadArchitect tells you its grade to the node either
-        //  side of it, and that one number is what a designer actually steers a
-        //  course with: not "the river drops 240 m overall" but "this reach is at
-        //  9%, which is a rapid, and the one before it is at 0.3%, which is a
-        //  pond". The same reading is what makes a hand-drawn river fixable -
-        //  you can see which single node is wrong.
-        //
-        //  The math lives here rather than in the inspector for two reasons. It
-        //  is the body's own property, so the inspector should be displaying it
-        //  and not deciding it; and a method on the component can be asserted by
-        //  the batchmode self-test, which cannot drive a scene GUI. Anything the
-        //  editor computes for itself is untestable by construction.
-        // =====================================================================
-
-        /// <summary>Where node <paramref name="index"/> sits in the world. The course is
-        /// stored local, so every reader needs this and none should transform by hand.</summary>
-        public Vector3 NodeWorldPoint(int index)
-        {
-            if (course == null || index < 0 || index >= course.Count) return transform.position;
-
-            return transform.TransformPoint(course.points[index]);
-        }
-
-        /// <summary>Moves node <paramref name="index"/> to a world position, keeping the
-        /// stored course local. Paired with NodeWorldPoint so the two never disagree.</summary>
-        public void SetNodeWorldPoint(int index, Vector3 world)
-        {
-            if (course == null || index < 0 || index >= course.Count) return;
-
-            course.points[index] = transform.InverseTransformPoint(world);
-            InvalidateSolvedCourse();
-        }
-
-        /// <summary>
-        /// The water surface elevation at node <paramref name="index"/>: what the river
-        /// is actually at there, not what the point's Y happens to hold.
-        /// </summary>
-        /// <remarks>
-        /// Reported before the solve's downhill and containment passes, so a node sitting
-        /// in a rise reads as the uphill step it is instead of the flattened value the
-        /// water ends up at. That is the more useful of the two readings, because the fix
-        /// is to move that node and this is the number that says which one to move.
-        /// </remarks>
-        public float NodeSurfaceY(int index)
-        {
-            return RawSurfaceAt(NodeWorldPoint(index));
-        }
-
-        /// <summary>
-        /// Node <paramref name="index"/> on the water surface - the point moved vertically
-        /// onto the elevation the river has there.
-        /// </summary>
-        /// <remarks>
-        /// Every scene-view marker and every grade reading uses this and not the stored
-        /// point, so a node is drawn where its water is. The stored Y is meaningless in
-        /// the ground-following modes, and drawing markers at it left the whole spline
-        /// hanging in the air above its own river or buried under it - a road laid out
-        /// with floating nodes, which is not how a course is laid out at all.
-        /// </remarks>
-        public Vector3 NodeSurfacePoint(int index)
-        {
-            Vector3 w = NodeWorldPoint(index);
-            w.y = NodeSurfaceY(index);
-            return w;
-        }
-
-        /// <summary>
-        /// Grade in percent from node <paramref name="index"/> to the next node - rise
-        /// over run, times a hundred, the surveyor's figure. Negative means that reach
-        /// climbs, which for a river is the one reading that is always a mistake.
-        /// Zero when there is no next node, or when the two share a position.
-        /// </summary>
-        public float NodeGradePercentToNext(int index)
-        {
-            if (course == null || index < 0 || index + 1 >= course.Count) return 0f;
-
-            return GradePercentBetween(NodeSurfacePoint(index), NodeSurfacePoint(index + 1));
-        }
-
-        /// <summary>Grade in percent arriving at node <paramref name="index"/> from the
-        /// previous one. Same sign convention: negative climbs.</summary>
-        public float NodeGradePercentFromPrev(int index)
-        {
-            if (course == null || index - 1 < 0 || index >= course.Count) return 0f;
-
-            return GradePercentBetween(NodeSurfacePoint(index - 1), NodeSurfacePoint(index));
-        }
-
-        /// <summary>
-        /// Rise over horizontal run as a percentage. Run is measured on the XZ plane and
-        /// not as the straight-line distance: a 45 degree drop is 100%, not 71%, and
-        /// using the slope distance would quietly compress every steep reach.
-        /// </summary>
-        private static float GradePercentBetween(Vector3 from, Vector3 to)
-        {
-            float run = Vector2.Distance(new Vector2(from.x, from.z), new Vector2(to.x, to.z));
-            if (run < 1e-4f) return 0f;
-
-            return ((to.y - from.y) / run) * 100f;
-        }
-
-        /// <summary>
-        /// The body joined at node <paramref name="index"/>, or null. Only the two ends
-        /// of a course can be junctions - a river meets another body where it starts or
-        /// where it finishes, never in the middle - so this answers for those and
-        /// nothing else. Includes the junction the descent walk found on the last build,
-        /// because a connection that was discovered is still a connection and the
-        /// designer needs to see it to know they need not author it.
-        /// </summary>
-        public UCWaterBody JunctionAt(int index)
-        {
-            if (kind != WaterBodyKind.River || course == null || course.Count < 2) return null;
-
-            if (index == 0) return ResolveJoin(false);
-            if (index == course.Count - 1) return ResolveJoin(true);
-
-            return null;
-        }
-
-        /// <summary>Whether node <paramref name="index"/> is an end of the course, and so
-        /// a node that MAY carry a junction. Drawn larger than a plain node either way,
-        /// the way a road's connection node is.</summary>
-        public bool IsEndNode(int index)
-        {
-            if (course == null || course.Count == 0) return false;
-
-            return index == 0 || index == course.Count - 1;
         }
 
         // =====================================================================

@@ -49,10 +49,12 @@ namespace UniverseCreator.Nodes.Modifiers
         public float strength = 20f;
 
         public int octaves = 3;
+        /// <summary>UC-T03-03: fraction of curl-potential amplitude retained per octave, clamped to 0..1; nonfinite uses 0.5.</summary>
+        [Tooltip("Curl detail: amplitude retained per octave (0..1). Affects multiple octaves; nonfinite values use 0.5.")]
         public float detail = 0.5f;
 
         /// <summary>
-        /// Central-difference gap for the curl, in noise-space units. Smaller
+        /// UC-T03-03: central-difference gap for the curl, in world metres. Smaller
         /// tracks finer structure but eventually loses the difference to float
         /// precision.
         /// </summary>
@@ -60,7 +62,8 @@ namespace UniverseCreator.Nodes.Modifiers
 
         protected override void Modify(Matrix m, TileData tile, StopToken stop)
         {
-            if (strength < 0.001f) return;
+            // UC-T03-03: preserve the nonpositive no-warp contract and reject nonfinite displacement before sampling.
+            if (float.IsNaN(strength) || float.IsInfinity(strength) || strength < 0.001f) return;
 
             Noise noise = new Noise(seed);
 
@@ -97,13 +100,14 @@ namespace UniverseCreator.Nodes.Modifiers
                     float wx = originX + x * mppX;
 
                     float cx, cz;
-                    noise.Curl2D(wx, wz, safeSize, out cx, out cz, safeEpsilon, iterations);
+                    noise.Curl2D(wx, wz, safeSize, out cx, out cz, safeEpsilon, iterations, detail, 0f);
 
                     // Metres of displacement, then converted to lattice steps.
                     // Dividing by metres-per-pixel is what makes one setting mean
                     // the same distance at every chunk resolution.
-                    float sx = (ox + x) + (cx * strength) / mppX;
-                    float sz = (oz + z) + (cz * strength) / mppZ;
+                    // UC-T03-03: finite large strengths still clamp to a valid lattice coordinate before float conversion.
+                    float sx = (float)System.Math.Max(ox, System.Math.Min((double)ox + resX - 1, ox + x + ((double)cx * strength) / mppX));
+                    float sz = (float)System.Math.Max(oz, System.Math.Min((double)oz + resZ - 1, oz + z + ((double)cz * strength) / mppZ));
 
                     // GetInterpolated is edge-clamped and takes rect-absolute
                     // lattice coordinates, which is exactly what was built above.

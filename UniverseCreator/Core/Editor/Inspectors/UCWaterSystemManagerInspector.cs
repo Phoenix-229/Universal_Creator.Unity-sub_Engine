@@ -7,7 +7,7 @@
 //
 //  THE CREATE BUTTONS
 //  ------------------
-//  Ocean, Lake, River and Pool are the same four presets as the GameObject menu,
+//  Ocean, Lake, River, Pool and Swamp are the same presets as the GameObject menu,
 //  and they call the same code - UniverseCreatorMenus.SpawnWater. They are here
 //  because the menu parents a new body under "the selected world's WaterSystem",
 //  and when this inspector is open the selection IS a WaterSystem, so the menu's
@@ -39,6 +39,7 @@ namespace UniverseCreator.Editor.Inspectors
         private static bool sourceFoldout = true;
         private static bool seaLevelFoldout = true;
         private static bool defaultsFoldout;
+        private static bool dynamicsFoldout;
         private static bool sharedFoldout;
         private static bool bodyListFoldout;
 
@@ -83,6 +84,10 @@ namespace UniverseCreator.Editor.Inspectors
                                     UCInspectorUI.HeaderGrey);
             if (defaultsFoldout) DrawDefaults();
 
+            dynamicsFoldout = Group(dynamicsFoldout, "Interactive Dynamics",
+                                    UCInspectorUI.HeaderTeal);
+            if (dynamicsFoldout) DrawInteractiveDynamics();
+
             sharedFoldout = Group(sharedFoldout, "Shared Water Description",
                                   UCInspectorUI.HeaderTeal);
             if (sharedFoldout) DrawShared();
@@ -110,7 +115,7 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
             EditorGUILayout.LabelField(
-                "Adds a body under this object, preset and built once. The same four " +
+                "Adds a body under this object, preset and built once. The same " +
                 "presets as GameObject > 3D Object > Universe Creator > Water.",
                 EditorStyles.wordWrappedMiniLabel);
 
@@ -126,18 +131,24 @@ namespace UniverseCreator.Editor.Inspectors
                     "with twelve points and snapped to the ground under it."),
                     UCInspectorUI.ButtonBlue, 26))
                 Create(manager, UniverseCreatorMenus.WaterPreset.Lake);
+
+            if (ActionButton(new GUIContent("River", "An open spline course of child " +
+                    "nodes, seeded with a short starter run. Ctrl+Click the terrain to " +
+                    "add nodes; each node edits its own width/depth/flow."),
+                    UCInspectorUI.ButtonBlue, 26))
+                Create(manager, UniverseCreatorMenus.WaterPreset.River);
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal();
-            if (ActionButton(new GUIContent("River (Spline)", "A course you drag in the " +
-                    "scene view. Flow speed comes from the gradient it falls down."),
-                    UCInspectorUI.ButtonBlue, 26))
-                Create(manager, UniverseCreatorMenus.WaterPreset.River);
-
             if (ActionButton(new GUIContent("Pool", "A small flat-floored basin. Reads " +
                     "its own floor depth rather than the terrain, so it works indoors."),
                     UCInspectorUI.ButtonBlue, 26))
                 Create(manager, UniverseCreatorMenus.WaterPreset.Pool);
+
+            if (ActionButton(new GUIContent("Swamp", "A closed polygon like a lake but " +
+                    "shallow and still, seeded and snapped to the ground under it."),
+                    UCInspectorUI.ButtonBlue, 26))
+                Create(manager, UniverseCreatorMenus.WaterPreset.Swamp);
             EditorGUILayout.EndHorizontal();
 
             if (!manager.HandPlacedEnabled)
@@ -298,6 +309,23 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUI.indentLevel--;
         }
 
+        private void DrawInteractiveDynamics()
+        {
+            EditorGUI.indentLevel++;
+
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("spawnRippleSim"));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("underwaterOnMainCamera"));
+
+            EditorGUILayout.LabelField(
+                "On Play the manager creates the scene-wide ripple simulation (so a " +
+                "body's Emit Ripples is visible) and, if asked, adds the underwater " +
+                "view to the main camera. Buoyancy and the swimming character attach " +
+                "to your own floating/swimming objects.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            EditorGUI.indentLevel--;
+        }
+
         private void DrawShared()
         {
             EditorGUI.indentLevel++;
@@ -370,10 +398,10 @@ namespace UniverseCreator.Editor.Inspectors
 
         private void RebuildAll(UCWaterSystemManager manager)
         {
-            UCWaterBody[] bodies = manager.Bodies;
+            UCWaterBody[] bodies = UCWaterBody.GetWaterRebuildOrder(manager.Bodies); // UC-T04-07: the existing yielding owner follows dependency order.
 
             UCBatchRunner.Run(BatchKey("Rebuild"), "Rebuilding water", bodies.Length,
-                i => UCWaterSystemManager.RebuildBody(bodies[i]),
+                i => bodies[i].RebuildOrderedWaterBody(),
                 () => Repaint());
         }
 

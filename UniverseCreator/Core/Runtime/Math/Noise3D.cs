@@ -533,23 +533,52 @@ namespace UniverseCreator
         }
 
         /// <summary>
-        /// Two-dimensional curl, for warping a heightfield in the XZ plane. The
-        /// 3-D form projected onto a single Y slice: the gradient of one scalar
-        /// potential rotated 90 degrees, which is divergence-free in the plane.
+        /// UC-T03-03: two-dimensional curl of a scalar potential with the original 0.5 detail and zero turbulence.
         /// </summary>
+        /// <param name="x">X coordinate in world metres; nonfinite coordinates produce zero curl.</param>
+        /// <param name="z">Z coordinate in world metres; nonfinite coordinates produce zero curl.</param>
+        /// <param name="size">Positive finite world metres per noise period; invalid values produce zero curl.</param>
+        /// <param name="cx">X component, in normalized potential per world metre.</param>
+        /// <param name="cz">Z component, in normalized potential per world metre.</param>
+        /// <param name="epsilon">Difference gap in world metres, at least 0.00001; nonfinite values use 0.05.</param>
+        /// <param name="iterations">Octave count, clamped to 1..16.</param>
         public void Curl2D(float x, float z, float size, out float cx, out float cz,
                            float epsilon = 0.05f, int iterations = 3)
         {
-            if (epsilon < 1e-5f) epsilon = 1e-5f;
+            Curl2D(x, z, size, out cx, out cz, epsilon, iterations, 0.5f, 0f);
+        }
+
+        /// <summary>UC-T03-03: curl of the configured fractal potential; exposes the controls used by existing curl nodes.</summary>
+        /// <param name="x">Finite X coordinate in world metres.</param>
+        /// <param name="z">Finite Z coordinate in world metres.</param>
+        /// <param name="size">Positive finite world metres per noise period.</param>
+        /// <param name="cx">X component in normalized potential per world metre; zero for invalid coordinates/size or nonfinite sampling.</param>
+        /// <param name="cz">Z component in normalized potential per world metre; zero for invalid coordinates/size or nonfinite sampling.</param>
+        /// <param name="epsilon">Difference gap in world metres, at least 0.00001; nonfinite values use 0.05.</param>
+        /// <param name="iterations">Octave count, clamped to 1..16.</param>
+        /// <param name="detail">Amplitude retained per octave, clamped to 0..1; nonfinite values use 0.5.</param>
+        /// <param name="turbulence">Potential folding, clamped to -1..1; nonfinite values use zero.</param>
+        public void Curl2D(float x, float z, float size, out float cx, out float cz,
+                           float epsilon, int iterations, float detail, float turbulence)
+        {
+            cx = cz = 0f;
+            if (float.IsNaN(x) || float.IsInfinity(x) || float.IsNaN(z) || float.IsInfinity(z) ||
+                float.IsNaN(size) || float.IsInfinity(size) || size <= 0f) return;
+            // UC-T03-03: retain the math layer's engine-independent worker contract.
+            epsilon = float.IsNaN(epsilon) || float.IsInfinity(epsilon) ? 0.05f : System.Math.Max(1e-5f, epsilon);
+            iterations = System.Math.Max(1, System.Math.Min(16, iterations));
+            detail = float.IsNaN(detail) || float.IsInfinity(detail) ? 0.5f : System.Math.Max(0f, System.Math.Min(1f, detail));
+            turbulence = float.IsNaN(turbulence) || float.IsInfinity(turbulence) ? 0f : System.Math.Max(-1f, System.Math.Min(1f, turbulence));
             float inv = 1f / (2f * epsilon);
 
-            float pz1 = Fractal(x, z + epsilon, size, iterations);
-            float pz2 = Fractal(x, z - epsilon, size, iterations);
-            float px1 = Fractal(x + epsilon, z, size, iterations);
-            float px2 = Fractal(x - epsilon, z, size, iterations);
+            float pz1 = Fractal(x, z + epsilon, size, iterations, detail, turbulence);
+            float pz2 = Fractal(x, z - epsilon, size, iterations, detail, turbulence);
+            float px1 = Fractal(x + epsilon, z, size, iterations, detail, turbulence);
+            float px2 = Fractal(x - epsilon, z, size, iterations, detail, turbulence);
 
             cx = (pz1 - pz2) * inv;
             cz = -(px1 - px2) * inv;
+            if (float.IsNaN(cx) || float.IsInfinity(cx) || float.IsNaN(cz) || float.IsInfinity(cz)) cx = cz = 0f;
         }
 
         /// <summary>

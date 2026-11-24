@@ -36,11 +36,17 @@ namespace UniverseCreator.Nodes.Modifiers
         public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
 
         /// <summary>Displacement at full warp, in world metres.</summary>
+        [Tooltip("Displacement in world metres. Negative reverses the warp; nonfinite values have zero displacement.")] // UC-T03-03: units and invalid-value behavior are available to the contract inventory.
         public float intensity = 60f;
 
         /// <summary>Bicubic instead of bilinear resampling. Smoother, slower.</summary>
         public bool highQuality;
 
+        /// <summary>UC-T03-03: warps height and its optional pre-trench reference with the same bounded sampling coordinates.</summary>
+        /// <param name="outputIndex">Height outlet index (0).</param>
+        /// <param name="tile">Input fields and target world lattice; warp values map 0..1 to negative/positive displacement.</param>
+        /// <param name="stop">Optional cancellation token.</param>
+        /// <returns>Owned height field, unchanged input copy for absent warp, zero field for absent height, or null on cancellation.</returns>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             Matrix src = GetInputMatrix(tile, 0, stop);
@@ -56,6 +62,8 @@ namespace UniverseCreator.Nodes.Modifiers
             if (stop != null && stop.StopRequested) return null;
 
             Matrix dst = tile.CreateMatrix();
+            // UC-T03-03: this specialized modifier must warp the reference on the same lattice.
+            if (src.trenchReference != null) dst.trenchReference = dst.Blank();
 
             int resX = dst.rect.size.x;
             int resZ = dst.rect.size.z;
@@ -65,6 +73,8 @@ namespace UniverseCreator.Nodes.Modifiers
             // Warp is authored in metres but sampling is in pixels.
             float pxPerMetreX = 1f / ps.x;
             float pxPerMetreZ = 1f / ps.y;
+            // UC-T03-03: invalid authored displacement has a neutral effect; do not feed NaN/Inf into sampling.
+            float displacement = float.IsNaN(intensity) || float.IsInfinity(intensity) ? 0f : intensity;
 
             for (int z = 0; z < resZ; z++)
             {
@@ -78,13 +88,20 @@ namespace UniverseCreator.Nodes.Modifiers
 
                     float ox = warpX != null ? (warpX.arr[i] - 0.5f) * 2f : 0f;
                     float oz = warpZ != null ? (warpZ.arr[i] - 0.5f) * 2f : 0f;
+                    if (float.IsNaN(ox) || float.IsInfinity(ox)) ox = 0f;
+                    if (float.IsNaN(oz) || float.IsInfinity(oz)) oz = 0f;
 
-                    float sx = x + ox * intensity * pxPerMetreX;
-                    float sz = z + oz * intensity * pxPerMetreZ;
+                    // Double intermediates keep finite extreme inputs from overflowing before edge clamping.
+                    float sx = (float)System.Math.Max(0d, System.Math.Min(resX - 1d, x + (double)ox * displacement * pxPerMetreX));
+                    float sz = (float)System.Math.Max(0d, System.Math.Min(resZ - 1d, z + (double)oz * displacement * pxPerMetreZ));
 
                     dst.arr[i] = highQuality
                         ? Mathf.Clamp01(src.GetInterpolatedCubic(sx, sz))
                         : Mathf.Clamp01(src.GetInterpolated(sx, sz));
+                    if (dst.trenchReference != null)
+                        dst.trenchReference.arr[i] = highQuality
+                            ? Mathf.Clamp01(src.trenchReference.GetInterpolatedCubic(sx, sz))
+                            : Mathf.Clamp01(src.trenchReference.GetInterpolated(sx, sz));
                 }
             }
 
@@ -143,6 +160,16 @@ namespace UniverseCreator.Nodes.Modifiers
             if (src == null) return tile.CreateMatrix();
             if (stop != null && stop.StopRequested) return null;
 
+            // UC-T03-03: evaluate the same strata on pre-trench ground; masks carry no height reference.
+            Matrix result = GenerateStrata(src, outputIndex, stop);
+            if (result != null && outputIndex == 0 && src.trenchReference != null &&
+                (stop == null || !stop.StopRequested))
+                result.trenchReference = GenerateStrata(src.trenchReference, 0, stop);
+            return result;
+        }
+
+        private Matrix GenerateStrata(Matrix src, int outputIndex, StopToken stop)
+        {
             Matrix dst = outputIndex == 0 ? new Matrix(src) : src.Blank();
 
             Noise noise = new Noise(seed);
@@ -332,8 +359,10 @@ namespace UniverseCreator.Nodes.Modifiers
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
         public override string Tooltip { get { return "Flattens the near-shore sea bed into a shelf, then breaks to deep water."; } }
 
-        /// <summary>Sea level, 0..1 of world height.</summary>
-        public float seaLevel = 0.4f;
+        /// <summary>Sea level, 0..1 of world height. The world's one waterline - see
+        /// Coastal Erosion; a shelf cut at a different height than the sea stands at is
+        /// a shelf in mid-air or a shelf drowned too deep to read.</summary>
+        public float seaLevel = 0.35f;
 
         /// <summary>Depth at the shelf break, as a fraction below sea level.</summary>
         public float shelfDepth = 0.06f;

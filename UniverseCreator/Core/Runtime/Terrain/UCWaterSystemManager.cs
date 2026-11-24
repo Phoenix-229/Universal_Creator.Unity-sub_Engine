@@ -51,6 +51,9 @@ using UniverseCreator.Nodes.Creators;
 // for the ocean-level node that turns it into a mask and a shoreline.
 using UniverseCreator.Nodes.Outputs;
 using UniverseCreator.Nodes.Selectors;
+// Same again, for the two nodes that cut the land at the waterline - the wave notch
+// and the near-shore shelf. They measure from sea level, so they are pushed to as well.
+using UniverseCreator.Nodes.Modifiers;
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -61,7 +64,7 @@ namespace UniverseCreator.TerrainSystem
     [ExecuteAlways]
     [AddComponentMenu("Universe Creator/Water System Manager")]
     [DisallowMultipleComponent]
-    public class UCWaterSystemManager : MonoBehaviour
+    public partial class UCWaterSystemManager : MonoBehaviour
     {
         // =====================================================================
         //  SOURCE
@@ -120,10 +123,10 @@ namespace UniverseCreator.TerrainSystem
         [Header("Sea Level")]
 
         [Tooltip("Height that counts as sea level, as a fraction of the world's max " +
-                 "height. 0.3 on a 600 m world is 180 m. Push To Graph writes it into " +
+                 "height. 0.35 on a 600 m world is 210 m. Push To Graph writes it into " +
                  "the nodes that paint the beach at the waterline.")]
         [Range(0f, 1f)]
-        public float nodeSeaLevel = 0.3f;
+        public float nodeSeaLevel = 0.35f;
 
         // REMOVED: ten more "node path" fields - surface offset, mesh resolution, min
         // depth, min area, edge feather, Manning roughness, hydraulic radius cap, max
@@ -158,6 +161,36 @@ namespace UniverseCreator.TerrainSystem
 
         [Tooltip("New bodies emit ripples when something moves in them.")]
         public bool defaultEmitRipples = true;
+
+        // =====================================================================
+        //  INTERACTIVE DYNAMICS (play-mode activator)
+        //
+        //  The per-body settings above (Emit Ripples, Underwater View, Flow
+        //  Force) are copied onto each body's UCWaterVolume at build. But two of
+        //  the dynamics need a SCENE-LEVEL object to be visible, and nothing was
+        //  creating it in a real play session - only the self-test did. So a
+        //  world could have Emit Ripples ticked on every body and still show
+        //  nothing, because the ripple simulation those bodies feed did not
+        //  exist (UCWaterRippleSim.Active was null, and every emitter early-outs
+        //  on that). These opt-in toggles are that missing activator: on Play the
+        //  manager ensures the one ripple sim exists, and can put the underwater
+        //  post effect on the active camera. Buyer-object components (buoyancy,
+        //  swimming character) are still added by the developer to THEIR objects
+        //  - those cannot be auto-attached to objects that do not exist yet.
+        // =====================================================================
+
+        [Header("Interactive Dynamics (Play Mode)")]
+
+        [Tooltip("On Play, ensure the single scene-wide ripple simulation exists " +
+                 "so that bodies with Emit Ripples actually show interaction " +
+                 "ripples. Without it that tick does nothing at runtime.")]
+        public bool spawnRippleSim = true;
+
+        [Tooltip("On Play, add the underwater view post effect to the main camera " +
+                 "so bodies with Underwater View tint and fog the screen when the " +
+                 "camera goes below the surface. Leave off if you drive the " +
+                 "camera effect yourself.")]
+        public bool underwaterOnMainCamera = false;
 
         // =====================================================================
         //  SHARED MATERIAL DESCRIPTION
@@ -256,6 +289,24 @@ namespace UniverseCreator.TerrainSystem
         {
             SyncWorldLayer();
             ApplySourceToBodies();
+
+            // Edit mode is event-driven, never a per-frame ExecuteAlways loop: push the
+            // current weather to the water once here so the scene view shows a stormed or
+            // frozen surface after a change, without keeping the editor hot. Play mode
+            // drives it per frame from the driver's Update instead. (Weather drive)
+            ApplyWeatherEvent();
+
+            // Same event-driven reasoning: resolve the quality tier and push its water
+            // budget once here (ripple tier, wave-train ceiling, underwater extras) so the
+            // scene view already reflects the chosen tier. Play mode re-applies on a tier
+            // change from the driver's Update. (Quality drive)
+            ApplyQualityEvent();
+
+            // Interactive dynamics activator. Only in play: the ripple sim allocates
+            // GPU state and the underwater effect drives a live camera, neither of
+            // which belongs in an idle editor scene. This is what makes the per-body
+            // Emit Ripples / Underwater View toggles actually do something at runtime.
+            if (Application.isPlaying) EnsureInteractiveDynamics();
         }
 
         private void OnValidate()
@@ -266,12 +317,43 @@ namespace UniverseCreator.TerrainSystem
             {
                 SyncWorldLayer();
                 ApplySourceToBodies();
+                ApplyWeatherEvent();
+                ApplyQualityEvent();
             }
         }
 
         // =====================================================================
         //  ACTIONS
         // =====================================================================
+
+        /// <summary>
+        /// Creates the scene-level dynamics objects the per-body toggles depend on.
+        /// Idempotent and play-mode only. The ripple sim is a singleton
+        /// (<see cref="UCWaterRippleSim.Active"/>): if the scene already has one it is
+        /// left alone, otherwise one is added to this manager so that any body with
+        /// Emit Ripples has a sim to feed - without it every emitter early-outs on a
+        /// null Active and the tick looks broken. The underwater view is a camera post
+        /// effect; when asked, it is added to the main camera (its
+        /// <c>RequireComponent(Camera)</c> makes that the correct host) so a body with
+        /// Underwater View tints the screen below the surface. Nothing here touches
+        /// buoyancy or the swimming character - those attach to the developer's own
+        /// floating and swimming objects, which do not exist at world-build time.
+        /// </summary>
+        public void EnsureInteractiveDynamics()
+        {
+            if (spawnRippleSim && UCWaterRippleSim.Active == null)
+            {
+                if (GetComponent<UCWaterRippleSim>() == null)
+                    gameObject.AddComponent<UCWaterRippleSim>();
+            }
+
+            if (underwaterOnMainCamera)
+            {
+                Camera cam = Camera.main;
+                if (cam != null && cam.GetComponent<UCUnderwaterView>() == null)
+                    cam.gameObject.AddComponent<UCUnderwaterView>();
+            }
+        }
 
         /// <summary>
         /// Enables or disables bodies to match the source setting.
@@ -324,10 +406,14 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public int RebuildAll()
         {
-            UCWaterBody[] bodies = Bodies;
+            UniverseCreatorObject uc = World;
+            if (uc != null && uc.graph != null) PushSceneDataToGraph(uc.graph);
+
+            // UC-T04-07: build each body once with receivers prepared first.
+            UCWaterBody[] bodies = UCWaterBody.GetWaterRebuildOrder(Bodies);
             int n = 0;
             for (int i = 0; i < bodies.Length; i++)
-                if (RebuildBody(bodies[i])) n++;
+            { bodies[i].RebuildOrderedWaterBody(); n++; }
             return n;
         }
 
@@ -406,21 +492,238 @@ namespace UniverseCreator.TerrainSystem
         /// Writes the sea level into every node in a graph that measures anything from
         /// it, and returns how many nodes were touched.
         ///
-        /// The shoreline is one elevation, so it has to come from one number. Two
-        /// nodes read it and neither can ask the water where it ended up: both run on
-        /// a worker thread while the terrain is being built, before any water body
-        /// exists. So it is pushed to them from here, and read back from none of them
-        /// - a value with one writer cannot disagree with itself.
+        /// The shoreline is one elevation, so it has to come from one number. Six node
+        /// types read it and none of them can ask the water where it ended up: all of
+        /// them run on a worker thread while the terrain is being built, before any
+        /// water body exists. So it is pushed to them from here, and read back from
+        /// none of them - a value with one writer cannot disagree with itself.
         ///
         /// Ocean Level turns it into the ocean mask, the depth field and the shoreline
-        /// band that textures the beach. Biome Splat paints its sand at it. When those
-        /// two and the ocean body's real surface do not agree, the sand lands at an
-        /// elevation the water never reached and the true waterline stays untextured -
-        /// which is the white shore of 4.4.
+        /// band that textures the beach. Biome Splat paints its sand at it. The
+        /// Hydrology Spawner, River Network Trace, River Fill and Lake Fill decide from
+        /// it where water may stand at all. When any of them and the ocean body's real
+        /// surface do not agree, the sand lands at an elevation the water never reached
+        /// and the true waterline stays untextured - which is the white shore of 4.4 -
+        /// and the channels cut for rivers stop short of the sea that was meant to fill
+        /// them.
         /// </summary>
         public int ApplyToGraph(Graph graph)
         {
+            PushSceneDataToGraph(graph);
             return WalkSeaLevelReaders(graph, true, nodeSeaLevel);
+        }
+
+        /// <summary>
+        /// Hands the scene's river courses, lake footprints and river profiles to the graph's nodes.
+        /// FIX 2026-10-19 (the cause of "River Course Input does nothing"): these pushes used to ride
+        /// ApplyToGraph, which SyncSeaLevelFromOcean / AdoptNodeSeaLevel only reach when the sea level
+        /// MOVED. On every ordinary bake the sea level had not moved, so the course was never pushed,
+        /// the node held an empty list and emitted an empty mask. Both entry points now push
+        /// unconditionally before their early-out.
+        /// </summary>
+        public void PushSceneDataToGraph(Graph graph)
+        {
+            if (graph == null) return;
+            PushRiverCoursesToGraph(graph);
+            PushLakeFootprintsToGraph(graph);
+            BakeRiverProfilesInGraph(graph);
+        }
+
+        /// <summary>
+        /// RIV-3: bakes every River Seed Course node's authored profile curves into the worker-safe
+        /// lookup tables its Generate reads. Returns how many nodes were baked.
+        /// </summary>
+        /// <remarks>
+        /// WHY THIS HAS TO HAPPEN HERE. `AnimationCurve.Evaluate` is NOT thread-safe - it mutates
+        /// an internal evaluation cache - and a node's Generate runs on a worker Task. So the
+        /// curves are sampled to float tables on the MAIN thread and only the tables are read
+        /// during the bake. This rides <see cref="ApplyToGraph"/>, the water system's existing
+        /// sync-to-graph moment, for the same reason the river courses and sea level do: it is the
+        /// one main-thread point that runs before the graph evaluates. An edited curve is picked up
+        /// on the next sync, exactly as an edited sea level is.
+        ///
+        /// Static because it needs no instance state - which also lets the self-test drive it with
+        /// a bare Graph instead of standing up a whole manager component.
+        ///
+        /// A node whose profile is disabled is still baked: baking is cheap, and it means enabling
+        /// the toggle in the inspector does not also require a re-sync to take effect.
+        /// </remarks>
+        public static int BakeRiverProfilesInGraph(Graph graph)
+        {
+            if (graph == null || graph.nodes == null) return 0;
+
+            int baked = 0;
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                UniverseCreator.Nodes.Selectors.RiverSeedCourseNode node =
+                    graph.nodes[i] as UniverseCreator.Nodes.Selectors.RiverSeedCourseNode;
+                if (node == null || node.profile == null) continue;
+
+                node.profile.Bake();
+                baked++;
+            }
+            return baked;
+        }
+
+        /// <summary>
+        /// Pushes every hand-drawn river's baked world course into the graph's River Course Input
+        /// nodes, so a manual river shows up as a River Mask for Banks / Water Mask / scatter
+        /// exclusion. Nodes are pure and cannot reach the scene, so the course is handed in here -
+        /// the same push model as the sea level above. A node with no manual rivers is cleared, so
+        /// it emits an empty mask rather than a stale one. Returns how many nodes were pushed to.
+        /// </summary>
+        /// <remarks>
+        /// Rides <see cref="ApplyToGraph"/>, the water system's sync-to-graph moment, so a river
+        /// edited then re-synced re-pushes exactly as an edited sea level does. It does NOT carve
+        /// or fill: the manual river owns its own trench (BuildRiverDig) and water surface
+        /// (BuildRiverBody); this only tells the graph where the channel is.
+        /// </remarks>
+        public int PushRiverCoursesToGraph(Graph graph)
+        {
+            return PushRiverCoursesToGraph(graph, GetComponentsInChildren<UCWaterBody>(true));
+        }
+
+        /// <summary>UC-T01-06/07: captures only enabled water bodies owned by a world into its detached bake graph.</summary>
+        /// <param name="graph">Snapshot graph; null is a no-op. Its scene-input nodes are cleared when no matching bodies exist.</param>
+        /// <param name="world">World hierarchy owner; null is a no-op. Coordinates and heights are in world metres.</param>
+        /// <remarks>Main thread, once per bake. Nested or overlapping worlds cannot contribute bodies.</remarks>
+        public static void PrepareWorldInputs(Graph graph, UniverseCreatorObject world)
+        {
+            if (graph == null || world == null) return;
+            UCWaterBody[] bodies = world.GetComponentsInChildren<UCWaterBody>(true);
+            for (int i = 0; i < bodies.Length; i++)
+                if (bodies[i] != null && (!bodies[i].isActiveAndEnabled || bodies[i].CarveWorld != world)) bodies[i] = null;
+            PushRiverCoursesToGraph(graph, bodies);
+            PushLakeFootprintsToGraph(graph, bodies);
+        }
+
+        // UC-T01-06/07: one course preparation path for inspector sync and isolated world bakes.
+        private static int PushRiverCoursesToGraph(Graph graph, UCWaterBody[] bodies)
+        {
+            if (graph == null || graph.nodes == null) return 0;
+            int pushed = 0;
+
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                RiverCourseInputNode node = graph.nodes[i] as RiverCourseInputNode;
+                if (node == null) continue;
+
+                List<RiverCourseInputNode.ManualRiverCourse> courses =
+                    new List<RiverCourseInputNode.ManualRiverCourse>();
+
+                for (int b = 0; b < bodies.Length; b++)
+                {
+                    UCWaterBody body = bodies[b];
+                    if (body == null || body.kind != WaterBodyKind.River) continue;
+
+                    // Prefer the SOLVED course (with bed and depth) so the node can cut the same
+                    // channel the scene dig cuts. Fall back to the mask-only course.
+                    Vector2[] pts; float[] half; float[] bed; float[] dep;
+                    body.GatherCourseFromNodes();   // refreshes whether this river follows a procedural trench
+                    if (!body.FollowTrench &&
+                        body.TryGetSolvedCourse(node.fallbackHalfWidthMetres, out pts, out half, out bed, out dep))
+                        courses.Add(new RiverCourseInputNode.ManualRiverCourse
+                            { bodyId = body.GetEntityId().GetHashCode(), pointsXZ = pts, halfWidthM = half, bedY = bed, depthM = dep });
+                    else if (body.TryBakeWorldCourseXZ(node.fallbackHalfWidthMetres, out pts, out half))
+                        courses.Add(new RiverCourseInputNode.ManualRiverCourse { bodyId = body.GetEntityId().GetHashCode(), pointsXZ = pts, halfWidthM = half });
+                }
+
+                int before = node.CourseSignature();
+                node.SetManualCourses(courses.Count > 0 ? courses : null);
+
+                // FIX 2026-10-19: a pushed course on its own does not invalidate the node's cached
+                // result, so a river drawn or moved after the first bake never reached the mask.
+                if (node.CourseSignature() != before) node.MarkDirty();
+                pushed++;
+            }
+            return pushed;
+        }
+
+        /// <summary>
+        /// Pushes every spawned/placed still-water body's world footprint into the graph's Height
+        /// Output nodes (§A6), so the continental-rise guard raises dry sub-sea depressions that
+        /// are NOT lakes into plains while exempting the ground real lakes actually cover - the
+        /// fix for the "dry lake basin below sea level" artifact. Mirrors
+        /// <see cref="PushRiverCoursesToGraph"/>: the nodes are pure and cannot reach the scene,
+        /// so the footprints are handed in here, and a node with no lakes is cleared (null) so the
+        /// pass falls back to its own concavity heuristic. The ocean is deliberately excluded - it
+        /// is already the flood-fill mask the guard measures from. Returns how many nodes were
+        /// pushed to.
+        /// </summary>
+        public int PushLakeFootprintsToGraph(Graph graph)
+        {
+            return PushLakeFootprintsToGraph(graph, GetComponentsInChildren<UCWaterBody>(true));
+        }
+
+        // UC-T01-06/07: reuse the full footprint preparation for snapshots without changing authoring nodes.
+        private static int PushLakeFootprintsToGraph(Graph graph, UCWaterBody[] bodies)
+        {
+            if (graph == null || graph.nodes == null) return 0;
+            int pushed = 0;
+
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                // The River Network treats placed lakes as water too, so no trench is cut through one.
+                UniverseCreator.Nodes.Selectors.RiverNetworkNode net =
+                    graph.nodes[i] as UniverseCreator.Nodes.Selectors.RiverNetworkNode;
+                if (net != null)
+                {
+                    List<HeightOutputNode.LakeFootprint> netLakes = new List<HeightOutputNode.LakeFootprint>();
+                    for (int b = 0; b < bodies.Length; b++)
+                    {
+                        UCWaterBody lb = bodies[b];
+                        if (lb == null || !IsStillWaterKind(lb.kind)) continue;
+                        Vector2[] ring2; Bounds plan2;
+                        if (lb.TryGetWorldFootprint(out ring2, out plan2))
+                            netLakes.Add(new HeightOutputNode.LakeFootprint { bodyId = lb.GetEntityId().ToString(), ringXZ = ring2, planBounds = plan2,
+                                hasSurfaceLevel = true, surfaceMetres = lb.SurfaceWorldY() }); // UC-T03-07: snapshot the actual flat level with the named footprint.
+                    }
+                    if (net.SetLakeFootprints(netLakes.Count > 0 ? netLakes : null)) net.MarkDirty();
+                    pushed++;
+                    continue;
+                }
+
+                HeightOutputNode node = graph.nodes[i] as HeightOutputNode;
+                if (node == null) continue;
+
+                List<HeightOutputNode.LakeFootprint> footprints =
+                    new List<HeightOutputNode.LakeFootprint>();
+
+                for (int b = 0; b < bodies.Length; b++)
+                {
+                    UCWaterBody body = bodies[b];
+                    if (body == null) continue;
+
+                    // Standing water that fills a real basin. The ocean is excluded (it is the
+                    // flood-fill mask already); rivers own their own trench and are handled by
+                    // PushRiverCoursesToGraph, not here.
+                    if (!IsStillWaterKind(body.kind)) continue;
+
+                    Vector2[] ring;
+                    Bounds plan;
+                    if (body.TryGetWorldFootprint(out ring, out plan))
+                        footprints.Add(new HeightOutputNode.LakeFootprint { bodyId = body.GetEntityId().ToString(), ringXZ = ring, planBounds = plan,
+                            hasSurfaceLevel = true, surfaceMetres = body.SurfaceWorldY() }); // UC-T03-07: guard/network capture identical level provenance.
+                }
+
+                node.SetLakeFootprints(footprints.Count > 0 ? footprints : null);
+                pushed++;
+            }
+            return pushed;
+        }
+
+        /// <summary>
+        /// The still-water kinds the lake-footprint push keys on. ONE definition so the push
+        /// (<see cref="PushLakeFootprintsToGraph"/>) and any future reader can never disagree
+        /// about what counts as a lake. The ocean is deliberately NOT here - it is the flood-fill
+        /// mask the shore passes measure sea from - and rivers own their own trench via the
+        /// river-course push.
+        /// </summary>
+        internal static bool IsStillWaterKind(WaterBodyKind kind)
+        {
+            return kind == WaterBodyKind.Lake
+                || kind == WaterBodyKind.Pool
+                || kind == WaterBodyKind.Swamp;
         }
 
         /// <summary>
@@ -432,6 +735,23 @@ namespace UniverseCreator.TerrainSystem
         public static int CountSeaLevelReaders(Graph graph)
         {
             return WalkSeaLevelReaders(graph, false, 0f);
+        }
+
+        /// <summary>
+        /// Pushes a sea level into every reader in a graph, without needing a manager instance.
+        /// Returns how many nodes were touched.
+        /// </summary>
+        /// <remarks>
+        /// Static for the same reason <see cref="BakeRiverProfilesInGraph"/> is: it needs no
+        /// instance state, and it lets a caller (including the self-test) drive the REAL push
+        /// walk rather than a second copy of the type list. A test that reimplemented the walk
+        /// would pass while the shipped walk was broken, which is the failure this avoids.
+        /// <see cref="ApplyToGraph"/> remains the normal entry point - it supplies the manager's
+        /// own <c>nodeSeaLevel</c>, so sea level still has exactly one authority in a real bake.
+        /// </remarks>
+        public static int PushSeaLevelTo(Graph graph, float seaLevel)
+        {
+            return WalkSeaLevelReaders(graph, true, seaLevel);
         }
 
         private static int WalkSeaLevelReaders(Graph graph, bool write, float seaLevel)
@@ -469,6 +789,78 @@ namespace UniverseCreator.TerrainSystem
                         splat.MarkDirty();
                     }
                     touched++;
+                    continue;
+                }
+
+                // EVERY NODE THAT MEASURES FROM THE SHORELINE, NOT JUST THE TWO THAT
+                // PAINT IT. The nodes below decide where water STANDS, and each carries
+                // its own copy of the one elevation: the spawner ends its rivers at it
+                // and refuses lakes below it, Lake Fill will not flood a basin at or
+                // under it.
+                //
+                // Left out of this walk they kept whatever the user last typed while the
+                // ocean settled somewhere else entirely - so the graph carved beds and
+                // flooded basins against one shoreline and the water arrived at another.
+                // That is the coastal half of "trenches with no water in them": a river
+                // mouth cut to 0.35 of world height under a sea standing at 0.05 is a
+                // channel that the ocean never reaches, and a lake basin rejected for
+                // sitting below a sea level that was never true is a basin left dry.
+                HydrologyNode hydrology = node as HydrologyNode;
+                if (hydrology != null)
+                {
+                    if (write) { hydrology.seaLevel = seaLevel; hydrology.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                LakeFillNode lakeFill = node as LakeFillNode;
+                if (lakeFill != null)
+                {
+                    if (write) { lakeFill.seaLevel = seaLevel; lakeFill.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                // THE TWO THAT CUT THE LAND AT THE WATERLINE
+                // Coastal Erosion cuts the wave notch and Coastal Shelf Shaper flattens
+                // the near-shore bed, both measured from their own seaLevel. Left out of
+                // this walk the notch is cut into a hillside the sea never reaches and
+                // the shelf is drowned or left standing in the air - a shoreline the
+                // water disagrees with, in terrain rather than in a mask.
+                CoastalErosionNode erosion = node as CoastalErosionNode;
+                if (erosion != null)
+                {
+                    if (write) { erosion.seaLevel = seaLevel; erosion.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                CoastalShelfShaperNode shelf = node as CoastalShelfShaperNode;
+                if (shelf != null)
+                {
+                    if (write) { shelf.seaLevel = seaLevel; shelf.MarkDirty(); }
+                    touched++;
+                    continue;
+                }
+
+                // CTL-1: SCATTER reads the waterline too - shore clearance, the submerged
+                // rejection and the aquatic opt-in all measure against it, and until now it was a
+                // typed 0.35 per node that nothing kept in step with the real ocean. That is the
+                // "untextured shoreline" fault one layer up: plants placed against a waterline the
+                // water never reached.
+                //
+                // It joins THIS walk rather than getting a push of its own, so sea level keeps
+                // exactly one writer - a second pusher is how two numbers for one elevation start
+                // disagreeing again.
+                //
+                // Gated on autoSeaLevel: a node whose author typed a value is left alone, which is
+                // CTL-1's "an authored override still wins". New nodes opt in via OnCreatedFresh.
+                UniverseCreator.Nodes.Scatter.ScatterNodeBase scatter =
+                    node as UniverseCreator.Nodes.Scatter.ScatterNodeBase;
+                if (scatter != null && scatter.autoSeaLevel)
+                {
+                    if (write) { scatter.seaLevel = seaLevel; scatter.MarkDirty(); }
+                    touched++;
                 }
             }
 
@@ -483,11 +875,11 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Locks the normalised sea level onto the ocean's real surface height.
         ///
-        /// The sea's level is not authored: it is derived from the median terrain height
-        /// around the world edge, in metres, and baked into the ocean body's transform.
-        /// The splat node paints its beach from a 0..1 fraction of the height range.
-        /// Those are one elevation in two units, and until they are locked together the
-        /// sand paints where the water is not - the untextured shoreline.
+        /// The sea's level is authored as a 0..1 fraction of the height range and baked
+        /// into the ocean body's transform in metres. Those are one elevation in two
+        /// units, and if the user drags the ocean body the metres move while the fraction
+        /// does not - so the sand paints where the water is not, the untextured shoreline.
+        /// This locks the fraction back onto wherever the body actually stands.
         ///
         /// Returns true when the value actually moved, which means the splatmaps already
         /// on the terrain were painted from a stale sea level and owe a repaint.
@@ -496,12 +888,14 @@ namespace UniverseCreator.TerrainSystem
         {
             if (uc == null || uc.maxHeightMeters <= 0f) return false;
 
+            PushSceneDataToGraph(uc.graph);   // always: courses must not wait for a sea-level change
+
             UCWaterBody ocean = FindOcean();
             if (ocean == null) return false;
 
             // Read off the body with the same expression every other consumer of a
-            // surface uses, rather than recomputing the median here: a second copy of
-            // that calculation is a second answer waiting to disagree.
+            // surface uses: a second copy of that calculation is a second answer
+            // waiting to disagree.
             float surfaceY = ocean.transform.position.y + ocean.surfaceOffsetMetres;
 
             float normalised = Mathf.Clamp01(
@@ -511,6 +905,35 @@ namespace UniverseCreator.TerrainSystem
 
             nodeSeaLevel = normalised;
             ApplyToGraph(uc.graph);
+            return true;
+        }
+
+        /// <summary>
+        /// Locks the sea level onto a fraction the build has already committed to - the
+        /// level a fresh procedural ocean is about to be placed at - when there is no
+        /// ocean body standing yet for <see cref="SyncSeaLevelFromOcean"/> to read.
+        ///
+        /// This is the BEFORE-the-bake half of the same reconciliation. SyncSeaLevelFromOcean
+        /// runs AFTER the terrain settles and, when it finds the two out of step, forces a
+        /// full second RebuildAll to repaint the beach - which was firing on nearly every
+        /// Generate, because the manager began at its 0.35 default while the graph placed the
+        /// ocean at the Hydrology node's own fraction, so they always disagreed and the world
+        /// "regenerated again the moment it finished". Adopting the spawn's fraction here, and
+        /// pushing it to the shoreline readers, means the FIRST bake already paints the true
+        /// waterline and the post-settle sync has nothing to move.
+        ///
+        /// Deliberately no FindOcean: this is the path taken precisely when no ocean exists
+        /// yet. The clamp-and-apply is shared with SyncSeaLevelFromOcean rather than copied,
+        /// so the two cannot drift. Returns true when the value moved.
+        /// </summary>
+        public bool AdoptNodeSeaLevel(float fraction, Graph graph)
+        {
+            float clamped = Mathf.Clamp01(fraction);
+            PushSceneDataToGraph(graph);      // always: courses must not wait for a sea-level change
+            if (Mathf.Abs(clamped - nodeSeaLevel) <= SeaLevelEpsilon) return false;
+
+            nodeSeaLevel = clamped;
+            ApplyToGraph(graph);
             return true;
         }
 
@@ -526,33 +949,112 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Every Hydrology Spawner in a graph that actually reaches an Output, which is
-        /// the one honest answer to "does this world generate its own water".
+        /// Every Hydrology Spawner in a graph that is actually wired, which is the one
+        /// honest answer to "does this world generate its own water".
         ///
-        /// Presence is not enough. A spawner sitting in a graph with nothing plugged
-        /// into an Output produces nothing, so counting it would tell a body it is
-        /// graph-linked when the graph will never re-fit it - and it would break the
-        /// user's rule that water appears only where the graph asks for it. Walked
-        /// backwards from every Output node, which is the same reachability the
-        /// evaluator itself uses.
+        /// Presence is not enough. A spawner dropped in a graph with nothing connected to
+        /// it at all has not been asked for anything, so counting it would tell a body it
+        /// is graph-linked when nothing will ever re-fit it - and it would break the
+        /// user's rule that water appears only where the graph asks for it.
         ///
-        /// One walk with two callers: the world reads the first spawner to run it, and
+        /// Wired means either half: its mask outputs reach an Output (walked backwards,
+        /// the same reachability the evaluator uses), or it is connected at all - see
+        /// SpawnerIsWired for why the object half cannot be judged by mask reachability.
+        ///
+        /// One test with two callers: the world reads the first spawner to run it, and
         /// a body reads the count to know whether it is graph-linked. Two copies of "is
         /// it connected" would eventually give two answers.
         /// </summary>
         public static List<HydrologyNode> ConnectedHydrology(Graph graph)
         {
             List<HydrologyNode> found = new List<HydrologyNode>();
-            if (graph == null || graph.nodes == null || graph.connections == null) return found;
+            if (graph == null || graph.nodes == null) return found;
 
-            // Seed the walk with every Output node, then follow connections backwards.
-            HashSet<string> reached = new HashSet<string>();
-            Queue<string> pending = new Queue<string>();
+            HashSet<string> reached = ReachedNodeIds(graph);
 
             for (int i = 0; i < graph.nodes.Count; i++)
             {
+                HydrologyNode h = graph.nodes[i] as HydrologyNode;
+                if (h == null) continue;
+                if (reached.Contains(h.id) || SpawnerIsWired(graph, h)) found.Add(h);
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// True when a Hydrology Spawner is wired into the graph at all: its Height input
+        /// is fed, or one of its mask outputs is consumed.
+        /// </summary>
+        /// <remarks>
+        /// WHY THE SPAWNER IS NOT JUDGED BY OUTPUT-REACHABILITY ALONE
+        /// Output-reachability is the right question for a node whose product is a
+        /// matrix: a Lake Fill that reaches no Output has had its flood thrown away, so
+        /// it did nothing. The spawner's product is not a matrix. It places river, lake
+        /// and ocean OBJECTS in the scene, reading the finished ground straight off
+        /// Terrain.activeTerrains - the graph is not in that path at all. Its two mask
+        /// ports are a separate, optional service: they let the same drainage drive
+        /// carving and splatting.
+        ///
+        /// Judged only by whether those optional masks reach an Output, a spawner fed a
+        /// Height chain and asked for three rivers produced nothing, because the user had
+        /// not also wired the mask half - and there is no wiring that makes a river mask
+        /// terminate in a Height Output on its own merits. So the node that exists to
+        /// make water sat there with every field filled in, doing nothing, until an
+        /// unrelated second chain was built. That is the reported fault in one sentence.
+        ///
+        /// Being wired is still required. A spawner dropped in a graph and left
+        /// completely unconnected has not been asked for anything, and must not flood a
+        /// world by its mere presence - which is also the rule the user set: water
+        /// appears only where the graph asks for it.
+        /// </remarks>
+        private static bool SpawnerIsWired(Graph graph, HydrologyNode node)
+        {
+            if (graph == null || graph.connections == null || node == null) return false;
+
+            for (int i = 0; i < graph.connections.Count; i++)
+            {
+                Connection c = graph.connections[i];
+                if (c.targetNodeId == node.id || c.sourceNodeId == node.id) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Every node id that reaches an Output, walked backwards from every Output
+        /// node. This is the same reachability the evaluator itself uses.
+        /// </summary>
+        /// <remarks>
+        /// One walk, every caller. The spawner lookup and the water-node lookup below
+        /// ask the same question about the same graph; written twice they would
+        /// eventually give two answers about whether a world generates water.
+        ///
+        /// SEEDED ON IOutputNode, WHICH IS WHAT THE EVALUATOR SEEDS ON
+        /// This used to seed on the OutputNode base class, and that is a narrower set
+        /// than the evaluator's: Scatter nodes, Shader Output, and the Lighting, Weather
+        /// and Wind outputs implement IOutputNode directly without deriving from
+        /// OutputNode. GraphEvaluator collects "n is IOutputNode", so a graph terminating
+        /// in one of those was evaluated in full - the masks were built, the ground was
+        /// carved - while this walk could not see the terminal, found the Hydrology
+        /// Spawner unreached, and reported that the world asks for no procedural water.
+        /// ResolveHydrology then returned null and the caller SWEPT: every river, lake
+        /// and ocean object removed, on a graph that had just finished drawing them a
+        /// riverbed. A spawner with every field correctly filled in and wired to a live
+        /// Height chain produced nothing, which is exactly the "the ports do nothing when
+        /// I connect them" fault. The doc line above had claimed these two agreed for as
+        /// long as they did not.
+        /// </remarks>
+        private static HashSet<string> ReachedNodeIds(Graph graph)
+        {
+            HashSet<string> reached = new HashSet<string>();
+            if (graph == null || graph.nodes == null || graph.connections == null) return reached;
+
+            Queue<string> pending = new Queue<string>();
+
+            // Seed the walk with every Output node, then follow connections backwards.
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
                 Generator node = graph.nodes[i];
-                if (node == null || !(node is OutputNode)) continue;
+                if (node == null || !(node is IOutputNode)) continue;
                 if (reached.Add(node.id)) pending.Enqueue(node.id);
             }
 
@@ -568,12 +1070,137 @@ namespace UniverseCreator.TerrainSystem
                 }
             }
 
+            return reached;
+        }
+
+        /// <summary>
+        /// The hydrology settings this world's graph asks for, or null when it asks for
+        /// no procedural water at all. What HydrologyGenerator is actually driven by.
+        /// </summary>
+        /// <remarks>
+        /// THREE ANSWERS, IN PRIORITY ORDER
+        ///
+        /// 1. A Hydrology Spawner reaching an Output. Its numbers win outright - every
+        ///    count comes off the node the user placed, and nothing here second-guesses
+        ///    it. This is the user's rule: "if connected the number of rivers comes from
+        ///    the hydrology node, same for the lake number".
+        ///
+        /// 2. No spawner, but a water node reaching an Output - a Lake Fill or an Ocean
+        ///    Level. The graph has plainly asked for water, so it gets water, with the
+        ///    counts derived from the world's own size by the drainage math below rather
+        ///    than from a node that is not there. This is the other half of the same
+        ///    rule: "if the hydrology spawner node is not connected then they will use
+        ///    native math".
+        ///
+        ///    (Rivers are authored by hand through the rebuilt River Spline body, not by
+        ///    this lake/ocean native-math fallback, so only Lake Fill and Ocean Level are
+        ///    tested below - a graph with neither stays dry here regardless of any river.)
+        ///
+        ///    It is per kind, not all-or-nothing. A graph with only a Lake Fill gets
+        ///    lakes and stays land-locked; one with an Ocean Level gets the sea. A
+        ///    world does not sprout a coastline because it was asked for a lake.
+        ///
+        /// 3. Neither. No procedural water, and the caller sweeps anything a
+        ///    since-disconnected node left standing.
+        ///
+        /// The answer is a HydrologyNode either way - the real one, or one synthesized
+        /// from native math - because that is the whole of what GenerateFromNode reads.
+        /// A parallel settings struct would be the same eight fields written twice.
+        /// </remarks>
+        public static HydrologyNode ResolveHydrology(Graph graph, UniverseCreatorObject world)
+        {
+            if (graph == null || graph.nodes == null) return null;
+
+            HashSet<string> reached = ReachedNodeIds(graph);
+
+            // 1. The spawner wins whenever one is connected. Same test ConnectedHydrology
+            //    applies, so the count in the inspector and the node that actually runs
+            //    can never disagree about which spawners are live.
             for (int i = 0; i < graph.nodes.Count; i++)
             {
                 HydrologyNode h = graph.nodes[i] as HydrologyNode;
-                if (h != null && reached.Contains(h.id)) found.Add(h);
+                if (h == null) continue;
+                if (reached.Contains(h.id) || SpawnerIsWired(graph, h)) return h;
             }
-            return found;
+
+            // 2. Otherwise, what kinds of water did the graph ask for?
+            bool wantLakes = false;
+            bool wantOcean = false;
+
+            // THE CONNECTED NODES' OWN SETTINGS, NOT A SECOND SET OF DEFAULTS
+            // Only the COUNTS are native math. Everything that decides where the water
+            // goes has already been authored - on the very nodes that asked for it - so
+            // a spawner synthesized on class defaults would solve a different world from
+            // the one the graph carved. The case that made it plain: a River Network
+            // Trace with its channel-head area lowered to suit a small world stamps a
+            // network and River Carve digs it, while a spawner left on the real-world
+            // quarter of a square kilometre finds no qualifying mouth, plans no course,
+            // and puts no river object in the trench. Trenches with no water in them,
+            // from the procedural nodes alone and with no spawner in sight.
+            //
+            // First of each kind wins. Two Lake Fills disagreeing about sea level is a
+            // graph that already contradicts itself, and picking the later one would
+            // only make which contradiction wins depend on node creation order.
+            LakeFillNode lakeFill = null;
+            OceanLevelNode oceanLevel = null;
+
+            for (int i = 0; i < graph.nodes.Count; i++)
+            {
+                Generator node = graph.nodes[i];
+                if (node == null || !reached.Contains(node.id)) continue;
+
+                if (node is LakeFillNode)
+                {
+                    wantLakes = true;
+                    if (lakeFill == null) lakeFill = (LakeFillNode)node;
+                }
+                else if (node is OceanLevelNode)
+                {
+                    wantOcean = true;
+                    if (oceanLevel == null) oceanLevel = (OceanLevelNode)node;
+                }
+            }
+
+            if (!wantLakes && !wantOcean) return null;   // 3.
+
+            HydrologyNode native = new HydrologyNode();
+
+            // Lakes and outlets keep the node's own defaults, which are already a
+            // fraction of the world's chunk count - the density IS the native math.
+            // Zeroed when no lake node is connected, so the graph gets what it asked
+            // for and not a lake district beside it.
+            if (!wantLakes)
+            {
+                native.targetLakeCount = 0;
+                native.lakeChunkPercentage = 0f;
+                native.lakeOutletChunkPercentage = 0f;
+            }
+
+            // The synthesized spawner shares the reached lake fill's drainage lattice,
+            // so the lake solve runs on the same grid the author's water nodes did.
+            if (lakeFill != null)
+            {
+                native.drainageResolution = lakeFill.drainageResolution;
+            }
+
+            if (lakeFill != null)
+            {
+                native.minLakeDepth = lakeFill.minDepth;
+                native.depthNormalise = lakeFill.depthNormalise;
+                native.shoreSoftness = lakeFill.shoreSoftness;
+            }
+
+            // Sea level has several possible authors and they are all one elevation, so
+            // the most specific wins: the Ocean Level node that asked for the sea, then
+            // whichever water node states one. Whatever is picked here only stands until
+            // the ocean is actually placed - ApplyToGraph then pushes its settled surface
+            // back over every one of them, this node included.
+            if (oceanLevel != null) native.seaLevel = oceanLevel.seaLevel;
+            else if (lakeFill != null) native.seaLevel = lakeFill.seaLevel;
+
+            native.generateOcean = wantOcean;
+
+            return native;
         }
 
         /// <summary>How many Hydrology Spawners reach an Output. Drives the readout.</summary>

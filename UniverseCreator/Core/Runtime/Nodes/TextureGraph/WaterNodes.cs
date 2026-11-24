@@ -314,4 +314,224 @@ namespace UniverseCreator.Nodes.Texturing
             return water;
         }
     }
+    // -------------------------------------------------------------------------
+    //  T22-T24 - Shoreline / bank band
+    // -------------------------------------------------------------------------
+    //  Three sibling nodes for the three ways water meets land. They all write the
+    //  same WaterProduct shoreline fields; they differ only in the real-world
+    //  defaults, and the river one additionally reads the dug trench. Each also
+    //  sets the depth-fade scale for its body, because an ocean, a lake and a
+    //  stream absorb over very different distances - so dropping one of these after
+    //  Water Surface gives a body both its edge band AND its depth scale in one
+    //  place. Only the fade DISTANCE is set here; the shallow/deep colours stay
+    //  whatever Water Surface authored, so this never silently repaints the water.
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// The ocean's edge: a wide sand beach at the waterline, and the depth scale of
+    /// open water.
+    ///
+    /// The terrain draws the dry berm itself through the _UC_BEACH_ON feature at
+    /// the global sea level; this node describes the WET band the water lays over
+    /// that berm - the darker, glossier strip the tide keeps saturated - and sizes
+    /// it to a surf beach (tens of metres), so the terrain sand and the water's
+    /// shallow tint meet at the same line instead of one cutting across the other.
+    /// </summary>
+    [System.Serializable]
+    public class OceanShorelineNode : TextureNode
+    {
+        public override string NodeName { get { return "Ocean Shoreline"; } }
+        public override NodeCategory Category { get { return NodeCategory.Water; } }
+        public override string Tooltip
+        {
+            get { return "Wide wet sand beach at the waterline plus the depth scale of open ocean."; }
+        }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Water", PortType.Water, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return TexturePorts.WaterOut; }
+
+        [Tooltip("Wet sand colour at the waterline. Dries toward the terrain's inland layer.")]
+        public Color sandColor = new Color(0.78f, 0.72f, 0.56f, 1f);
+
+        [Tooltip("Sand texture for the beach band. Empty gives flat-coloured sand.")]
+        public Texture2D sandTexture;
+
+        [Tooltip("How far the beach reaches inland from the waterline, in metres. Surf beaches are wide.")]
+        public float beachWidthMetres = 18f;
+
+        [Tooltip("How much darker the wet sand is at the waterline, 0 to 1.")]
+        public float wetDarkening = 0.32f;
+
+        [Tooltip("Wet-sand smoothness. Saturated sand is glossy; it dries to matte across the band.")]
+        public float wetSmoothness = 0.5f;
+
+        [Tooltip("Depth in metres over which open ocean fades shallow to deep. One e-folding.")]
+        public float depthFadeMetres = 12f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            WaterProduct upstream = GetInputWater(tile, 0, stop);
+            WaterProduct water = upstream != null ? upstream.Copy() : new WaterProduct();
+
+            water.shorelineEnabled = true;
+            water.shorelineColor = sandColor;
+            if (sandTexture != null)
+                water.shorelineTexture = new TextureRef(sandTexture);
+            water.shorelineWidthMetres = Mathf.Max(0.1f, beachWidthMetres);
+            water.shorelineWetDarkening = Mathf.Clamp01(wetDarkening);
+            water.shorelineSmoothness = Mathf.Clamp01(wetSmoothness);
+            water.bankReadsTrench = false;
+            water.depthFadeMetres = Mathf.Max(0.01f, depthFadeMetres);
+
+            return water;
+        }
+    }
+
+    /// <summary>
+    /// A lake's margin: a narrow ring of gravel or mud, and the moderate depth of
+    /// still standing water.
+    ///
+    /// A lake sits at its own altitude, not the global sea level, so the terrain's
+    /// beach feature cannot draw its edge - the band is described here and applied
+    /// around the body. Still water works its shore far less than surf does, so the
+    /// band is a few metres of gravel/mud rather than a wide sand berm, and it is
+    /// less glossy because it is worked and settled rather than wave-washed.
+    /// </summary>
+    [System.Serializable]
+    public class LakeShorelineNode : TextureNode
+    {
+        public override string NodeName { get { return "Lake Shoreline"; } }
+        public override NodeCategory Category { get { return NodeCategory.Water; } }
+        public override string Tooltip
+        {
+            get { return "Narrow gravel / mud margin around a lake plus the depth scale of still water."; }
+        }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Water", PortType.Water, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return TexturePorts.WaterOut; }
+
+        [Tooltip("Gravel / mud colour at the waterline. Dries toward the terrain's inland layer.")]
+        public Color marginColor = new Color(0.50f, 0.47f, 0.40f, 1f);
+
+        [Tooltip("Gravel / mud texture for the margin. Empty gives a flat-coloured band.")]
+        public Texture2D marginTexture;
+
+        [Tooltip("How far the margin reaches inland from the waterline, in metres. Lake margins are narrow.")]
+        public float marginWidthMetres = 3f;
+
+        [Tooltip("How much darker the wet margin is at the waterline, 0 to 1.")]
+        public float wetDarkening = 0.28f;
+
+        [Tooltip("Wet margin smoothness. Settled mud is fairly matte even when wet.")]
+        public float wetSmoothness = 0.35f;
+
+        [Tooltip("Depth in metres over which the lake fades shallow to deep. One e-folding.")]
+        public float depthFadeMetres = 6f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            WaterProduct upstream = GetInputWater(tile, 0, stop);
+            WaterProduct water = upstream != null ? upstream.Copy() : new WaterProduct();
+
+            water.shorelineEnabled = true;
+            water.shorelineColor = marginColor;
+            if (marginTexture != null)
+                water.shorelineTexture = new TextureRef(marginTexture);
+            water.shorelineWidthMetres = Mathf.Max(0.1f, marginWidthMetres);
+            water.shorelineWetDarkening = Mathf.Clamp01(wetDarkening);
+            water.shorelineSmoothness = Mathf.Clamp01(wetSmoothness);
+            water.bankReadsTrench = false;
+            water.depthFadeMetres = Mathf.Max(0.01f, depthFadeMetres);
+
+            return water;
+        }
+    }
+
+    /// <summary>
+    /// A river's bank: scoured sand that FOLLOWS THE DUG CHANNEL, and the shallow
+    /// depth of running water.
+    ///
+    /// WHY THE BANK READS THE TRENCH
+    /// -----------------------------
+    /// A river is a channel cut into the ground, not a pond at some altitude. If the
+    /// bank were an altitude band - "sand below height H" - it would either miss the
+    /// water where the channel runs downhill or paint sand up the surrounding valley
+    /// where there is none. The real bank is the wall of the cut itself, so this
+    /// node keys the band to the trench the river dug (bankReadsTrench), which the
+    /// applier reads from the same trench measurement the channel was carved from.
+    /// The result is sand on the channel wall and grass right up to the lip above
+    /// it, never grass standing in the water.
+    ///
+    /// The bank is allowed only where the wall is shallow enough to hold worked
+    /// material; a steeper cut bank shows the inland surface, which is what an
+    /// undercut river bank actually looks like.
+    /// </summary>
+    [System.Serializable]
+    public class RiverBankNode : TextureNode
+    {
+        public override string NodeName { get { return "River Bank"; } }
+        public override NodeCategory Category { get { return NodeCategory.Water; } }
+        public override string Tooltip
+        {
+            get { return "Scoured sand bank that follows the dug channel, plus the shallow depth of a river."; }
+        }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Water", PortType.Water, PortDirection.Input)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return TexturePorts.WaterOut; }
+
+        [Tooltip("Scoured sand colour at the waterline. Dries toward the terrain's inland layer.")]
+        public Color bankColor = new Color(0.60f, 0.55f, 0.43f, 1f);
+
+        [Tooltip("Sand / gravel texture for the bank. Empty gives a flat-coloured band.")]
+        public Texture2D bankTexture;
+
+        [Tooltip("How far the bank reaches up the channel wall from the waterline, in metres.")]
+        public float bankWidthMetres = 2.5f;
+
+        [Tooltip("How much darker the wet bank is at the waterline, 0 to 1.")]
+        public float wetDarkening = 0.35f;
+
+        [Tooltip("Wet bank smoothness. Water-scoured sand is glossy at the edge.")]
+        public float wetSmoothness = 0.4f;
+
+        [Tooltip("Slope in degrees below which the bank shows. Steeper cut banks reveal the inland surface.")]
+        public float bankSlopeLimitDegrees = 60f;
+
+        [Tooltip("Depth in metres over which the river fades shallow to deep. Rivers are shallow; the bed reads through.")]
+        public float depthFadeMetres = 2f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            WaterProduct upstream = GetInputWater(tile, 0, stop);
+            WaterProduct water = upstream != null ? upstream.Copy() : new WaterProduct();
+
+            water.shorelineEnabled = true;
+            water.shorelineColor = bankColor;
+            if (bankTexture != null)
+                water.shorelineTexture = new TextureRef(bankTexture);
+            water.shorelineWidthMetres = Mathf.Max(0.1f, bankWidthMetres);
+            water.shorelineWetDarkening = Mathf.Clamp01(wetDarkening);
+            water.shorelineSmoothness = Mathf.Clamp01(wetSmoothness);
+            water.bankSlopeLimitDegrees = Mathf.Clamp(bankSlopeLimitDegrees, 1f, 89f);
+            water.bankReadsTrench = true;
+            water.depthFadeMetres = Mathf.Max(0.01f, depthFadeMetres);
+
+            return water;
+        }
+    }
 }

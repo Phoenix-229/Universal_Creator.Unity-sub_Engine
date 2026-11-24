@@ -105,6 +105,38 @@ namespace UniverseCreator
                                     float minDepth, float strength,
                                     System.Func<bool> cancel)
         {
+            // Back-compatible overload: the old signature with the new bank limits at their
+            // defaults (world height 600 m, bank slope 0.5, a 1.5 m cap on any raise).
+            return Apply(ground, level, mask, resX, resZ, metresPerPixel, benchMetres, skirtMetres,
+                         minDepth, strength, 600f, DefaultBankSlope, DefaultMaxRaiseMetres, cancel);
+        }
+
+        /// <summary>Steepest bank the seat will leave, rise over run (0.5 = ~27 degrees).</summary>
+        public const float DefaultBankSlope = 0.5f;
+
+        /// <summary>Most a dry bank may be RAISED to meet the water, in metres. Beyond this the
+        /// water is left to the bed carve instead of building a levee around it.</summary>
+        public const float DefaultMaxRaiseMetres = 1.5f;
+
+        /// <summary>
+        /// FIX 2026-10-19 (the sunken lakes inside sharp-walled pits).
+        /// The old seat set the dry ground TO the water's elevation across the bench and then
+        /// eased back to the natural ground over a fixed skirt (30 m). On a hillside 40 m above
+        /// the lake that is a 40 m wall in 30 m - a cliff - and on the low side it RAISED ground up
+        /// to the water, building the flat levee-like apron seen around the lakes.
+        /// Now, on the dry side: the bench still lands the waterline exactly (ground within the bench
+        /// is brought to the level, but never raised by more than <paramref name="maxRaiseMetres"/>);
+        /// beyond the bench the ground is only ever LOWERED, and only to a slope-limited ramp
+        /// (level + distance x bankSlope), blended in with a smooth minimum and faded to nothing at
+        /// the outer edge of the reach. A hillside therefore becomes a valley side, not a wall.
+        /// </summary>
+        public static float[] Apply(float[] ground, float[] level, float[] mask,
+                                    int resX, int resZ, float metresPerPixel,
+                                    float benchMetres, float skirtMetres,
+                                    float minDepth, float strength,
+                                    float worldHeightMetres, float bankSlope, float maxRaiseMetres,
+                                    System.Func<bool> cancel)
+        {
             int count = resX * resZ;
             float[] result = new float[count];
 
@@ -147,26 +179,44 @@ namespace UniverseCreator
 
             // 2. The bench and the skirt, on the dry side only. Wet pixels were
             //    settled above; re-touching them here would undo their clearance.
+            float worldH = worldHeightMetres > 1e-3f ? worldHeightMetres : 600f;
+            float slope = Mathf.Max(0.05f, bankSlope);
+            float raiseN = Mathf.Max(0f, maxRaiseMetres) / worldH;
+            float blendN = 1.5f / worldH;                       // smooth-min radius: ~1.5 m
+
             for (int i = 0; i < count; i++)
             {
                 if (mask[i] > WetThreshold) continue;
                 if (dist[i] > reachPx) continue;
 
-                // Weight of the water's elevation at this distance: solid across the
-                // bench, easing to nothing at the far edge of the skirt.
-                float weight;
+                float g = result[i];
+                float lv = nearLevel[i];
+                float dm = dist[i] * mpp;                       // metres from the water
+                float benchM = benchPx * mpp;
+
+                float target;
                 if (dist[i] <= benchPx || skirtPx < 1e-4f)
                 {
-                    weight = 1f;
+                    // On the bench the waterline must land exactly: bring ground to the level.
+                    // Lowering is unlimited; raising is capped so no levee is built.
+                    target = g > lv ? lv : Mathf.Min(lv, g + raiseN);
                 }
                 else
                 {
-                    float t = (dist[i] - benchPx) / skirtPx;
-                    weight = 1f - InterpolationMath.SmoothStep(InterpolationMath.Clamp01(t));
+                    if (g <= lv) continue;                      // below the water level here: leave it
+
+                    // Slope-limited ramp from the bench edge outward, smoothly joined to the ground.
+                    float ramp = lv + (dm - benchM) * slope / worldH;
+                    target = SmoothMin(g, ramp, blendN);
+
+                    // Fade the whole effect out over the outer 40% of the reach so the ground
+                    // returns to its own height with no step.
+                    float t = (dist[i] - benchPx) / Mathf.Max(1e-4f, reachPx - benchPx);
+                    float fade = 1f - InterpolationMath.SmoothStep(InterpolationMath.Clamp01((t - 0.6f) / 0.4f));
+                    target = Mathf.Lerp(g, target, fade);
                 }
 
-                float target = Mathf.Lerp(result[i], nearLevel[i], weight);
-                result[i] = Mathf.Clamp01(Mathf.Lerp(result[i], target, amount));
+                result[i] = Mathf.Clamp01(Mathf.Lerp(g, target, amount));
             }
 
             return result;
@@ -237,6 +287,14 @@ namespace UniverseCreator
                     if (x > 0 && z < resZ - 1) Relax(dist, nearLevel, i, i + resX - 1, Diagonal);
                 }
             }
+        }
+
+        /// <summary>Polynomial smooth minimum: like Min, but rounds the crease within radius k.</summary>
+        private static float SmoothMin(float a, float b, float k)
+        {
+            if (k <= 1e-9f) return a < b ? a : b;
+            float h = Mathf.Clamp01(0.5f + 0.5f * (b - a) / k);
+            return Mathf.Lerp(b, a, h) - k * h * (1f - h);
         }
 
         /// <summary>Takes the cheaper route to water through a neighbour, payload and all.</summary>

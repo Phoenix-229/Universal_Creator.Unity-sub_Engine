@@ -53,10 +53,13 @@ namespace UniverseCreator.Optimization
             if ((worldBounds.ClosestPoint(cam.transform.position) - cam.transform.position).sqrMagnitude > sqrLimit)
                 return false;
 
-            Bounds padded = worldBounds;
-            padded.Expand(boundsPadding * 2f);
+            return TestFrustum(frustum, worldBounds, boundsPadding); // UC-T06-10: scatter shares frustum math without inheriting the chunk distance cap.
+        }
 
-            return GeometryUtility.TestPlanesAABB(frustum, padded);
+        internal static bool TestFrustum(Plane[] planes, Bounds bounds, float padding)
+        {
+            bounds.Expand(Mathf.Max(0f, padding) * 2f); // UC-T06-10: caller-validated deformation padding, in world metres.
+            return GeometryUtility.TestPlanesAABB(planes, bounds);
         }
 
         /// <summary>

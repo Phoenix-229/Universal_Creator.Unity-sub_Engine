@@ -68,6 +68,9 @@ namespace UniverseCreator.Editor.Drawing
 
             if (Section("Surface and Lighting", "water_lit", true))
             {
+                // UC-T04-08: the control edits the material; quality/camera availability can only lower it.
+                Prop(editor, props, "_WaterScreenSpaceEffects", "Camera Depth and Refraction",
+                    "Use camera depth/refraction when available. Low quality uses local water depth and ordinary transparency.");
                 Prop(editor, props, "_Smoothness", "Smoothness",
                     "0.9 and above is calm water. Lower it for a wind-roughened surface.");
                 Prop(editor, props, "_FresnelPower", "Fresnel Power",
@@ -89,15 +92,15 @@ namespace UniverseCreator.Editor.Drawing
 
                 EditorGUILayout.Space(2);
                 Prop(editor, props, "_WaveHeight", "Vertex Wave Height (m)",
-                    "Vertical displacement of the mesh. Buoyancy mirrors this exactly, " +
-                    "so raising it makes floating objects rise with the swell.");
+                    "Ambient vertical displacement, limited by local depth and shore/junction contact. " +
+                    "Accepted-mesh queries share ambient motion; GPU ripple/wind micro-height can differ by up to 5 cm."); // UC-T04-09: disclose the actual query approximation.
                 Prop(editor, props, "_WaveLength", "Vertex Wave Length (m)");
                 Prop(editor, props, "_WaveSpeed", "Vertex Wave Speed");
 
                 if (material.HasProperty("_WaveHeight") && material.GetFloat("_WaveHeight") > 0.6f)
                     EditorGUILayout.HelpBox(
-                        "Above about 0.6m the surface can lift clear of a shallow bank. " +
-                        "Raise Shoreline Soften with it, or use a deeper bed.",
+                        "Large waves are limited to one quarter of local water depth and fade at shores. " +
+                        "Check shallow banks and quality transitions on a graphics device.",
                         MessageType.Info);
             }
 

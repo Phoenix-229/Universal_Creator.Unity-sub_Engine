@@ -413,6 +413,15 @@ namespace UniverseCreator.Nodes.Texturing
     [System.Serializable]
     public class ColorGradeNode : SurfaceFeatureNode
     {
+        // UC-T07-03: reuse the real shader-grading owner for cheap scalar parameters; preserve original Surface port index zero.
+        private static readonly Port[] ParameterInputs =
+        {
+            new Port("Surface", PortType.Surface, PortDirection.Input),
+            new Port("Brightness", PortType.Scalar, PortDirection.Input),
+            new Port("Contrast", PortType.Scalar, PortDirection.Input),
+            new Port("Saturation", PortType.Scalar, PortDirection.Input)
+        };
+        public override Port[] GetInputs() => ParameterInputs;
         public override string NodeName { get { return "Colour Grade"; } }
         public override string Tooltip
         {
@@ -433,9 +442,12 @@ namespace UniverseCreator.Nodes.Texturing
 
         protected override void Apply(SurfaceProduct surface, TileData tile, StopToken stop)
         {
-            surface.SetFloat(UCShaderProps.Saturation, Mathf.Max(0f, saturation));
-            surface.SetFloat(UCShaderProps.Brightness, Mathf.Max(0f, brightness));
-            surface.SetFloat(UCShaderProps.Contrast, Mathf.Max(0f, contrast));
+            float s = GetInputScalarOr(tile, 3, stop, saturation), b = GetInputScalarOr(tile, 1, stop, brightness),
+                c = GetInputScalarOr(tile, 2, stop, contrast);
+            TextureImageSampling.RequireFinite(s); TextureImageSampling.RequireFinite(b); TextureImageSampling.RequireFinite(c);
+            surface.SetFloat(UCShaderProps.Saturation, Mathf.Max(0f, s));
+            surface.SetFloat(UCShaderProps.Brightness, Mathf.Max(0f, b));
+            surface.SetFloat(UCShaderProps.Contrast, Mathf.Max(0f, c));
             surface.SetColor(UCShaderProps.TintColor, tint);
         }
     }

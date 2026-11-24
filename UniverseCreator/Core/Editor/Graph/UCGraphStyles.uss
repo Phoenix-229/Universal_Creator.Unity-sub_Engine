@@ -192,6 +192,36 @@ Edge:hover {
     color: #bcbcbc;
 }
 
+/* UC biome repair: rule fields keep both the complete label and an editable value;
+   footer/foldout labels must not inherit the broad parameter-label minimum. */
+.uc-biome-rules { min-width: 330px; }
+.uc-biome-rules Label { min-width: 0; }
+.uc-biome-rule .unity-base-field__label {
+    min-width: 128px;
+    width: 128px;
+    flex-shrink: 0;
+}
+.uc-biome-rule .unity-base-field__input { min-width: 64px; flex-grow: 1; }
+.uc-biome-rules Button { min-width: 50px; }
+
+/* A Vector2Field is a composite: its "X" and "Y" axis fields are themselves
+   fields with their own Labels, so the 82px min-width above lands on them too.
+   In a narrow node the main label plus two 82px axis labels leave no room, and
+   each axis's input box collapses to zero width - the field shows its name and
+   "X"/"Y" but gives you nowhere to type. Confine the width to the axis labels'
+   content and let each axis input take the space that is left. The main
+   composite label is a direct child of the field (not inside an axis field), so
+   it keeps its 82px and stays aligned with the single-value fields. */
+.uc-params .unity-composite-field__field {
+    min-width: 0;
+    flex-grow: 1;
+}
+
+.uc-params .unity-composite-field__field Label {
+    min-width: 0;
+    margin-right: 2px;
+}
+
 /* Inputs a touch darker than the panel they sit in, with the same tight radius
    as the card, so a node's controls belong to the node. */
 .uc-params FloatField > TextInput,

@@ -8,7 +8,9 @@
 //           to translate OutputBag -> SetHeights/SetAlphamaps/SetHoles.
 // -----------------------------------------------------------------------------
 
+using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Integration;
 using UniverseCreator.Nodes;
 
 namespace UniverseCreator.TerrainSystem
@@ -70,18 +72,21 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>
         /// Applies the OutputBag from a finished background generation to the given
         /// TerrainData. Writes heightmap, splatmap, holes, and detail layers.
-        /// Returns true if the collider should be rebuilt.
+        /// Returns true if the collider should be rebuilt; UC-T02-01 rejects obsolete/foreign assigned run identities without writes.
         /// </summary>
         public static bool ApplyOutputs(TerrainData data, OutputBag outputs, UniverseCreatorObject settings)
         {
-            return ApplyOutputs(data, outputs, settings, null, default(Bounds), 0f);
+            return ApplyOutputs(data, outputs, settings, null, default(Bounds), 0f, null);
         }
 
         /// <summary>
-        /// As ApplyOutputs, but folds manual sculpt edits back in on top of the
-        /// generated heights. Pass the world's override layer and the chunk's world
-        /// bounds; the deltas are added before the height write, so an edit survives
-        /// every subsequent graph re-run instead of being overwritten by it.
+        /// As ApplyOutputs, but folds a path tool's terrain shapings and the author's
+        /// manual sculpt edits back in on top of the generated heights, in that order.
+        /// Pass the world's override layer, the chunk's world bounds, and the shaping
+        /// requests (null if the world has no path tool); the shapings conform the
+        /// ground to roads and key dams into their valley walls, then the sculpt deltas
+        /// are added, both before the height write, so neither is overwritten by a
+        /// subsequent graph re-run.
         ///
         /// The height write goes through SetHeightsDelayLOD, which stages the new
         /// heightfield without rebuilding the LOD tree or pushing the GPU texture. That
@@ -98,11 +103,44 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public static bool ApplyOutputs(TerrainData data, OutputBag outputs, UniverseCreatorObject settings,
                                         TerrainOverrideLayer overrides, Bounds chunkWorldBounds,
-                                        float metresPerSample)
+                                        float metresPerSample, IReadOnlyList<TerrainShapeRequest> shapeRequests)
         {
-            if (data == null || outputs == null) return false;
+            // UC-T02-04: manual synchronous consumers use the same preparation/upload implementation as the pump.
+            if (!CanApplyOutputs(data, outputs, settings)) return false;
+            // UC-T02-07: synchronous consumers have the same publication boundary as detached chunk commits.
+            ProductMemoryBudget.Lease publicationMemory = GraphPublicationCommit.Prepare(settings, outputs);
+            try
+            {
+                foreach (ChunkCommitStep step in ApplyOutputStages(data, outputs, settings, overrides, chunkWorldBounds, metresPerSample, shapeRequests)) { }
+                if (!GraphPublicationCommit.Commit(settings, outputs, publicationMemory, data)) return false; // UC-T03-10: capture actual native holes as well as final heights.
+                publicationMemory = null;
+            }
+            finally { publicationMemory?.Dispose(); }
+            return (outputs.heightmap != null && settings != null && settings.generateCollider) || outputs.requestColliderRebuild;
+        }
 
-            bool needsColliderRebuild = false;
+        // UC-T02-04: native uploads are bounded by payload as well as a row limit; one Unity call remains indivisible.
+        internal const int MaximumUploadBytes = 256 * 1024;
+        private static bool CanApplyOutputs(TerrainData data, OutputBag outputs, UniverseCreatorObject settings) =>
+            data != null && outputs != null && (!outputs.RunId.IsAssigned ||
+                (settings != null && settings.GenerationScheduler.IsCurrent(outputs.RunId)));
+
+        /// <summary>Prepares and uploads detached terrain in bounded steps on the main thread; cancellation leaves it unpublished.</summary>
+        /// <param name="data">Detached target TerrainData; null produces no steps.</param>
+        /// <param name="outputs">Owned output arrays; heights are modified by shaping. Null produces no steps.</param>
+        /// <param name="settings">Owning world; required for assigned run IDs.</param>
+        /// <param name="overrides">Optional authored sculpt layer.</param>
+        /// <param name="chunkWorldBounds">Chunk bounds in world metres.</param>
+        /// <param name="metresPerSample">Positive sample spacing; zero skips spatial shaping.</param>
+        /// <param name="shapeRequests">Optional path-tool requests in world metres.</param>
+        /// <returns>Completed stages; stale revisions terminate without further writes. Dispose when abandoning enumeration.</returns>
+        /// <remarks>The caller owns target disposal and must not attach it until enumeration completes for the current run.
+        /// Native allocation, layer reconciliation and SyncHeightmap are indivisible and must be timed by the caller.</remarks>
+        public static IEnumerable<ChunkCommitStep> ApplyOutputStages(TerrainData data, OutputBag outputs, UniverseCreatorObject settings,
+                                        TerrainOverrideLayer overrides, Bounds chunkWorldBounds,
+                                        float metresPerSample, IReadOnlyList<TerrainShapeRequest> shapeRequests)
+        {
+            if (!CanApplyOutputs(data, outputs, settings)) yield break;
 
             // Heightmap
             if (outputs.heightmap != null)
@@ -119,6 +157,20 @@ namespace UniverseCreator.TerrainSystem
                 if (settings != null && metresPerSample > 0f)
                     WaterCarveRegistry.ApplyAll(settings, outputs.heightmap,
                                                 chunkWorldBounds, metresPerSample);
+
+                // A PATH TOOL'S SHAPINGS, BETWEEN THE DIG AND THE SCULPT.
+                //
+                // The same seat in the order as the water carve, for the same reason:
+                // a road conforms to ground the river has already cut, so an embankment
+                // beside a river blends down to the carved bank instead of to ground
+                // that no longer exists - and the hand sculpt below still lands on top
+                // of the road. Re-derived from the request on every apply exactly as the
+                // carve is, so a regenerate re-conforms the road rather than wiping it,
+                // and a withdrawn request leaves nothing behind on the next rebuild.
+                // Null on a world with no path tool, and then this costs nothing.
+                if (settings != null && metresPerSample > 0f && shapeRequests != null)
+                    TerrainShapeApplier.ApplyAll(shapeRequests, outputs.heightmap,
+                                                 chunkWorldBounds, metresPerSample, settings.maxHeightMeters);
 
                 // Manual edits are re-applied here rather than after the write,
                 // because reading the heights back out of TerrainData to patch them
@@ -143,19 +195,49 @@ namespace UniverseCreator.TerrainSystem
                                   settings != null ? settings.maxHeightMeters : 0f,
                                   ChunkLabel(chunkWorldBounds), settings);
 
-                data.SetHeightsDelayLOD(0, 0, outputs.heightmap);
+                // UC-T03-10: custom normal outputs follow the same final ground as native Terrain, after every modifier.
+                Bounds normalBounds = chunkWorldBounds.size.x > 0f && chunkWorldBounds.size.z > 0f
+                    ? chunkWorldBounds : new Bounds(data.size * 0.5f, data.size); // UC-T03-10: the synchronous overload still has native sample spacing.
+                ReconcileFinalNormals(outputs, outputs.heightmap, settings, normalBounds, data.size.y);
+
+                yield return new ChunkCommitStep(ChunkCommitStage.PrepareHeights);
+                using (IEnumerator<ChunkCommitStep> uploads = UploadHeightStages(data, outputs.heightmap).GetEnumerator())
+                    while (CanApplyOutputs(data, outputs, settings) && uploads.MoveNext()) yield return uploads.Current;
 
                 // Flush: uploads the samples to the GPU and rebuilds the patch LODs and
-                // the physics heightfield on every Terrain sharing this data.
+                // the physics heightfield on every Terrain sharing this data. This flush
+                // is on PURPOSE here, not redundant with StitchGrid's: it makes THIS cell
+                // usable (drawn + collidable) the moment it is applied, during a bake that
+                // streams in over many pumps; StitchGrid's later flush re-applies after the
+                // seam welds at settle time. (T5-verified: the two serve different moments,
+                // so neither is removed.)
+                if (!CanApplyOutputs(data, outputs, settings)) yield break;
                 data.SyncHeightmap();
-
-                needsColliderRebuild = settings != null && settings.generateCollider;
+                yield return new ChunkCommitStep(ChunkCommitStage.SyncHeightmap);
             }
 
+            if (!CanApplyOutputs(data, outputs, settings)) yield break;
             // Splatmap (texture layers)
+            float[,,] preparedSplat = null;
             if (outputs.splatmap != null)
             {
-                data.SetAlphamaps(0, 0, outputs.splatmap);
+                // The graph paints channel L meaning "terrain layer L". Unity's
+                // SetAlphamaps throws "Float array size wrong (layers should be N)"
+                // the instant the map's depth differs from alphamapLayers, and that
+                // throw lands inside the chunk pump - it aborts ApplyChunk and the
+                // whole generation stalls. That is exactly what a Biome Splat Output
+                // (8 channels) wired onto a world with one authored layer produced.
+                // A matching resolution throw follows if the map's width/height differ
+                // from alphamapResolution (nothing assigns it, so it sits at the default
+                // while the graph paints at the heightmap's resolution). Reconcile both
+                // here, the last gate before the write, the way Unreal's Landscape
+                // auto-provisions a layer info per weight channel rather than refusing
+                // the paint. A splatmap whose depth and resolution already match (worlds
+                // where those line up) passes through untouched.
+                float[,,] splat = ReconcileSplatResolution(data, outputs.splatmap);
+                splat = ReconcileSplatLayers(data, splat, ChunkLabel(chunkWorldBounds),
+                                             outputs.splatLayerTextures);
+                preparedSplat = splat;
             }
             else if (data.terrainLayers != null && data.terrainLayers.Length > 0 && data.alphamapResolution > 0)
             {
@@ -169,8 +251,31 @@ namespace UniverseCreator.TerrainSystem
                         defaultSplat[y, x, 0] = 1f;
                     }
                 }
-                data.SetAlphamaps(0, 0, defaultSplat);
+                preparedSplat = defaultSplat;
             }
+            yield return new ChunkCommitStep(ChunkCommitStage.PrepareTextures);
+            if (preparedSplat != null)
+            {
+                int width = preparedSplat.GetLength(1), height = preparedSplat.GetLength(0), layers = preparedSplat.GetLength(2);
+                // A rectangle may need to split horizontally too when many layers make one full row exceed the cap.
+                int columns = Mathf.Max(1, Mathf.Min(width, MaximumUploadBytes / Mathf.Max(sizeof(float), layers * sizeof(float))));
+                int rows = Mathf.Max(1, Mathf.Min(32, MaximumUploadBytes / Mathf.Max(sizeof(float), columns * layers * sizeof(float))));
+                float[,,] strip = null;
+                for (int z = 0; z < height; z += rows)
+                for (int x = 0; x < width; x += columns)
+                {
+                    if (!CanApplyOutputs(data, outputs, settings)) yield break;
+                    int countZ = Mathf.Min(rows, height - z), countX = Mathf.Min(columns, width - x);
+                    if (strip == null || strip.GetLength(0) != countZ || strip.GetLength(1) != countX)
+                        strip = new float[countZ, countX, layers];
+                    for (int row = 0; row < countZ; row++)
+                        System.Buffer.BlockCopy(preparedSplat, ((z + row) * width + x) * layers * sizeof(float), strip,
+                            row * countX * layers * sizeof(float), countX * layers * sizeof(float));
+                    data.SetAlphamaps(x, z, strip);
+                    yield return new ChunkCommitStep(ChunkCommitStage.UploadTextures, (long)countZ * countX * layers * sizeof(float));
+                }
+            }
+            if (!CanApplyOutputs(data, outputs, settings)) yield break;
             
             // Rebuild basemap so distant chunks don't fall back to a grey uninitialized texture
             data.SetBaseMapDirty();
@@ -178,7 +283,18 @@ namespace UniverseCreator.TerrainSystem
             // Holes (tunnels, caves, underwater passages)
             if (outputs.holes != null)
             {
-                data.SetHoles(0, 0, outputs.holes);
+                int width = outputs.holes.GetLength(1), height = outputs.holes.GetLength(0);
+                int rows = Mathf.Max(1, Mathf.Min(32, MaximumUploadBytes / width));
+                bool[,] strip = null;
+                for (int z = 0; z < height; z += rows)
+                {
+                    if (!CanApplyOutputs(data, outputs, settings)) yield break;
+                    int count = Mathf.Min(rows, height - z);
+                    if (strip == null || strip.GetLength(0) != count) strip = new bool[count, width];
+                    System.Buffer.BlockCopy(outputs.holes, z * width, strip, 0, count * width);
+                    data.SetHoles(0, z, strip);
+                    yield return new ChunkCommitStep(ChunkCommitStage.UploadHoles, (long)count * width);
+                }
             }
 
             // Detail layers are NOT written here. SetDetailLayer requires a grid of
@@ -188,7 +304,38 @@ namespace UniverseCreator.TerrainSystem
             // moved that to ScatterApplier.ApplyDetailGrids, which resamples first
             // and also owns the prototype array those layers index into.
 
-            return needsColliderRebuild || outputs.requestColliderRebuild;
+        }
+
+        // UC-T02-04: one rectangle implementation for detached uploads and already-accepted seam repairs.
+        // UC-T03-10: one owner for optional normals after primary upload, seam writes and synchronous authored re-cuts.
+        internal static void ReconcileFinalNormals(OutputBag outputs, float[,] heights, UniverseCreatorObject world, Bounds bounds, float heightScale)
+        {
+            if (outputs == null || outputs.normals == null || heights == null) return;
+            using var memory = world?.ProductMemory.Reserve(64L + heights.LongLength * 16L);
+            var field = new Matrix(new CoordRect(0, 0, heights.GetLength(1), heights.GetLength(0))) {
+                worldPos = bounds.min, worldSize = bounds.size, worldHeight = heightScale };
+            System.Buffer.BlockCopy(heights, 0, field.arr, 0, field.arr.Length * sizeof(float));
+            outputs.normals = MatrixOperations.SobelNormals(field);
+            if (outputs.normalStrength < 1f) for (int i = 0; i < outputs.normals.Length; i++)
+                outputs.normals[i] = Vector3.Lerp(Vector3.up, outputs.normals[i], outputs.normalStrength).normalized;
+        }
+
+        internal static IEnumerable<ChunkCommitStep> UploadHeightStages(TerrainData data, float[,] heights)
+        {
+            if (data == null || heights == null) yield break;
+            int width = heights.GetLength(1), height = heights.GetLength(0);
+            if (width < 1 || height < 1 || width > data.heightmapResolution || height > data.heightmapResolution)
+                throw new System.ArgumentException("Height upload dimensions must fit the target terrain.", nameof(heights));
+            int rows = Mathf.Max(1, Mathf.Min(32, MaximumUploadBytes / (width * sizeof(float))));
+            float[,] strip = null;
+            for (int z = 0; z < height; z += rows)
+            {
+                int count = Mathf.Min(rows, height - z);
+                if (strip == null || strip.GetLength(0) != count) strip = new float[count, width];
+                System.Buffer.BlockCopy(heights, z * width * sizeof(float), strip, 0, count * width * sizeof(float));
+                data.SetHeightsDelayLOD(0, z, strip);
+                yield return new ChunkCommitStep(ChunkCommitStage.UploadHeights, (long)count * width * sizeof(float));
+            }
         }
 
         // One shared material for every chunk that has no world material assigned.
@@ -264,64 +411,528 @@ namespace UniverseCreator.TerrainSystem
         {
             if (data == null) return;
 
-            // A live layer is enough to leave this alone. The null check matters as much
-            // as the length check: the stand-in below is HideAndDontSave, so a domain
-            // reload destroys it and leaves a slot holding a dead reference. Treating
-            // that as "already has layers" is what would strand the surface untextured
-            // after every recompile.
             TerrainLayer[] current = data.terrainLayers;
-            if (current != null)
+
+            // No array at all: seed it with the single stand-in.
+            if (current == null || current.Length == 0)
             {
-                for (int i = 0; i < current.Length; i++)
-                    if (current[i] != null) return;
+                EnsureFallbackLayer();
+                data.terrainLayers = new TerrainLayer[] { fallbackLayer };
+                return;
             }
 
-            if (fallbackLayer == null)
-            {
-                // Earth, not a test pattern. The old stand-in was a light-grey/white
-                // checker, and white is the one colour that cannot be read as ground:
-                // against a blue water surface it reads exactly as "this material
-                // failed to assign", which is precisely the bug reported at the
-                // shoreline when in fact the terrain was drawing correctly with the
-                // stand-in it was given.
-                //
-                // 4x4 rather than 2x2 with bilinear filtering and a several-metre tile,
-                // so it reads as soil breaking up over distance instead of as squares.
-                const int size = 4;
-                Texture2D tex = new Texture2D(size, size);
-                tex.name = "UC_DefaultGroundTex";
-                tex.hideFlags = HideFlags.HideAndDontSave;
-                tex.filterMode = FilterMode.Bilinear;
-                tex.wrapMode = TextureWrapMode.Repeat;
+            // Refill every dead slot. The stand-in layers are HideAndDontSave, so a
+            // domain reload or a project reopen destroys them and leaves the array at
+            // its OLD length holding dead references - which renders as Unity's
+            // untextured gray, the exact brown->gray reversion the user reported.
+            //
+            // Detecting the dead slot (the null-check below reads a destroyed
+            // UnityEngine.Object as null) is NOT enough on its own: the previous code
+            // only re-seeded a zero-length array, and a reopened world's array is never
+            // zero-length - it is full-length-all-dead (1 slot for a stand-in world, 8
+            // for a Biome-Splat world). The dead slot has to actually be refilled. A
+            // real authored layer is an asset, survives the reload, and is left as it is.
+            bool anyDead = false;
+            for (int i = 0; i < current.Length; i++)
+                if (current[i] == null) { anyDead = true; break; }
 
-                // Damp earth, with the value walked by a small fixed pattern rather than
-                // a random draw: the stand-in has to look identical on every machine and
-                // after every reload, or a screenshot comparison is worthless.
-                Color[] px = new Color[size * size];
-                for (int i = 0; i < px.Length; i++)
+            if (!anyDead) return;
+
+            EnsureFallbackLayer();
+            for (int i = 0; i < current.Length; i++)
+                if (current[i] == null) current[i] = fallbackLayer;
+
+            // Reassign so the property setter picks up the mutated slots.
+            data.terrainLayers = current;
+        }
+
+        /// <summary>
+        /// Builds the shared neutral stand-in layer once. Split out of
+        /// EnsureVisibleLayer so the splat reconciler can hang autofill layers off the
+        /// same texture. HideAndDontSave, so a domain reload destroys it and every
+        /// caller must null-check before use.
+        /// </summary>
+        private static void EnsureFallbackLayer()
+        {
+            if (fallbackLayer != null) return;
+
+            // Earth, not a test pattern. The old stand-in was a light-grey/white
+            // checker, and white is the one colour that cannot be read as ground:
+            // against a blue water surface it reads exactly as "this material
+            // failed to assign", which is precisely the bug reported at the
+            // shoreline when in fact the terrain was drawing correctly with the
+            // stand-in it was given.
+            //
+            // 4x4 rather than 2x2 with bilinear filtering and a several-metre tile,
+            // so it reads as soil breaking up over distance instead of as squares.
+            const int size = 4;
+            Texture2D tex = new Texture2D(size, size);
+            tex.name = "UC_DefaultGroundTex";
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Repeat;
+
+            // Damp earth, with the value walked by a small fixed pattern rather than
+            // a random draw: the stand-in has to look identical on every machine and
+            // after every reload, or a screenshot comparison is worthless.
+            Color[] px = new Color[size * size];
+            for (int i = 0; i < px.Length; i++)
+            {
+                // Two coprime strides over the 16 cells, so light and dark never line
+                // up into rows or a checker.
+                float v = 0.88f + 0.06f * (i % 3) + 0.04f * (i % 5);
+                px[i] = new Color(0.42f * v, 0.35f * v, 0.26f * v, 1f);
+            }
+
+            tex.SetPixels(px);
+            tex.Apply();
+
+            fallbackLayer = new TerrainLayer();
+            fallbackLayer.name = "Default_Terrain_Layer";
+            fallbackLayer.diffuseTexture = tex;
+            // Metres per texture repeat. Large enough that the 4x4 never resolves as
+            // a grid underfoot, small enough to still break up a hillside.
+            fallbackLayer.tileSize = new Vector2(6f, 6f);
+            fallbackLayer.hideFlags = HideFlags.HideAndDontSave;
+        }
+
+        // Stand-in layers minted to fill splat channels the world has not authored.
+        // Cached so a 25-chunk grid does not create a fresh set per chunk, and rebuilt
+        // lazily because HideAndDontSave entries die on a domain reload.
+        private static readonly List<TerrainLayer> autofillLayers = new List<TerrainLayer>();
+
+        /// <summary>
+        /// A distinct, valid TerrainLayer for splatmap channel <paramref name="index"/>
+        /// that the world has not authored. The channel is real - it simply draws the
+        /// neutral stand-in until the user assigns a texture to that slot, the same way
+        /// an unpainted Unreal landscape layer reads. Distinct instances rather than one
+        /// shared reference, so the terrain inspector does not flag "layer used more
+        /// than once".
+        /// </summary>
+        private static TerrainLayer AutofillLayer(int index)
+        {
+            EnsureFallbackLayer();
+            while (autofillLayers.Count <= index) autofillLayers.Add(null);
+            if (autofillLayers[index] == null)
+            {
+                TerrainLayer layer = new TerrainLayer();
+                layer.name = "UC_Autofill_Layer_" + index;
+                layer.diffuseTexture = fallbackLayer.diffuseTexture;
+                layer.tileSize = fallbackLayer.tileSize;
+                layer.hideFlags = HideFlags.HideAndDontSave;
+                autofillLayers[index] = layer;
+            }
+            return autofillLayers[index];
+        }
+
+        // Real layers minted from an output node's per-channel SplatLayerTexture,
+        // cached by channel with a cheap signature so a 25-chunk grid reuses them and
+        // they rebuild when the user changes a texture. HideAndDontSave, so they die on
+        // a domain reload and the null check below rebuilds them.
+        private struct DescribedLayerCache { public SplatLayerTexture desc; public TerrainLayer layer; }
+        private static readonly Dictionary<int, DescribedLayerCache> describedLayers =
+            new Dictionary<int, DescribedLayerCache>();
+
+        // Flat single-colour textures keyed by quantised colour, so a snow-white stand-in
+        // is built once and shared by every channel and chunk that needs that colour.
+        private static readonly Dictionary<int, Texture2D> flatTintTextures =
+            new Dictionary<int, Texture2D>();
+
+        /// <summary>
+        /// The layer for channel <paramref name="index"/> when the world has not authored
+        /// one: dressed from a matching descriptor when the node supplied textures/tint,
+        /// otherwise the neutral damp-earth autofill.
+        /// </summary>
+        private static TerrainLayer DescribedOrAutofillLayer(int index, IList<SplatLayerTexture> described)
+        {
+            if (described != null)
+            {
+                for (int i = 0; i < described.Count; i++)
+                    if (described[i].layer == index && described[i].HasContent)
+                        return DescribedLayer(index, described[i]);
+            }
+            return AutofillLayer(index);
+        }
+
+        private static void SafeDestroy(Object o)
+        {
+            if (o == null) return;
+            if (Application.isPlaying) Object.Destroy(o);
+            else Object.DestroyImmediate(o);
+        }
+
+        /// <summary>
+        /// Builds (or reuses) the TerrainLayer for one described channel. An empty albedo
+        /// paints a flat texture of the descriptor's tint - snow-white for snow - so the
+        /// channel never shows Unity's grey checker or the brown neutral stand-in. The
+        /// user's own textures are referenced directly (no CPU read, so import settings
+        /// never matter for the visible fix); AO is packed into a mask and is the only
+        /// part that can degrade, and it degrades to albedo+normal, never to a break.
+        /// </summary>
+        private static TerrainLayer DescribedLayer(int index, SplatLayerTexture d)
+        {
+            DescribedLayerCache cached;
+            if (describedLayers.TryGetValue(index, out cached) &&
+                cached.layer != null && SameDescriptor(cached.desc, d))
+                return cached.layer;
+
+            TerrainLayer layer = new TerrainLayer();
+            layer.name = "UC_Described_Layer_" + index;
+            layer.hideFlags = HideFlags.HideAndDontSave;
+
+            layer.diffuseTexture = d.albedo != null ? d.albedo : FlatTintTexture(d.tint);
+
+            if (d.normal != null)
+            {
+                layer.normalMapTexture = d.normal;
+                layer.normalScale = d.normalScale > 0f ? d.normalScale : 1f;
+            }
+
+            Texture2D mask = d.ao != null ? TryPackMask(d.ao, d.smoothness) : null;
+            if (mask != null)
+            {
+                layer.maskMapTexture = mask;
+            }
+            else
+            {
+                layer.smoothness = Mathf.Clamp01(d.smoothness);
+                layer.metallic = 0f;
+            }
+
+            float tileX = d.tileSizeMetres.x > 0.01f ? d.tileSizeMetres.x : 8f;
+            float tileZ = d.tileSizeMetres.y > 0.01f ? d.tileSizeMetres.y : tileX;
+            layer.tileSize = new Vector2(tileX, tileZ);
+
+            describedLayers[index] = new DescribedLayerCache { desc = d, layer = layer };
+            return layer;
+        }
+
+        private static Texture2D FlatTintTexture(Color tint)
+        {
+            // A black/undefined tint would read as "no colour"; give it a mid grey so the
+            // layer is still visibly flat rather than invisible.
+            if (tint.r <= 0f && tint.g <= 0f && tint.b <= 0f) tint = new Color(0.5f, 0.5f, 0.5f, 1f);
+            tint.a = 1f;
+
+            int key = QuantiseColour(tint);
+            Texture2D tex;
+            if (flatTintTextures.TryGetValue(key, out tex) && tex != null) return tex;
+
+            const int size = 8;
+            tex = new Texture2D(size, size, TextureFormat.RGBA32, true, false);
+            tex.hideFlags = HideFlags.HideAndDontSave;
+            tex.wrapMode = TextureWrapMode.Repeat;
+            Color[] px = new Color[size * size];
+            for (int i = 0; i < px.Length; i++) px[i] = tint;
+            tex.SetPixels(px);
+            tex.Apply();
+
+            flatTintTextures[key] = tex;
+            return tex;
+        }
+
+        private static int QuantiseColour(Color c)
+        {
+            int r = Mathf.Clamp(Mathf.RoundToInt(c.r * 255f), 0, 255);
+            int g = Mathf.Clamp(Mathf.RoundToInt(c.g * 255f), 0, 255);
+            int b = Mathf.Clamp(Mathf.RoundToInt(c.b * 255f), 0, 255);
+            return (r << 16) | (g << 8) | b;
+        }
+
+        // Cache validity by reference-equal textures + approx scalars. Deliberately not
+        // GetInstanceID (deprecated in Unity 6) nor a hash - a direct compare cannot
+        // collide two different descriptors onto one stale stand-in.
+        private static bool SameDescriptor(SplatLayerTexture a, SplatLayerTexture b)
+        {
+            return a.albedo == b.albedo &&
+                   a.normal == b.normal &&
+                   a.ao == b.ao &&
+                   ApproxColour(a.tint, b.tint) &&
+                   Mathf.Approximately(a.tileSizeMetres.x, b.tileSizeMetres.x) &&
+                   Mathf.Approximately(a.tileSizeMetres.y, b.tileSizeMetres.y) &&
+                   Mathf.Approximately(a.smoothness, b.smoothness) &&
+                   Mathf.Approximately(a.normalScale, b.normalScale);
+        }
+
+        private static bool ApproxColour(Color a, Color b)
+        {
+            return Mathf.Approximately(a.r, b.r) && Mathf.Approximately(a.g, b.g) &&
+                   Mathf.Approximately(a.b, b.b) && Mathf.Approximately(a.a, b.a);
+        }
+
+        // Packs an AO map into a URP terrain mask: R metallic 0, G occlusion = AO
+        // luminance, B height 0, A smoothness. Wrapped whole - if the AO texture cannot
+        // be read on this platform the mask is skipped and the caller keeps albedo+normal.
+        private static Texture2D TryPackMask(Texture2D ao, float smoothness)
+        {
+            try
+            {
+                Texture2D readable = MakeReadable(ao);
+                if (readable == null) return null;
+
+                int w = readable.width, h = readable.height;
+                Color[] src = readable.GetPixels();
+                Color[] dst = new Color[src.Length];
+                float sm = Mathf.Clamp01(smoothness);
+                for (int i = 0; i < src.Length; i++)
                 {
-                    // Two coprime strides over the 16 cells, so light and dark never line
-                    // up into rows or a checker.
-                    float v = 0.88f + 0.06f * (i % 3) + 0.04f * (i % 5);
-                    px[i] = new Color(0.42f * v, 0.35f * v, 0.26f * v, 1f);
+                    float occ = src[i].r * 0.2126f + src[i].g * 0.7152f + src[i].b * 0.0722f;
+                    dst[i] = new Color(0f, occ, 0f, sm);
                 }
 
-                tex.SetPixels(px);
-                tex.Apply();
+                Texture2D mask = new Texture2D(w, h, TextureFormat.RGBA32, true, true);
+                mask.hideFlags = HideFlags.HideAndDontSave;
+                mask.wrapMode = TextureWrapMode.Repeat;
+                mask.SetPixels(dst);
+                mask.Apply();
 
-                fallbackLayer = new TerrainLayer();
-                fallbackLayer.name = "Default_Terrain_Layer";
-                fallbackLayer.diffuseTexture = tex;
-                // Metres per texture repeat. Large enough that the 4x4 never resolves as
-                // a grid underfoot, small enough to still break up a hillside.
-                fallbackLayer.tileSize = new Vector2(6f, 6f);
-                fallbackLayer.hideFlags = HideFlags.HideAndDontSave;
+                if (readable != ao) SafeDestroy(readable);
+                return mask;
             }
-
-            if (data.terrainLayers == null || data.terrainLayers.Length == 0)
+            catch
             {
-                data.terrainLayers = new TerrainLayer[] { fallbackLayer };
+                return null;
             }
+        }
+
+        // A CPU-readable copy of a texture without needing Read/Write enabled in its
+        // import settings: blit through a temporary RenderTexture and read it back.
+        // Returns the source unchanged when it is already readable.
+        private static Texture2D MakeReadable(Texture2D src)
+        {
+            if (src == null) return null;
+            if (src.isReadable) return src;
+
+            // T6: the ReadPixels below is a main-thread GPU stall. On device that is a
+            // hitch every time an AO/mask map ships without Read/Write enabled, so at
+            // runtime on mobile we SKIP the readback (the mask degrades to albedo+normal)
+            // and tell the author to tick Read/Write on the import instead. In the editor
+            // the readback is allowed but a one-time warning flags the device cost.
+            if (Application.isMobilePlatform && !Application.isEditor)
+            {
+                WarnOnce("ao-readback-mobile",
+                    "Universe Creator: an AO/mask texture is not Read/Write enabled; skipping its " +
+                    "GPU readback on device to avoid a frame stall. Enable Read/Write on the texture " +
+                    "import to pack it.");
+                return null;
+            }
+
+            if (Application.isEditor)
+                WarnOnce("ao-readback-editor",
+                    "Universe Creator: packing an AO/mask texture that is not Read/Write enabled needs a " +
+                    "GPU readback - fine in the editor, but it stalls on device. Enable Read/Write on the " +
+                    "texture import before shipping to mobile.");
+
+            RenderTexture rt = RenderTexture.GetTemporary(
+                src.width, src.height, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+            RenderTexture prev = RenderTexture.active;
+            try
+            {
+                Graphics.Blit(src, rt);
+                RenderTexture.active = rt;
+                Texture2D copy = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false, true);
+                copy.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0);
+                copy.Apply();
+                return copy;
+            }
+            finally
+            {
+                RenderTexture.active = prev;
+                RenderTexture.ReleaseTemporary(rt);
+            }
+        }
+
+        // One warning per distinct key per session, so a per-chunk/per-layer path cannot
+        // spam the console with the same advice.
+        private static readonly System.Collections.Generic.HashSet<string> s_warnedKeys
+            = new System.Collections.Generic.HashSet<string>();
+
+        private static void WarnOnce(string key, string message)
+        {
+            if (!s_warnedKeys.Add(key)) return;
+            Debug.LogWarning(message);
+        }
+
+        // Highest channel deficit already reported this session, so the autofill
+        // notice is logged once rather than once per chunk (25+ times a generation).
+        private static int loggedAutofillDepth = -1;
+
+        /// <summary>
+        /// Makes a produced splatmap and the terrain's layer set agree in depth before
+        /// SetAlphamaps sees them, so the write can never throw "Float array size wrong"
+        /// and stall the chunk pump. Pure given the map depth and the current layer
+        /// count, so a self-test can pin it without a live Terrain.
+        ///
+        ///   layers &lt; map depth : grow the layer set with autofill stand-ins (Unreal
+        ///                          provisions a layer info per channel; it never refuses
+        ///                          the weightmap). Real authored layers are kept.
+        ///   layers &gt; map depth : pad the map with empty trailing channels, which does
+        ///                          not disturb the per-pixel normalisation.
+        ///   equal              : returned unchanged.
+        /// </summary>
+        public static float[,,] ReconcileSplatLayers(TerrainData data, float[,,] splat, string chunkLabel)
+        {
+            return ReconcileSplatLayers(data, splat, chunkLabel, null);
+        }
+
+        /// <summary>
+        /// As above, but a channel the world has not authored is dressed from a matching
+        /// <see cref="SplatLayerTexture"/> descriptor when one is supplied (biome-splat
+        /// snow / road / grass / forest), so that channel shows the user's texture (or a
+        /// flat tint when the slot is empty) instead of the neutral grey stand-in. A
+        /// channel with no descriptor still falls back to the neutral autofill.
+        /// </summary>
+        public static float[,,] ReconcileSplatLayers(TerrainData data, float[,,] splat,
+                                                      string chunkLabel, IList<SplatLayerTexture> described)
+        {
+            if (data == null || splat == null) return splat;
+
+            int want = splat.GetLength(2);
+            int have = data.terrainLayers != null ? data.terrainLayers.Length : 0;
+            if (want == have) return splat;
+
+            if (have < want)
+            {
+                // Grow the layer set. Keep every real layer the world already has and
+                // fill the remainder with the described texture where one exists, else
+                // a neutral stand-in, so channel L still maps to layer L.
+                TerrainLayer[] grown = new TerrainLayer[want];
+                TerrainLayer[] current = data.terrainLayers;
+                for (int i = 0; i < want; i++)
+                {
+                    if (current != null && i < current.Length && current[i] != null)
+                    {
+                        grown[i] = current[i];
+                        continue;
+                    }
+                    grown[i] = DescribedOrAutofillLayer(i, described);
+                }
+                data.terrainLayers = grown;
+
+                if (want > loggedAutofillDepth)
+                {
+                    loggedAutofillDepth = want;
+                    // Info, not a warning: this is a HEALED case - the missing slots are
+                    // dressed (from the node's per-channel descriptors when present, else a
+                    // neutral stand-in) and generation continues correctly. It once was the
+                    // SetAlphamaps throw that stalled the build, so it is worth saying once,
+                    // but it is guidance ("assign textures / lower Layer Count"), not a fault.
+                    Debug.Log(
+                        "Universe Creator: a splat output addresses " + want +
+                        " layer(s) but the world had " + have +
+                        " authored - the missing slot(s) are dressed with the node's per-channel " +
+                        "texture/tint where set, or a neutral stand-in otherwise, so generation " +
+                        "continues (this replaces the SetAlphamaps stall once seen at " +
+                        (chunkLabel ?? "a chunk") + "). Assign textures to those layers on the " +
+                        "Universe Creator object, or lower the node's Layer Count, to control them.");
+                }
+                return splat;
+            }
+
+            // have > want: pad the map's depth up to the layer count. The extra
+            // channels stay at zero, so each pixel's weights still sum as before.
+            int h = splat.GetLength(0);
+            int w = splat.GetLength(1);
+            float[,,] padded = new float[h, w, have];
+            for (int z = 0; z < h; z++)
+                for (int x = 0; x < w; x++)
+                    for (int L = 0; L < want; L++)
+                        padded[z, x, L] = splat[z, x, L];
+            return padded;
+        }
+
+        /// <summary>
+        /// Makes a produced splatmap's width/height agree with the terrain's
+        /// alphamapResolution before SetAlphamaps sees them - the sibling of
+        /// <see cref="ReconcileSplatLayers"/>. SetAlphamaps validates depth (layers)
+        /// in managed code first, then the map's w/h against alphamapResolution in the
+        /// native call; the second throw ("Array size does not match the dimensions of
+        /// the TerrainData") is just as uncaught and lands on the same main-thread pump,
+        /// so fixing only the depth would swap one stall for another. The graph paints
+        /// the splat at the heightmap's sample resolution while nothing ever assigns
+        /// alphamapResolution (it sits at the TerrainData default), so the two are
+        /// essentially never equal until reconciled here.
+        ///
+        /// Prefer making the control texture match the map, so no fidelity is lost and
+        /// the splat stays per-sample like the heightmap the same graph wrote. If Unity
+        /// keeps a different resolution than requested (or the map is not square), fall
+        /// back to endpoint-aligned bilinear membership sampling onto the actual resolution.
+        /// UC-T07-04: normalize nonnegative coverage without interpolating category IDs.
+        /// Returns the map to hand to SetAlphamaps.
+        /// </summary>
+        public static float[,,] ReconcileSplatResolution(TerrainData data, float[,,] splat)
+        {
+            if (data == null || splat == null) return splat;
+
+            int mapH = splat.GetLength(0);
+            int mapW = splat.GetLength(1);
+            int layers = splat.GetLength(2);
+
+            // Only a square map can be described by a single alphamapResolution, and
+            // every terrain chunk is square (the heightmap is resolution x resolution).
+            if (mapW == mapH && data.alphamapResolution != mapW)
+                data.alphamapResolution = mapW;
+
+            int aRes = data.alphamapResolution;
+            if (aRes == mapW && aRes == mapH) return splat;
+
+            // Unity kept a resolution of its own, or the map was non-square: resample to
+            // exactly what the terrain now expects so the write can never be rejected.
+            return ResampleSplatWeights(splat, aRes, aRes); // UC-T07-04: interpolate independent weights, preserving both world-cell endpoints.
+        }
+
+        /// <summary>UC-T07-04: resamples endpoint-aligned terrain membership weights with bilinear interpolation and nonnegative normalization.</summary>
+        /// <param name="splat">Nonempty [z,x,layer] terrain lattice; finite weights, with negative coverage clamped to zero.</param>
+        /// <param name="width">Positive target X sample count.</param>
+        /// <param name="height">Positive target Z sample count.</param>
+        /// <returns>A new [height,width,layer] lattice; empty coverage falls back to layer zero.</returns>
+        /// <exception cref="System.ArgumentException">Dimensions are empty or weights are nonfinite.</exception>
+        /// <remarks>Terrain fields include world-cell endpoints. Generic pixel images use their separate pixel-centre sampler.
+        /// This filter never decodes categories or changes the authored TerrainLayer ordering.</remarks>
+        public static float[,,] ResampleSplatWeights(float[,,] splat, int width, int height)
+        {
+            if (splat == null || width < 1 || height < 1 || splat.GetLength(0) < 1 || splat.GetLength(1) < 1 || splat.GetLength(2) < 1)
+                throw new System.ArgumentException("Terrain membership resampling requires nonempty dimensions.");
+            int mapH = splat.GetLength(0), mapW = splat.GetLength(1), layers = splat.GetLength(2);
+            float[,,] resized = new float[height, width, layers];
+            for (int z = 0; z < height; z++)
+            {
+                float pz = height == 1 ? (mapH - 1) * 0.5f : (float)z * (mapH - 1) / (height - 1);
+                int z0 = Mathf.FloorToInt(pz), z1 = Mathf.Min(z0 + 1, mapH - 1);
+                for (int x = 0; x < width; x++)
+                {
+                    float px = width == 1 ? (mapW - 1) * 0.5f : (float)x * (mapW - 1) / (width - 1);
+                    int x0 = Mathf.FloorToInt(px), x1 = Mathf.Min(x0 + 1, mapW - 1); double total = 0;
+                    for (int L = 0; L < layers; L++)
+                    {
+                        float a = splat[z0, x0, L], b = splat[z0, x1, L], c = splat[z1, x0, L], d = splat[z1, x1, L];
+                        if (float.IsNaN(a) || float.IsInfinity(a) || float.IsNaN(b) || float.IsInfinity(b) ||
+                            float.IsNaN(c) || float.IsInfinity(c) || float.IsNaN(d) || float.IsInfinity(d))
+                            throw new System.ArgumentException("Terrain membership weights must be finite.");
+                        float weight = Mathf.Lerp(Mathf.Lerp(Mathf.Max(0, a), Mathf.Max(0, b), px - x0),
+                            Mathf.Lerp(Mathf.Max(0, c), Mathf.Max(0, d), px - x0), pz - z0);
+                        resized[z, x, L] = weight; total += weight;
+                    }
+                    if (total > 0) for (int L = 0; L < layers; L++) resized[z, x, L] = (float)(resized[z, x, L] / total);
+                    else resized[z, x, 0] = 1;
+                }
+            }
+            return resized;
+        }
+
+        /// <summary>
+        /// The one rule pairing <c>Terrain.drawInstanced</c> to the material's
+        /// instancing support, kept as a pure truth table so a self-test can pin it
+        /// without a live Terrain. Instanced terrain feeds every patch transform
+        /// through the shader's <c>unity_ObjectToWorldArray</c>; a material that does
+        /// not declare that array leaves the matrices undefined and the whole surface
+        /// draws at a garbage transform - it vanishes. So the flag may go true ONLY
+        /// when the material actually supports instancing, whatever the author toggled.
+        /// Visible ground beats the draw-call saving.
+        /// </summary>
+        public static bool ResolveDrawInstanced(bool wantInstanced, bool materialSupportsInstancing)
+        {
+            return wantInstanced && materialSupportsInstancing;
         }
 
         /// <summary>
@@ -329,6 +940,9 @@ namespace UniverseCreator.TerrainSystem
         /// on every pass, and separate from ConfigureTerrain because these are not
         /// values a user tunes - they are the difference between ground and nothing.
         /// </summary>
+        /// <param name="terrain">Native terrain recipient; null is a no-op.</param>
+        /// <param name="settings">Optional world material and instancing policy; null uses the existing material or shared fallback.</param>
+        /// <remarks>Main thread. Preserves the authored GameObject layer so the host camera's culling mask remains meaningful.</remarks>
         public static void EnsureRenderable(Terrain terrain, UniverseCreatorObject settings)
         {
             if (terrain == null) return;
@@ -350,6 +964,18 @@ namespace UniverseCreator.TerrainSystem
             else if (terrain.materialTemplate == null)
                 terrain.materialTemplate = FallbackMaterial();
 
+            // A material draws nothing without a layer to draw into. On a domain reload
+            // the stand-in layer + texture (HideAndDontSave) are destroyed exactly like
+            // the material above, but the surviving-heights restore path re-asserted only
+            // the material - never the layer - so a reloaded stand-in world kept a valid
+            // material yet drew through a dead layer set and reverted to Unity's default
+            // gray. Reassert the layer here too: EnsureVisibleLayer is idempotent (it
+            // returns the instant a live authored layer exists) and rebuilds the neutral
+            // brown ground only when every slot is null/destroyed, so authored worlds are
+            // untouched and only the stand-in case self-heals. (§37) See [[EnsureVisibleLayer]].
+            if (terrain.terrainData != null)
+                EnsureVisibleLayer(terrain.terrainData);
+
             // Both of these default on for a fresh component, but either one off draws
             // nothing whatsoever, and they are cheap to reassert.
             terrain.drawHeightmap = true;
@@ -358,7 +984,7 @@ namespace UniverseCreator.TerrainSystem
             if (terrain.gameObject != null)
             {
                 terrain.gameObject.SetActive(true);
-                terrain.gameObject.layer = LayerMask.NameToLayer("Default");
+                // UC Scene/Play repair: layer belongs to the authored camera/terrain contract, not restoration.
             }
 
             // Instanced terrain feeds every patch transform through the shader's
@@ -373,7 +999,7 @@ namespace UniverseCreator.TerrainSystem
             bool wantInstanced = settings != null && settings.drawInstanced;
             bool materialHandlesIt = terrain.materialTemplate != null &&
                                      terrain.materialTemplate.enableInstancing;
-            terrain.drawInstanced = wantInstanced && materialHandlesIt;
+            terrain.drawInstanced = ResolveDrawInstanced(wantInstanced, materialHandlesIt);
 
             // Unity's own auto-connect is switched off, deliberately.
             //
@@ -403,7 +1029,6 @@ namespace UniverseCreator.TerrainSystem
             unchecked
             {
                 int h = 17;
-                h = h * 31 + settings.pixelError.GetHashCode();
                 h = h * 31 + settings.basemapDistance.GetHashCode();
                 h = h * 31 + (settings.castShadows ? 1 : 0);
                 h = h * 31 + (settings.drawInstanced ? 1 : 0);
@@ -440,7 +1065,12 @@ namespace UniverseCreator.TerrainSystem
 
             EnsureRenderable(terrain, settings);
 
-            terrain.heightmapPixelError = settings.pixelError;
+            // heightmapPixelError is deliberately NOT pushed here. It is owned per cell by
+            // ChunkManager.ApplyDensity / Geometry.TerrainDensityController, which derives it
+            // from the live view against the visual-acuity budget (L-49) and the source
+            // field's Nyquist floor (L-50). Writing a single authored value here would fight
+            // that controller: every settings change would slam every cell back to one static
+            // error and force a redundant patch LOD-tree rebuild on the next density tick.
             terrain.basemapDistance = settings.basemapDistance;
             terrain.shadowCastingMode = settings.castShadows
                 ? UnityEngine.Rendering.ShadowCastingMode.On

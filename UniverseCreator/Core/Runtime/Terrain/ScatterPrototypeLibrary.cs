@@ -41,6 +41,7 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Ecology;
 
 namespace UniverseCreator.TerrainSystem
 {
@@ -59,6 +60,8 @@ namespace UniverseCreator.TerrainSystem
     [System.Serializable]
     public class TreePrototypeDef
     {
+        /// <summary>UC-T06-06: serialized prototype identity, initialized on creation and retained when this roster entry moves; missing/duplicate legacy IDs require explicit initialization/migration.</summary>
+        [HideInInspector] public string persistentId = System.Guid.NewGuid().ToString("N");
         public GameObject prefab;
 
         [Tooltip("How far wind bends this tree. 0 is rigid. This is the only wind input "
@@ -79,6 +82,35 @@ namespace UniverseCreator.TerrainSystem
 
         [Tooltip("Trunk height multiplier range.")]
         public Vector2 heightScale = new Vector2(0.8f, 1.25f);
+
+        [Tooltip("Relative selection weight when a node picks between prototypes.")]
+        public float weight = 1f;
+
+        /// <summary>
+        /// DEF-6. The prefab's OWN height in metres as it was modelled, measured from its mesh
+        /// bounds. 0 = not measured yet. Runtime cache only, never serialized: it is a fact about
+        /// the buyer's prefab, not about our asset.
+        ///
+        /// WHY THIS IS MEASURED AND NEVER ASSUMED. `TreeInstance.heightScale` is a MULTIPLIER on
+        /// the prefab's modelled size, so "make this tree 20 m tall" is only expressible as
+        /// `20 / (native height)`. That divisor is a property of the buyer's own model, and this
+        /// package's hard rule is that no asset's size, path, filename or format may be assumed in
+        /// code - content slots ship EMPTY and the buyer brings their own. So it is read off the
+        /// mesh at registration time and cached, which also means a buyer swapping a 6 m prefab for
+        /// a 30 m one gets correctly-sized trees without touching a dial.
+        /// </summary>
+        [System.NonSerialized] public float nativeHeightM;
+
+        /// <summary>UC-T06-08: optional full-key size/yaw variation in addition to existing trunk ranges and species allometry.</summary>
+        public ScatterPrototypeVariation variation = new ScatterPrototypeVariation();
+
+        // The altitude band and maxSlope above are the author's hard override and
+        // they stay: existing worlds have them authored, and an author is entitled
+        // to say "not here" regardless of what the ecology concludes. This is the
+        // separate question of where the species can actually live, in real units.
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     /// <summary>
@@ -90,6 +122,8 @@ namespace UniverseCreator.TerrainSystem
     [System.Serializable]
     public class ShrubPrototypeDef
     {
+        /// <summary>UC-T06-06: serialized prototype identity, independent of its roster index; duplicate IDs are rejected.</summary>
+        [HideInInspector] public string persistentId = System.Guid.NewGuid().ToString("N");
         public GameObject prefab;
 
         [Tooltip("Relative selection weight when a node picks between prototypes.")]
@@ -116,11 +150,9 @@ namespace UniverseCreator.TerrainSystem
         public float meshHeight = 1.2f;
 
         // ---- being walked through -------------------------------------------
-
-        [Tooltip("Give this shrub a trigger collider so a character can walk into it. "
-               + "A trigger and not a solid collider on purpose: the player passes "
-               + "through and the plant squeezes aside, rather than being stopped by a bush.")]
-        public bool spawnCollider = true;
+        //
+        // Whether a trigger is built at all is eco.colliderPolicy (V-27). These three
+        // stay because they are the trigger's geometry, which the policy does not carry.
 
         [Tooltip("Radius of the trigger, in metres. Roughly the visual footprint.")]
         [Range(0.05f, 5f)]
@@ -150,6 +182,9 @@ namespace UniverseCreator.TerrainSystem
         [Range(0f, 1f)]
         public float normalAlignment = 0.35f;
 
+        /// <summary>UC-T06-08: optional full-key size/yaw variation; legacy/null settings retain the node's authored variation.</summary>
+        public ScatterPrototypeVariation variation = new ScatterPrototypeVariation();
+
         [Tooltip("Rejected on ground steeper than this, in degrees.")]
         public float maxSlope = 40f;
 
@@ -157,15 +192,18 @@ namespace UniverseCreator.TerrainSystem
         public float minAltitude;
         public float maxAltitude = 1f;
 
-        [Tooltip("Draw through the GPU instancing manager past the chunk threshold. "
-               + "Instanced shrubs keep their wind but lose the trigger collider, which "
-               + "is the right trade for distant fill you will never walk into.")]
-        public bool gpuInstanceWhenDense = true;
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top. "
+               + "Instancing and collider routing live here too, on instancingPolicy and "
+               + "colliderPolicy (V-27).")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     [System.Serializable]
     public class DetailPrototypeDef
     {
+        /// <summary>UC-T06-06: serialized prototype identity, independent of its roster index; duplicate IDs are rejected.</summary>
+        [HideInInspector] public string persistentId = System.Guid.NewGuid().ToString("N");
         [Tooltip("Mesh prototype. Takes precedence over the billboard texture.")]
         public GameObject prefabMesh;
 
@@ -184,8 +222,17 @@ namespace UniverseCreator.TerrainSystem
         public Color healthyColour = new Color(0.35f, 0.55f, 0.2f, 1f);
         public Color dryColour = new Color(0.55f, 0.5f, 0.25f, 1f);
 
-        [Tooltip("Lays the billboard against the surface instead of standing it upright.")]
-        public bool alignToGround;
+        [Tooltip("Lays the billboard against the surface instead of standing it upright. ON for a "
+               + "new prototype: grass stood bolt upright on a hillside lifts its base off the "
+               + "ground on the downhill side, which reads as hanging. Existing prototypes keep "
+               + "whatever was saved.")]
+        public bool alignToGround = true;
+
+        [Tooltip("How far this leans with the slope when Align To Ground is on, 0-1. Not binary on "
+               + "purpose: 1 lays a blade flat on a steep hill, which looks pressed down, while a "
+               + "partial lean keeps the blade standing yet seats its base on the ground.")]
+        [Range(0f, 1f)]
+        public float groundAlignStrength = 0.6f;
 
         [Tooltip("GPU instancing for the detail mesh. Off falls back to per-patch batching.")]
         public bool useInstancing = true;
@@ -210,11 +257,20 @@ namespace UniverseCreator.TerrainSystem
                + "collider - the parting is entirely visual, which is why it costs nothing.")]
         [Range(0f, 2f)]
         public float squeeze = 1f;
+
+        [Tooltip("Relative selection weight when a node picks between prototypes.")]
+        public float weight = 1f;
+
+        [Tooltip("Where this species can live: its climate, soil, water and stress limits. "
+               + "The altitude band and slope limit above remain a hard override on top.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     [System.Serializable]
     public class ObjectPrototypeDef
     {
+        /// <summary>UC-T06-06: serialized prototype identity, independent of its roster index; duplicate IDs are rejected.</summary>
+        [HideInInspector] public string persistentId = System.Guid.NewGuid().ToString("N");
         public GameObject prefab;
 
         [Tooltip("Relative selection weight when a node picks between prototypes.")]
@@ -226,12 +282,19 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Tilts the object toward the surface normal, 0-1.")]
         public float normalAlignment = 1f;
 
-        [Tooltip("Draw through the GPU instancing manager instead of spawning a GameObject. "
-               + "No collider, no transform, far cheaper past a few thousand.")]
-        public bool gpuInstanced;
+        /// <summary>UC-T06-08: optional full-key size/yaw variation, retaining prototype selection and existing deposit sizing.</summary>
+        public ScatterPrototypeVariation variation = new ScatterPrototypeVariation();
 
         [Tooltip("Marks the spawned object static. Only meaningful for GameObject spawns.")]
         public bool markStatic = true;
+
+        // Stones and deadfall are not alive, but they are still placed by process
+        // (V-19): a talus block belongs below a slope past its angle of repose, and
+        // river cobble belongs where water runs. The same envelope answers both
+        // questions, which is why the non-living scatter carries one too.
+        [Tooltip("Where this deposit forms: the slope, flow, salt and altitude conditions "
+               + "that put loose material here rather than somewhere else.")]
+        public EcoEnvelope eco = new EcoEnvelope();
     }
 
     /// <summary>

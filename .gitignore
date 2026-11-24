@@ -1,0 +1,7 @@
+# Game-only source content is not part of the distributable UC toolkit.
+/UniverseCreator/Content/
+/UniverseCreator/Content.meta
+
+# Local validation projects and their reports are not product source.
+/.work/
+/Logs/

@@ -22,6 +22,7 @@ namespace UniverseCreator.TerrainSystem
             switch (kind)
             {
                 case WaterBodyKind.Lake: return UCWaterBody.ShapeMode.Polygon;
+                case WaterBodyKind.Swamp: return UCWaterBody.ShapeMode.Polygon; // a still standing body, like a lake
                 case WaterBodyKind.River: return UCWaterBody.ShapeMode.RiverSpline;
                 default: return UCWaterBody.ShapeMode.Rectangle; // Ocean, Pool
             }
@@ -31,6 +32,9 @@ namespace UniverseCreator.TerrainSystem
         // whose kind is already locked by SetKindOnce. Per-body geometry - a lake's
         // outline, a river's course, the world position - is the caller's to set
         // afterwards; this only writes what every body of the kind shares.
+        /// <summary>Applies kind defaults to a newly created body, including a downwarped lake basin; loading existing bodies never calls this preset.</summary>
+        /// <param name="body">New body whose kind has been assigned; null is a no-op. The caller supplies its position and outline.</param>
+        /// <remarks>Manual creation and hydrology share these defaults; hydrology then supplies its measured formation selection.</remarks>
         public static void ApplyDefaults(UCWaterBody body)
         {
             if (body == null) return;
@@ -43,6 +47,7 @@ namespace UniverseCreator.TerrainSystem
                 case WaterBodyKind.Lake: ApplyLake(body); break;
                 case WaterBodyKind.River: ApplyRiver(body); break;
                 case WaterBodyKind.Pool: ApplyPool(body); break;
+                case WaterBodyKind.Swamp: ApplySwamp(body); break;
             }
         }
 
@@ -83,6 +88,8 @@ namespace UniverseCreator.TerrainSystem
 
         private static void ApplyLake(UCWaterBody body)
         {
+            body.lakeFormation = LakeFormation.Tectonic; // UC-T08-15: newly authored lakes start with a broad downwarped basin; legacy assets retain zero.
+            body.lakeSedimentation = 0;
             body.sizeMetres = new Vector2(240f, 180f);
             body.meshResolution = 64;
             body.currentMetresPerSecond = new Vector2(0.04f, 0.02f);
@@ -95,13 +102,27 @@ namespace UniverseCreator.TerrainSystem
             body.water.causticsDepthFadeMetres = 5f;
         }
 
+        private static void ApplySwamp(UCWaterBody body)
+        {
+            // A swamp is a still, murky, standing body - a tuned lake with almost no wave
+            // motion and a shallow depth-fade so the tannin-dark water reads as opaque, and
+            // no caustics (light does not reach the peat floor).
+            body.sizeMetres = new Vector2(200f, 160f);
+            body.meshResolution = 48;
+            body.currentMetresPerSecond = new Vector2(0.01f, 0.005f);
+
+            body.water.waveHeightMetres = 0.02f;
+            body.water.waveLengthMetres = 8f;
+            body.water.depthFadeMetres = 1.5f;
+            body.water.foamEnabled = false;
+            body.water.causticsEnabled = false;
+        }
+
+        // UC-T08-15: course geometry is authored by the caller and solved by the existing river owners.
+        // This shared preset supplies appearance and hydraulic defaults without replacing an authored course.
         private static void ApplyRiver(UCWaterBody body)
         {
             body.sizeMetres = new Vector2(300f, 300f);
-            body.widthMetres = 12f;
-            body.widthSegments = 6;
-            body.pointSpacingMetres = 6f;
-            body.channelDepthMetres = 1.5f;
             body.manningRoughness = 0.035f;
             body.maxFlowSpeed = 4f;
 

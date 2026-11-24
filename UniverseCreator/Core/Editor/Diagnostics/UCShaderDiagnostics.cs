@@ -32,8 +32,57 @@ namespace UniverseCreator.Editor.Diagnostics
             "UniverseCreator/TerrainLit",
             "UniverseCreator/Water",
             "UniverseCreator/WindDetail",
-            "Hidden/UniverseCreator/WaterRipple"
+            "UniverseCreator/VegetationLit",
+            "UniverseCreator/RockLit",
+            "UniverseCreator/Rain",
+            "UniverseCreator/Snow",
+            "UniverseCreator/Fog",
+            "UniverseCreator/Skybox",
+            "UniverseCreator/Clouds",
+            "UniverseCreator/SunShafts",
+            "Hidden/UniverseCreator/WaterRipple",
+            "Hidden/UniverseCreator/ContactShadow",
+            "Hidden/UniverseCreator/SSGI",
+
+            // § 9 Living World geometry shaders. TerrainDetailTess carries the G-24
+            // no-tessellation fallback as a second sub-shader; Impostor carries the
+            // hemi/full and season keyword variants; VirtualSplatSample compiles the
+            // UC_VirtualSplat.hlsl page-table sample include.
+            "UniverseCreator/TerrainDetailTess",
+            "UniverseCreator/Impostor",
+            "Hidden/UniverseCreator/VirtualSplatSample"
         };
+
+        /// <summary>
+        /// Required structural variants a shipped shader must keep. A shader whose actual
+        /// sub-shader count or keyword set falls below what it declares here has silently
+        /// lost a variant - the G-24 tessellation fallback deleted, the impostor's hemi/full
+        /// or season keyword dropped - and the check fails the build rather than shipping a
+        /// shader that renders wrong or magenta on the path that lost its variant.
+        /// </summary>
+        private struct VariantRequirement
+        {
+            public int minSubshaders;      // e.g. TerrainDetailTess needs its 4.6 pass AND the G-24 fallback
+            public string[] mustHaveKeywords; // local keywords that a dropped multi_compile would remove
+        }
+
+        private static VariantRequirement RequirementFor(string shaderName)
+        {
+            switch (shaderName)
+            {
+                case "UniverseCreator/TerrainDetailTess":
+                    // The SM 4.6 tessellated sub-shader plus the G-24 fixed-mesh fallback.
+                    return new VariantRequirement { minSubshaders = 2, mustHaveKeywords = null };
+                case "UniverseCreator/Impostor":
+                    return new VariantRequirement
+                    {
+                        minSubshaders = 1,
+                        mustHaveKeywords = new[] { "_UC_IMPOSTOR_FULL", "_UC_IMPOSTOR_SEASON" }
+                    };
+                default:
+                    return new VariantRequirement { minSubshaders = 1, mustHaveKeywords = null };
+            }
+        }
 
         [MenuItem("Tools/Universe Creator/Diagnostics/Check Shaders", priority = 210)]
         public static void CheckMenu()
@@ -60,12 +109,7 @@ namespace UniverseCreator.Editor.Diagnostics
 
             foreach (string name in ShipShaders)
             {
-                // Shader.Find does not reliably resolve Hidden/ shaders in batch
-                // mode, and a shader that fails to resolve would otherwise be
-                // reported as MISSING when it is merely not referenced yet.
-                // Loading by asset path is unambiguous.
-                Shader shader = Shader.Find(name);
-                if (shader == null) shader = FindByPath(name);
+                Shader shader = Resolve(name);
 
                 if (shader == null)
                 {
@@ -100,6 +144,33 @@ namespace UniverseCreator.Editor.Diagnostics
                     }
                 }
 
+                // Report the sub-shader count and enforce the structural variants this shader
+                // must keep - a dropped sub-shader (the G-24 fallback) or a dropped keyword
+                // (impostor hemi/full, season) fails the build rather than shipping silently.
+                int subshaderCount = ShaderUtil.GetShaderData(shader).SubshaderCount;
+                sb.AppendLine("         subshaders: " + subshaderCount);
+
+                VariantRequirement req = RequirementFor(name);
+                if (subshaderCount < req.minSubshaders)
+                {
+                    sb.AppendLine("    MISSING VARIANT: expected >= " + req.minSubshaders +
+                                  " sub-shaders, found " + subshaderCount);
+                    ok = false;
+                }
+                if (req.mustHaveKeywords != null)
+                {
+                    var space = shader.keywordSpace.keywordNames;
+                    foreach (string kw in req.mustHaveKeywords)
+                    {
+                        bool present = System.Array.IndexOf(space, kw) >= 0;
+                        if (!present)
+                        {
+                            sb.AppendLine("    MISSING VARIANT: keyword " + kw + " not declared");
+                            ok = false;
+                        }
+                    }
+                }
+
                 if (hasError) ok = false;
             }
 
@@ -108,12 +179,21 @@ namespace UniverseCreator.Editor.Diagnostics
         }
 
         /// <summary>
-        /// Resolves a declared shader name by scanning our own shader folder and
-        /// reading each asset's <c>Shader.name</c>. Used when Shader.Find returns
-        /// null, which happens for Hidden/ shaders in batch mode.
+        /// Resolves a declared shader name to its asset. The single resolver every
+        /// UC editor tool uses, so none of them can disagree about whether one of
+        /// our shaders is present.
+        ///
+        /// Shader.Find is tried first, then a scan of our own shader folder that
+        /// reads each asset's <c>Shader.name</c>. The fallback is not optional:
+        /// Shader.Find does not reliably resolve <c>Hidden/</c> shaders in batch
+        /// mode, so relying on it alone reports a shader as missing when it is
+        /// merely hidden or not referenced by a material yet.
         /// </summary>
-        private static Shader FindByPath(string declaredName)
+        public static Shader Resolve(string declaredName)
         {
+            Shader found = Shader.Find(declaredName);
+            if (found != null) return found;
+
             string[] guids = AssetDatabase.FindAssets(
                 "t:Shader", new[] { "Assets/UniverseCreator/Shaders" });
 

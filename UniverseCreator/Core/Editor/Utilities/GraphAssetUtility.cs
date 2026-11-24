@@ -136,17 +136,19 @@ namespace UniverseCreator.Editor.Utilities
         }
 
         /// <summary>
-        /// True when a graph's content belongs to the texture canvas.
+        /// True when explicit supported metadata selects Texture Graph, or a legacy asset's nodes fit its old texture workflow.
         ///
-        /// The test is "every node it has is a texture-graph node", not "it has a
+        /// For legacy assets the test is "every node it has is a texture-graph node", not "it has a
         /// Shader Output". A half-built surface graph with three layer nodes and no
         /// terminal yet is still a surface graph, and that is exactly the state a
         /// user is in when they close the window and come back to it. An empty
-        /// graph answers false, because Empty Graph is the height preset's name.
+        /// legacy graph answers false. New assets use their saved domain even before nodes exist.
         /// </summary>
         public static bool LooksLikeTextureGraph(Graph graph)
         {
-            if (graph == null || graph.nodes == null || graph.nodes.Count == 0) return false;
+            if (graph == null || !graph.HasSupportedDomainMetadata) return false;
+            if (graph.DomainSchemaVersion != 0) return graph.Domain == UCGraphDomain.TextureMaterialShader; // UC-T05-01: metadata takes precedence over contents or asset names.
+            if (graph.nodes == null || graph.nodes.Count == 0) return false;
 
             for (int i = 0; i < graph.nodes.Count; i++)
             {
@@ -239,106 +241,26 @@ namespace UniverseCreator.Editor.Utilities
         // =====================================================================
 
         /// <summary>
-        /// Clears every reference to a node class that no longer exists, from every
-        /// graph this project can reach. Returns how many graphs it had to change.
+        /// UC-T01-11: compatibility entry point that opens the selected-graph recovery preview.
         ///
-        /// WHAT THE WARNING ACTUALLY IS
-        /// ----------------------------
-        ///   Missing types referenced from component Graph on game object world:
-        ///     UniverseCreator.Nodes.Texturing.OceanOutputNode, UniverseCreator
-        ///
-        /// Graph.PruneMissingNodes already keeps the node list itself clean, so nothing
-        /// in the toolkit trips over the hole. The warning comes from somewhere it
-        /// cannot reach: a record Unity keeps beside the list so the node's data
-        /// survives if the script ever returns. Only
-        /// ClearAllManagedReferencesWithMissingTypes removes that record, and only a
-        /// save makes the removal stick.
-        ///
-        /// WHY BOTH HOMES ARE SWEPT
-        /// ------------------------
-        /// A graph can be a project asset or can live inside a scene - the latter is
-        /// what a world whose graph was never written to disk has, and it is exactly
-        /// the case the warning above names, since it reports against the GameObject
-        /// holding the reference. An asset-only pass would miss it and the warning
-        /// would come back on the next load.
+        /// It never repairs on invocation. The author chooses saved graph assets and
+        /// explicitly confirms the preview; only that path discards missing data.
         /// </summary>
+        /// <param name="logResult">Whether to explain the deferred action in the Console.</param>
+        /// <returns>Zero; mutations happen only through the preview's confirmed action.</returns>
+        [System.Obsolete("Select Graph assets and use the Graph Recovery preview; project-wide immediate repair is no longer supported.")]
         public static int RepairAll(bool logResult = true)
         {
-            HashSet<Graph> seen = new HashSet<Graph>();
-            List<Graph> targets = new List<Graph>();
-
-            string[] guids = AssetDatabase.FindAssets("t:" + typeof(Graph).Name);
-            for (int i = 0; i < guids.Length; i++)
-            {
-                Graph found = AssetDatabase.LoadAssetAtPath<Graph>(
-                    AssetDatabase.GUIDToAssetPath(guids[i]));
-                if (found != null && seen.Add(found)) targets.Add(found);
-            }
-
-            UniverseCreatorObject[] worlds = UnityEngine.Object.FindObjectsByType<UniverseCreatorObject>(
-                FindObjectsInactive.Include, FindObjectsSortMode.None);
-            for (int i = 0; i < worlds.Length; i++)
-            {
-                Graph inScene = worlds[i].graph;
-                if (inScene != null && seen.Add(inScene)) targets.Add(inScene);
-            }
-
-            int repaired = 0;
-            int slots = 0;
-            int sceneSide = 0;
-
-            for (int i = 0; i < targets.Count; i++)
-            {
-                Graph graph = targets[i];
-
-                bool hadRecord = SerializationUtility.HasManagedReferencesWithMissingTypes(graph);
-                int holes = graph.PruneMissingNodes();
-                if (!hadRecord && holes == 0) continue;
-
-                if (hadRecord) SerializationUtility.ClearAllManagedReferencesWithMissingTypes(graph);
-                EditorUtility.SetDirty(graph);
-
-                repaired++;
-                slots += holes;
-                if (!EditorUtility.IsPersistent(graph)) sceneSide++;
-            }
-
-            if (repaired > 0)
-            {
-                AssetDatabase.SaveAssets();
-
-                // A scene-side graph is only written when its scene is, and saving a
-                // user's scene out from under them is not this menu item's business.
-                // Marking it dirty is what makes Ctrl+S enough.
-                if (sceneSide > 0) EditorSceneManager.MarkAllScenesDirty();
-            }
-
-            if (logResult)
-            {
-                if (repaired == 0)
-                {
-                    Debug.Log("[UC] Repair Graphs: nothing to do. " + targets.Count +
-                              " graph(s) checked, none referenced a missing node type.");
-                }
-                else
-                {
-                    Debug.Log("[UC] Repair Graphs: cleared missing node types from " +
-                              repaired + " of " + targets.Count + " graph(s), removing " +
-                              slots + " empty node slot(s)." +
-                              (sceneSide > 0
-                                  ? " " + sceneSide + " of them live in a scene - save the " +
-                                    "scene (Ctrl+S) and the warning will not come back."
-                                  : string.Empty));
-                }
-            }
-
-            return repaired;
+            if (logResult) Debug.Log("[UC] No graph data was removed. Select saved graphs and review the recovery preview.");
+            GraphRepairWindow.OpenSelected();
+            return 0;
         }
 
         [MenuItem("Tools/Universe Creator/Diagnostics/Repair Graphs", priority = 211)]
         private static void RepairAllMenu()
         {
-            RepairAll();
+            // UC-T01-11: a menu click previews only the selected graphs; it never sweeps the project.
+            GraphRepairWindow.OpenSelected();
         }
 
         // =====================================================================

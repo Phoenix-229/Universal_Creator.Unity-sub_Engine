@@ -20,14 +20,28 @@ namespace UniverseCreator.Nodes
     public class StopToken
     {
         private volatile bool stopRequested;
+        // UC-T02-01: a local chunk stop must also observe cancellation of its owning world revision.
+        private readonly StopToken parent;
+        private readonly StopToken otherParent; // UC-T02-03: a shared solve can observe both cache lifetime and scheduling revision.
 
-        public bool StopRequested { get { return stopRequested; } }
+        /// <summary>Creates an independent cooperative cancellation token.</summary>
+        public StopToken() { }
+
+        /// <summary>Creates a local token that also observes an owning run's cancellation.</summary>
+        /// <param name="parent">Owning token; null creates an independent token. Existing parent chains are immutable.</param>
+        public StopToken(StopToken parent) { this.parent = parent; }
+
+        internal StopToken(StopToken parent, StopToken otherParent) { this.parent = parent; this.otherParent = otherParent; }
+
+        /// <summary>UC-T02-01: true when this token or its owning run requested cancellation.</summary>
+        public bool StopRequested { get { return stopRequested || (parent != null && parent.StopRequested) || (otherParent != null && otherParent.StopRequested); } }
 
         public void RequestStop()
         {
             stopRequested = true;
         }
 
+        /// <summary>Clears only the local stop flag; UC-T02-01 parent cancellation cannot be reset by a child.</summary>
         public void Reset()
         {
             stopRequested = false;
@@ -39,7 +53,7 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public void ThrowIfStopRequested()
         {
-            if (stopRequested)
+            if (StopRequested)
                 throw new OperationCanceledException("Generation stopped by user.");
         }
     }

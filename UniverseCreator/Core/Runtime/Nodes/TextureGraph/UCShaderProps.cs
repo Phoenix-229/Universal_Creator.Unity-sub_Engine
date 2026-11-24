@@ -43,6 +43,13 @@ namespace UniverseCreator.Nodes
         // -- blending --------------------------------------------------------
         public const string EnableHeightBlend = "_EnableHeightBlend";
         public const string HeightTransition = "_HeightTransition";
+        // UC-T07-06: packed reusable-layer parameters add no texture sampler or keyword variants.
+        public const string LayerOpacity = "_UC_LayerOpacity";
+        public const string LayerAlphaOpacity = "_UC_LayerAlphaOpacity";
+        public const string LayerOcclusion = "_UC_LayerOcclusion";
+        public const string EnableSurfaceClip = "_UC_EnableSurfaceClip";
+        public const string SurfaceCutoff = "_UC_SurfaceCutoff";
+        internal static readonly string LayerEmissionPrefix = "_UC_LayerEmission"; // Prefix is not itself a shader property.
 
         // -- occlusion -------------------------------------------------------
         public const string OcclusionStrength = "_OcclusionStrength";
@@ -68,6 +75,10 @@ namespace UniverseCreator.Nodes
         public const string SlopeMetallic = "_SlopeMetallic";
         public const string SlopeNormalStrength = "_SlopeNormalStrength";
         public const string SlopeTriplanarScale = "_SlopeTriplanarScale";
+        /// <summary>UC-T07-11: world-axis blend exponent 1…8 for cliff and snow projections.</summary>
+        public const string TriplanarSharpness = "_UCTriplanarSharpness";
+        /// <summary>UC-T07-11: reversible per-terrain sampling tier; 0 full maps, 1 no projected normals, 2 flat cliff/snow colour retaining physical coverage.</summary>
+        public const string TextureQuality = "_UCTextureQuality";
 
         // -- snow ------------------------------------------------------------
         public const string EnableSnow = "_EnableSnow";
@@ -81,6 +92,7 @@ namespace UniverseCreator.Nodes
         public const string SnowCoverage = "_SnowCoverage";
         public const string SnowSmoothness = "_SnowSmoothness";
         public const string SnowNormalStrength = "_SnowNormalStrength";
+        public const string SnowOcclusion = "_SnowOcclusion";
         public const string SnowTriplanarScale = "_SnowTriplanarScale";
 
         // -- wetness ---------------------------------------------------------

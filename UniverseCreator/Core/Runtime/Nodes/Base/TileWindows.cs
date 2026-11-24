@@ -41,6 +41,25 @@ namespace UniverseCreator.Nodes
     /// </summary>
     public static class TileWindows
     {
+        /// <summary>UC-T02-08: converts a finite world-space neighbourhood to conservative sample margins on an anisotropic grid.</summary>
+        /// <param name="tile">Non-null tile with at least two samples and positive finite world size on both horizontal axes.</param>
+        /// <param name="radiusMetres">Finite nonnegative reach in metres.</param>
+        /// <returns>Samples on each side, including one interpolation sample; zero for zero reach.</returns>
+        /// <exception cref="System.ArgumentOutOfRangeException">The radius or grid is invalid, or the sample count overflows.</exception>
+        public static int MarginForMetres(TileData tile, float radiusMetres)
+        {
+            if (tile == null || tile.rect.size.x < 2 || tile.rect.size.z < 2 ||
+                float.IsNaN(radiusMetres) || float.IsInfinity(radiusMetres) || radiusMetres < 0 ||
+                float.IsNaN(tile.worldSize.x) || float.IsInfinity(tile.worldSize.x) || tile.worldSize.x <= 0 ||
+                float.IsNaN(tile.worldSize.z) || float.IsInfinity(tile.worldSize.z) || tile.worldSize.z <= 0)
+                throw new System.ArgumentOutOfRangeException(nameof(radiusMetres), "A finite radius and positive sample spacing are required.");
+            if (radiusMetres == 0) return 0;
+            double spacing = System.Math.Min((double)tile.worldSize.x / (tile.rect.size.x - 1), (double)tile.worldSize.z / (tile.rect.size.z - 1));
+            double samples = System.Math.Ceiling(radiusMetres / spacing) + 1;
+            if (samples > int.MaxValue) throw new System.ArgumentOutOfRangeException(nameof(radiusMetres));
+            return (int)samples;
+        }
+
         /// <summary>
         /// The same chunk with <paramref name="margin"/> ghost pixels added on every
         /// side, bound to its own evaluator so an input can be pulled at the wider
@@ -54,6 +73,11 @@ namespace UniverseCreator.Nodes
         public static TileData Expand(TileData tile, int margin)
         {
             if (tile == null || margin <= 0 || tile.Graph == null) return null;
+
+            // UC-T02-08: refuse overflow rather than wrap an oversized halo into an unrelated coordinate window.
+            if ((long)tile.rect.size.x + 2L * margin > int.MaxValue || (long)tile.rect.size.z + 2L * margin > int.MaxValue ||
+                (long)tile.rect.offset.x - margin < int.MinValue || (long)tile.rect.offset.z - margin < int.MinValue)
+                throw new System.ArgumentOutOfRangeException(nameof(margin));
 
             float scaleX = tile.rect.size.x > 1
                 ? tile.worldSize.x / (tile.rect.size.x - 1) : tile.worldSize.x;
@@ -117,7 +141,7 @@ namespace UniverseCreator.Nodes
         private static TileData Bind(TileData tile, CoordRect rect, Vector3 pos, Vector3 size)
         {
             TileData view = new TileData(tile.chunkCoord, rect, pos, size, tile.worldHeight);
-            view.SetFullWorld(tile.fullWorldPos, tile.fullWorldSize);
+            tile.CopyViewContext(view); // UC-T07-08: halo functions retain arguments on the requested lattice and the shared input/lifetime owners.
             view.Bind(new GraphEvaluator(tile.Graph));
             return view;
         }
@@ -144,6 +168,9 @@ namespace UniverseCreator.Nodes
                     result.arr[outRow + x] = padded.arr[padRow + x];
             }
 
+            // UC-T03-02: the reference must use the same halo crop, not the parent lattice.
+            if (padded.trenchReference != null)
+                result.trenchReference = Crop(padded.trenchReference, tile, margin);
             return result;
         }
     }

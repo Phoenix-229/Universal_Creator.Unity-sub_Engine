@@ -3,6 +3,7 @@
     "rootNamespace": "UniverseCreator.Editor",
     "references": [
         "UniverseCreator",
+        "UniverseCreator.PluginContract",
         "Unity.RenderPipelines.Core.Runtime",
         "Unity.RenderPipelines.Core.Editor",
         "Unity.RenderPipelines.Universal.Runtime",

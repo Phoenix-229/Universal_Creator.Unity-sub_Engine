@@ -97,6 +97,10 @@ CBUFFER_END
 //  everything else is a float.
 // -----------------------------------------------------------------------------
 CBUFFER_START(UCTerrain)
+    // UC-T07-06: one ordered value per control channel; opaque defaults preserve existing materials.
+    half4 _UC_LayerOpacity, _UC_LayerAlphaOpacity, _UC_LayerOcclusion;
+    half4 _UC_LayerEmission0, _UC_LayerEmission1, _UC_LayerEmission2, _UC_LayerEmission3;
+    half _UC_EnableSurfaceClip, _UC_SurfaceCutoff;
     // -- blending --------------------------------------------------------
     half   _EnableHeightBlend;
     half   _OcclusionStrength;
@@ -117,6 +121,23 @@ CBUFFER_START(UCTerrain)
     half   _SlopeNormalStrength;
     half4  _SlopeColor;
     float  _SlopeTriplanarScale;
+    half   _UCTriplanarSharpness; // UC-T07-11: same layout for all passes and quality tiers.
+    half   _UCTextureQuality;
+
+    // -- altitude-aware cliff rock (modulates the slope/cliff mask) -------
+    float  _CliffRockAltitude;
+    float  _CliffRockAltitudeRange;
+    half   _CliffLowAltGrass;
+
+    // -- beach / shoreline (keyword _UC_BEACH_ON) ------------------------
+    half   _EnableBeach;
+    half4  _BeachColor;
+    float  _SeaLevel;
+    float  _BeachHeight;
+    float  _BeachFalloff;
+    half   _BeachSlopeLimit;
+    half   _BeachSmoothness;
+    float  _BeachScale;
 
     // -- snow (keyword _UC_SNOW_ON) --------------------------------------
     half   _EnableSnow;
@@ -128,6 +149,7 @@ CBUFFER_START(UCTerrain)
     half   _SnowCoverage;
     half   _SnowSmoothness;
     half   _SnowNormalStrength;
+    half   _SnowOcclusion;
     float  _SnowTriplanarScale;
 
     // -- wetness ---------------------------------------------------------
@@ -185,6 +207,11 @@ CBUFFER_START(UCTerrain)
     half   _EnableDistanceFade;
     float  _DistanceFadeStart;
     float  _DistanceFadeEnd;
+    half   _DistanceRoughen;
+    half   _EnableTileBreakup;
+    float  _TileBreakupScale;
+    half   _TileBreakupStrength;
+    float  _TileBreakupDistance;
 
     // -- colour grade ----------------------------------------------------
     half   _Saturation;
@@ -192,6 +219,12 @@ CBUFFER_START(UCTerrain)
     half   _Contrast;
     half4  _TintColor;
 CBUFFER_END
+
+// The world's live wetness, published by the single WetnessCoupling uploader on the
+// CPU (x = wetness). A global, not a material property, so the whole world wets from
+// one number; the per-material _WetnessAmount above still acts as an authored floor.
+float4 _UCWetParams;
+float4 _UCSurfaceSnow; // UC-T08-09: local stored snow shares the existing material path; no texture regeneration.
 
 // -----------------------------------------------------------------------------
 //  Textures
@@ -226,6 +259,7 @@ TEXTURE2D(_SlopeNormal);
 TEXTURE2D(_SnowTex);
 TEXTURE2D(_SnowNormal);
 TEXTURE2D(_MudTex);
+TEXTURE2D(_BeachTex);
 TEXTURE2D(_DetailTex);
 TEXTURE2D(_GradientTex);
 TEXTURE2D(_AOMap);
@@ -266,6 +300,27 @@ UNITY_INSTANCING_BUFFER_END(Terrain)
 #endif
 
 // -----------------------------------------------------------------------------
+// UC-T07-06: every pass uses this same unwarped layer opacity projection, keeping depth and shadows aligned.
+// Off costs a uniform comparison; on samples control and only albedos explicitly assigning alpha to opacity.
+float2 UCControlUV(float2 uv)
+{
+    // UC-T07-11: endpoint lattice samples live at texel centres. Match the alphamap uploader across resolutions and adjacent terrain cells.
+    return (uv * (_Control_TexelSize.zw - 1.0) + 0.5) * _Control_TexelSize.xy;
+}
+void UCClipSurface(float2 uv)
+{
+    if (_UC_EnableSurfaceClip < 0.5h) return;
+    half4 weights = saturate(SAMPLE_TEXTURE2D(_Control, sampler_Control, UCControlUV(uv)));
+    half total = dot(weights, half4(1, 1, 1, 1));
+    weights = total > 0.0001h ? weights / total : half4(1, 0, 0, 0);
+    half4 alpha = half4(1, 1, 1, 1);
+    if (_UC_LayerAlphaOpacity.x > 0.5h) alpha.x = SAMPLE_TEXTURE2D(_Splat0, sampler_Splat0, uv * _Splat0_ST.xy + _Splat0_ST.zw).a;
+    if (_UC_LayerAlphaOpacity.y > 0.5h) alpha.y = SAMPLE_TEXTURE2D(_Splat1, sampler_Splat1, uv * _Splat1_ST.xy + _Splat1_ST.zw).a;
+    if (_UC_LayerAlphaOpacity.z > 0.5h) alpha.z = SAMPLE_TEXTURE2D(_Splat2, sampler_Splat2, uv * _Splat2_ST.xy + _Splat2_ST.zw).a;
+    if (_UC_LayerAlphaOpacity.w > 0.5h) alpha.w = SAMPLE_TEXTURE2D(_Splat3, sampler_Splat3, uv * _Splat3_ST.xy + _Splat3_ST.zw).a;
+    clip(dot(weights, saturate(alpha) * saturate(_UC_LayerOpacity)) - _UC_SurfaceCutoff);
+}
+
 //  Terrain instancing. Unity draws instanced terrain as one flat patch mesh and
 //  expects the vertex shader to displace it by sampling the heightmap, so this
 //  is not optional decoration - without it every instanced patch draws flat at

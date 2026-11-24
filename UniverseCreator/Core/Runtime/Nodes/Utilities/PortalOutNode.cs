@@ -13,7 +13,7 @@ using UnityEngine;
 namespace UniverseCreator.Nodes.Utilities
 {
     [System.Serializable]
-    public class PortalOutNode : Generator
+    public class PortalOutNode : Generator, IPortalOut
     {
         public override string NodeName { get { return "Portal Out"; } }
         public override NodeCategory Category { get { return NodeCategory.Utility; } }
@@ -22,7 +22,37 @@ namespace UniverseCreator.Nodes.Utilities
         /// <summary>Channel name. A PortalIn with the same channel receives this output.</summary>
         public string channel = "default";
 
-        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
+        /// <summary>The channel this sender broadcasts on (for the shared resolver).</summary>
+        public string PortalChannel { get { return channel; } }
+
+        // The input socket colours itself to match whatever is wired in - there is no
+        // Port Type field. Matrix (height) is the fallback until something is wired.
+        // Non-serialized: recomputed from the graph, so an old graph's stored portType
+        // is harmlessly ignored on load.
+        [System.NonSerialized] private PortType resolvedType = PortType.Matrix;
+
+        [System.NonSerialized] private PortType builtType = (PortType)(-1);
+        [System.NonSerialized] private Port[] cachedIn;
+
+        /// <summary>
+        /// Recompute the input socket type from whatever is wired into this sender.
+        /// Called by the editor when the graph is built or rewired.
+        /// </summary>
+        public void ResolveType(Graph graph)
+        {
+            resolvedType = PortalRouting.ResolveSourceType(graph, this, 0, PortType.Matrix);
+        }
+
+        public override Port[] GetInputs()
+        {
+            if (cachedIn == null || builtType != resolvedType)
+            {
+                builtType = resolvedType;
+                cachedIn = PortalRouting.BuildPortArray(resolvedType, PortDirection.Input);
+            }
+            return cachedIn;
+        }
+
         public override Port[] GetOutputs() { return SharedPorts.None; }
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)

@@ -68,9 +68,38 @@ namespace UniverseCreator.TerrainSystem
     [AddComponentMenu("Universe Creator/Water Ripple Simulation")]
     public class UCWaterRippleSim : MonoBehaviour
     {
+        /// <summary>
+        /// How much of the interactive-water system this device runs. The full GPU
+        /// wave solve on Mid/High degrades to a stamped ring decal on Low and to
+        /// nothing on Off - never a hard "no ripples", which is the one outcome the
+        /// tier system exists to avoid. The quality-tier driver (W8) sets this per
+        /// device; a scene left on High simply always solves.
+        /// </summary>
+        public enum RippleTier
+        {
+            /// <summary>No interactive ripples. Ambient waves and wind chop remain.</summary>
+            Off,
+            /// <summary>Stamped expanding-ring decals, one RT, no wave solve.</summary>
+            Low,
+            /// <summary>Full wave-equation sim (the quality driver may lower the resolution).</summary>
+            Mid,
+            /// <summary>Full wave-equation sim at the authored resolution.</summary>
+            High
+        }
+
         // ---------------------------------------------------------------------
         //  Inspector
         // ---------------------------------------------------------------------
+
+        [Header("Quality")]
+        [Tooltip("How much of the interactive-water system this device runs.\n\n" +
+                 "High/Mid solve the real 2D wave equation (Mid at a lower resolution " +
+                 "the quality driver sets). Low cannot afford five half-float targets " +
+                 "and a per-frame solve, so it degrades to a stamped expanding-ring " +
+                 "decal - still interactive, one texture, no solve. Off keeps only the " +
+                 "ambient waves and wind chop. Set per device by the quality tier; the " +
+                 "look never simply vanishes between tiers, it thins.")]
+        public RippleTier tier = RippleTier.High;
 
         [Header("Window")]
         [Tooltip("Transform the simulation window follows. Left empty, it follows " +
@@ -149,6 +178,23 @@ namespace UniverseCreator.TerrainSystem
                  "behave like it is in a bay. Left empty, water is unbounded.")]
         public Texture obstacleMask;
 
+        [Header("Low tier (decal fallback)")]
+        [Tooltip("Seconds an expanding-ring decal lives before it has faded to nothing. " +
+                 "Only used on the Low tier - the sim tiers propagate and damp instead.")]
+        [Range(0.3f, 6f)] public float decalLifetime = 2.2f;
+
+        [Tooltip("How fast a decal ring expands, in metres per second. This is the " +
+                 "stand-in for the wave speed the Low tier does not solve.")]
+        [Range(0.2f, 12f)] public float decalSpeed = 3f;
+
+        [Tooltip("Crest width of a decal ring as a fraction of the ring's current " +
+                 "radius. Wider reads as a gentle swell, narrower as a sharp splash.")]
+        [Range(0.05f, 0.6f)] public float decalWidth = 0.18f;
+
+        [Tooltip("Most decal rings alive at once on the Low tier. Oldest are dropped " +
+                 "first, so a downpour thins rather than stalling the device.")]
+        [Range(4, 128)] public int decalMax = 48;
+
         // ---------------------------------------------------------------------
         //  Globals the water shader reads
         // ---------------------------------------------------------------------
@@ -164,6 +210,11 @@ namespace UniverseCreator.TerrainSystem
         private static readonly int IdFoamParams = Shader.PropertyToID("_FoamParams");
         private static readonly int IdFoamPrev = Shader.PropertyToID("_FoamPrev");
         private static readonly int IdObstacle = Shader.PropertyToID("_ObstacleTex");
+        private static readonly int IdDecalParams = Shader.PropertyToID("_DecalParams");
+
+        // Shader pass indices into UC_WaterRipple.shader.
+        private const int PassImpulse = 1;
+        private const int PassDecal = 5;
 
         // ---------------------------------------------------------------------
         //  State
@@ -188,6 +239,21 @@ namespace UniverseCreator.TerrainSystem
 
         private readonly List<WaterImpulse> pending = new List<WaterImpulse>();
 
+        // Low-tier decal state. Each live ring keeps the world point it was born at,
+        // when, and how strong, and the draw advances its radius and amplitude from
+        // its age every frame. This list is empty and untouched on the sim tiers.
+        private struct RippleDecal
+        {
+            public Vector2 worldXZ;
+            public float birth;      // WaveClock() time it was emitted
+            public float strength;   // signed metres, as the impulse carried
+            public float radius0;    // impulse radius in metres, the ring's start size
+            public float foam;
+        }
+
+        private readonly List<RippleDecal> decals = new List<RippleDecal>();
+        private bool decalMode;      // true while resources are allocated for the decal path
+
         // Mesh scratch, grown rather than reallocated. A rainstorm queues hundreds
         // of impulses a second and this is on the main thread every step.
         private Vector3[] meshVerts;
@@ -206,7 +272,23 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Metres per texel. The smallest feature the sim can carry.</summary>
         public float TexelMetres
         {
-            get { return worldSize / Mathf.Max(1, resolution); }
+            get { return worldSize / Mathf.Max(1, WorkingResolution()); }
+        }
+
+        /// <summary>
+        /// The grid edge actually allocated, after the tier scales the authored value.
+        /// High and Low run the authored <see cref="resolution"/>; Mid halves it (floored
+        /// at 64) so a mid-range phone solves a QUARTER of the texels over the same window
+        /// - the ripple gets coarser, it never disappears (degrade, never drop). Off
+        /// allocates nothing, so its value is moot. Kept a power of two so the scroll
+        /// shift stays a whole-texel move. The authored field is never overwritten, so
+        /// raising the tier back to High restores the full grid.
+        /// </summary>
+        private int WorkingResolution()
+        {
+            if (tier == RippleTier.Mid)
+                return Mathf.Max(64, Mathf.ClosestPowerOfTwo(resolution / 2));
+            return resolution;
         }
 
         // ---------------------------------------------------------------------
@@ -229,6 +311,7 @@ namespace UniverseCreator.TerrainSystem
         private void OnDisable()
         {
             if (Active == this) Active = null;
+            pending.Clear(); decals.Clear(); // UC-T04-09A: a later enable cannot replay impulses from retired contact owners.
             ReleaseResources();
 
             // Tell the surface shader the sim is gone. Leaving the flag on would
@@ -262,9 +345,37 @@ namespace UniverseCreator.TerrainSystem
                 return;
             }
 
-            if (material == null || stateA == null) { EnsureResources(); if (material == null) return; }
+            // OFF: hand every target back and tell the surface there is no sim, so a
+            // material that was sampling the field stops - see the note in OnDisable.
+            // This is the one tier that must never leave a texture allocated.
+            if (tier == RippleTier.Off)
+            {
+                if (allocatedResolution != 0 || decalMode)
+                {
+                    ReleaseResources();
+                    Shader.SetGlobalFloat(IdEnabled, 0f);
+                }
+                return;
+            }
 
-            if (resolution != allocatedResolution) EnsureResources();
+            if (material == null) { EnsureResources(); if (material == null) return; }
+
+            // A change of resolution OR of tier shape (decal vs sim) reallocates. The
+            // decal tier holds one target where the sim holds five, so switching
+            // between them at runtime must give the other set's memory back.
+            bool wantDecal = tier == RippleTier.Low;
+            if (WorkingResolution() != allocatedResolution || decalMode != wantDecal) EnsureResources();
+            if (material == null) return;
+
+            // LOW: stamped rings, no wave solve. Returns before any of the sim work.
+            if (wantDecal)
+            {
+                UpdateDecals();
+                return;
+            }
+
+            // MID / HIGH: the real solve.
+            if (stateA == null) { EnsureResources(); if (stateA == null) return; }
 
             UpdateWindow();
             EmitRain();
@@ -301,7 +412,11 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         public void Emit(WaterImpulse impulse)
         {
-            if (impulse.radius <= 0f) return;
+            if (tier == RippleTier.Off || impulse.radius <= 0f ||
+                !RiverChannelSnapshot.Finite(impulse.worldXZ.x) || !RiverChannelSnapshot.Finite(impulse.worldXZ.y) ||
+                !RiverChannelSnapshot.Finite(impulse.radius) || !RiverChannelSnapshot.Finite(impulse.strength) ||
+                !RiverChannelSnapshot.Finite(impulse.ringness) || !RiverChannelSnapshot.Finite(impulse.sharpness) ||
+                !RiverChannelSnapshot.Finite(impulse.foam)) return; // UC-T04-08/09A: malformed or disabled emitters cannot poison a persistent GPU field.
 
             // Anything outside the window is dropped here rather than clipped in
             // the shader, because the mesh it would add is pure waste - a quad
@@ -334,7 +449,10 @@ namespace UniverseCreator.TerrainSystem
         //  Window
         // ---------------------------------------------------------------------
 
-        private void UpdateWindow()
+        // The world point the window centres on. Shared by the sim window and the
+        // decal path so both follow exactly the same target and can never disagree
+        // about where "here" is.
+        private Vector3 FollowCentre()
         {
             Transform t = followTarget;
             if (t == null)
@@ -349,7 +467,12 @@ namespace UniverseCreator.TerrainSystem
                 if (cam != null) t = cam.transform;
             }
 
-            Vector3 centre = t != null ? t.position : transform.position;
+            return t != null ? t.position : transform.position;
+        }
+
+        private void UpdateWindow()
+        {
+            Vector3 centre = FollowCentre();
 
             float texel = TexelMetres;
             Vector2 want = new Vector2(centre.x - worldSize * 0.5f, centre.z - worldSize * 0.5f);
@@ -375,7 +498,7 @@ namespace UniverseCreator.TerrainSystem
             // A jump larger than the window has nothing to preserve. Teleporting
             // the player across the map should not smear the old field across the
             // new location.
-            if (Mathf.Abs(shiftX) >= resolution || Mathf.Abs(shiftZ) >= resolution)
+            if (Mathf.Abs(shiftX) >= allocatedResolution || Mathf.Abs(shiftZ) >= allocatedResolution)
             {
                 origin = snapped;
                 ClearField();
@@ -388,7 +511,7 @@ namespace UniverseCreator.TerrainSystem
 
         private void ScrollField(int shiftX, int shiftZ)
         {
-            material.SetVector(IdScroll, new Vector4(shiftX, shiftZ, resolution, 0f));
+            material.SetVector(IdScroll, new Vector4(shiftX, shiftZ, allocatedResolution, 0f));
 
             commands.Clear();
             commands.Blit(stateA, stateB, material, 2);
@@ -457,6 +580,190 @@ namespace UniverseCreator.TerrainSystem
             Shader.SetGlobalVector(IdWindow,
                 new Vector4(origin.x, origin.y, worldSize, 1f / Mathf.Max(0.001f, worldSize)));
             Shader.SetGlobalFloat(IdEnabled, 1f);
+        }
+
+        // ---------------------------------------------------------------------
+        //  Low tier - stamped ring decals
+        //
+        //  The Mid/High solve costs five half-float targets and a per-frame wave
+        //  pass, which the lowest tier cannot afford. Rather than DROP interactive
+        //  water there, each disturbance is drawn once as an expanding ring stamped
+        //  straight into the same packed target the surface shader already samples
+        //  (RG slope, B height, A foam). No propagation, no second buffer, no
+        //  obstacle reflection - the ring's radius and amplitude come from its age,
+        //  advanced on the CPU. The surface shader needs no change: to it, a decal
+        //  window and a solved window are the same texture.
+        //
+        //  Foam is not carried on this tier. The surface reads foam from a separate
+        //  texture and the decal has no foam field to fill it, so it is pointed at
+        //  black - Low keeps the interactive ripple and gives up the dynamic foam,
+        //  which is exactly the "degrade, never drop" the tier system asks for.
+        // ---------------------------------------------------------------------
+
+        private void UpdateDecals()
+        {
+            // The decal field is rebuilt from world coordinates every frame, so there
+            // is nothing to resample and no need to snap the origin to a texel the way
+            // the scrolling sim window must. Following the raw centre keeps the rings
+            // world-locked because each one is drawn from its own world point.
+            Vector3 centre = FollowCentre();
+            origin = new Vector2(centre.x - worldSize * 0.5f, centre.z - worldSize * 0.5f);
+            originValid = true;
+
+            // Rain drops through the same queue everything else uses.
+            EmitRain();
+
+            float now = DecalClock();
+
+            // Ingest this frame's impulses as new rings.
+            for (int i = 0; i < pending.Count; i++)
+            {
+                WaterImpulse imp = pending[i];
+                if (imp.radius <= 0f || Mathf.Abs(imp.strength) < 1e-5f) continue;
+
+                RippleDecal d;
+                d.worldXZ = imp.worldXZ;
+                d.birth = now;
+                d.strength = imp.strength;
+                d.radius0 = imp.radius;
+                d.foam = Mathf.Clamp01(imp.foam);
+                decals.Add(d);
+            }
+            pending.Clear();
+
+            // Age out the dead, then cap to the newest. Oldest first, so a downpour
+            // thins to its most recent rings rather than stalling the device.
+            float life = Mathf.Max(0.1f, decalLifetime);
+            for (int i = decals.Count - 1; i >= 0; i--)
+                if (now - decals[i].birth >= life) decals.RemoveAt(i);
+
+            int cap = Mathf.Max(1, decalMax);
+            if (decals.Count > cap) decals.RemoveRange(0, decals.Count - cap);
+
+            // Draw: clear the packed target, then one additive mesh of every live ring.
+            material.SetVector(IdDecalParams, new Vector4(normalStrength, heightScale, 0f, 0f));
+
+            commands.Clear();
+            commands.SetRenderTarget(resolved);
+            commands.ClearRenderTarget(false, true, Color.clear);
+            if (BuildDecalMesh(now, life))
+                commands.DrawMesh(impulseMesh, Matrix4x4.identity, material, PassDecal);
+            Graphics.ExecuteCommandBuffer(commands);
+
+            PublishDecalGlobals();
+        }
+
+        // One quad per live ring, built the same way as the impulse mesh but sized and
+        // coloured per ring: the quad grows with the ring so the crest always has room,
+        // and COLOR carries the state the shader needs (r amp, g crest fraction, b foam,
+        // a crest width).
+        private bool BuildDecalMesh(float now, float life)
+        {
+            int count = decals.Count;
+            if (count == 0) return false;
+
+            EnsureMeshCapacity(count);
+
+            float inv = 1f / Mathf.Max(0.001f, worldSize);
+            float widthFrac = Mathf.Clamp(decalWidth, 0.05f, 0.6f);
+            int v = 0, t = 0, used = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                RippleDecal r = decals[i];
+
+                float age01 = Mathf.Clamp01((now - r.birth) / life);
+                float radius = r.radius0 + decalSpeed * (now - r.birth);   // metres
+
+                // The quad must hold the crest and its width envelope, so it extends a
+                // little past the crest radius. front01 places the crest inside it.
+                float quadR = radius * (1f + widthFrac) + r.radius0;
+                if (quadR < 1e-4f) continue;
+                float front01 = radius / quadR;
+
+                // Linear fade to nothing over the lifetime. Signed, so a drop's
+                // depression and a splash's crest keep their direction.
+                float amp = r.strength * (1f - age01);
+                float foam = r.foam * (1f - age01);
+
+                // World centre -> window UV -> clip.
+                float u = (r.worldXZ.x - origin.x) * inv;
+                float w = (r.worldXZ.y - origin.y) * inv;
+                float ru = quadR * inv;
+
+                float cx = u * 2f - 1f;
+                float cy = w * 2f - 1f;
+                float rr = ru * 2f;
+
+                Color data = new Color(amp, front01, foam, widthFrac);
+
+                meshVerts[v + 0] = new Vector3(cx - rr, cy - rr, 0f);
+                meshVerts[v + 1] = new Vector3(cx + rr, cy - rr, 0f);
+                meshVerts[v + 2] = new Vector3(cx + rr, cy + rr, 0f);
+                meshVerts[v + 3] = new Vector3(cx - rr, cy + rr, 0f);
+
+                meshUVs[v + 0] = new Vector2(-1f, -1f);
+                meshUVs[v + 1] = new Vector2(1f, -1f);
+                meshUVs[v + 2] = new Vector2(1f, 1f);
+                meshUVs[v + 3] = new Vector2(-1f, 1f);
+
+                meshColors[v + 0] = data;
+                meshColors[v + 1] = data;
+                meshColors[v + 2] = data;
+                meshColors[v + 3] = data;
+
+                meshTris[t + 0] = v + 0;
+                meshTris[t + 1] = v + 1;
+                meshTris[t + 2] = v + 2;
+                meshTris[t + 3] = v + 0;
+                meshTris[t + 4] = v + 2;
+                meshTris[t + 5] = v + 3;
+
+                v += 4;
+                t += 6;
+                used++;
+            }
+
+            if (used == 0) return false;
+
+            // Degenerate the unused tail rather than resizing - same reasoning as the
+            // impulse mesh.
+            for (int i = v; i < meshVerts.Length; i++) meshVerts[i] = Vector3.zero;
+            for (int i = t; i < meshTris.Length; i++) meshTris[i] = 0;
+
+            impulseMesh.Clear(true);
+            impulseMesh.vertices = meshVerts;
+            impulseMesh.uv = meshUVs;
+            impulseMesh.colors = meshColors;
+            impulseMesh.SetTriangles(meshTris, 0, false);
+            impulseMesh.bounds = new Bounds(Vector3.zero, Vector3.one * 1e6f);
+            return true;
+        }
+
+        private void PublishDecalGlobals()
+        {
+            Shader.SetGlobalTexture(IdRippleTex, resolved);
+
+            // No dynamic foam on this tier: the surface reads foam from its own texture
+            // and the decal has none to give, so black keeps that channel quiet rather
+            // than leaving it pointed at a released target.
+            Shader.SetGlobalTexture(IdFoamTex, Texture2D.blackTexture);
+
+            Shader.SetGlobalVector(IdWindow,
+                new Vector4(origin.x, origin.y, worldSize, 1f / Mathf.Max(0.001f, worldSize)));
+            Shader.SetGlobalFloat(IdEnabled, 1f);
+        }
+
+        // An absolute clock for decal ageing. The sim path only ever needs deltas, but
+        // a ring's radius and fade are a function of its absolute age, so it needs a
+        // time that advances in edit mode too - Time.time is frozen there.
+        private static float DecalClock()
+        {
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                return (float)UnityEditor.EditorApplication.timeSinceStartup;
+#endif
+            return Time.time;
         }
 
         // ---------------------------------------------------------------------
@@ -629,19 +936,38 @@ namespace UniverseCreator.TerrainSystem
                 impulseMesh.MarkDynamic();
             }
 
-            if (allocatedResolution == resolution && stateA != null && stateA.IsCreated()) return;
+            // What this tier needs allocated. Low draws stamped rings straight into
+            // the one packed target the surface samples; it never touches the state
+            // or foam ping-pong the wave solve needs.
+            bool wantDecal = tier == RippleTier.Low;
+
+            bool haveRightSet = allocatedResolution == WorkingResolution()
+                                && decalMode == wantDecal
+                                && resolved != null && resolved.IsCreated()
+                                && (wantDecal || (stateA != null && stateA.IsCreated()));
+            if (haveRightSet) return;
 
             ReleaseTextures();
+            decalMode = wantDecal;
 
-            // RGHalf: current height and previous height, which is the whole state
-            // the second-order scheme needs. See the precision note in the shader.
-            stateA = NewTarget(RenderTextureFormat.RGHalf);
-            stateB = NewTarget(RenderTextureFormat.RGHalf);
-            foamA = NewTarget(RenderTextureFormat.RHalf);
-            foamB = NewTarget(RenderTextureFormat.RHalf);
-            resolved = NewTarget(RenderTextureFormat.ARGBHalf);
+            if (wantDecal)
+            {
+                // One target only. The decal path writes RG slope / B height / A foam
+                // directly, so there is no second buffer and no foam field to keep.
+                resolved = NewTarget(RenderTextureFormat.ARGBHalf);
+            }
+            else
+            {
+                // RGHalf: current height and previous height, which is the whole state
+                // the second-order scheme needs. See the precision note in the shader.
+                stateA = NewTarget(RenderTextureFormat.RGHalf);
+                stateB = NewTarget(RenderTextureFormat.RGHalf);
+                foamA = NewTarget(RenderTextureFormat.RHalf);
+                foamB = NewTarget(RenderTextureFormat.RHalf);
+                resolved = NewTarget(RenderTextureFormat.ARGBHalf);
+            }
 
-            allocatedResolution = resolution;
+            allocatedResolution = WorkingResolution();
             ClearField();
         }
 
@@ -650,7 +976,8 @@ namespace UniverseCreator.TerrainSystem
             // Clamped, not repeated. A ripple wrapping around to the far side of
             // the window is the single most obvious artefact this system can
             // produce, and it looks like a bug in the game rather than in the water.
-            RenderTexture rt = new RenderTexture(resolution, resolution, 0, format,
+            int res = WorkingResolution();
+            RenderTexture rt = new RenderTexture(res, res, 0, format,
                                                  RenderTextureReadWrite.Linear);
             rt.wrapMode = TextureWrapMode.Clamp;
             rt.filterMode = FilterMode.Bilinear;
@@ -698,6 +1025,7 @@ namespace UniverseCreator.TerrainSystem
             Release(ref foamB);
             Release(ref resolved);
             allocatedResolution = 0;
+            decalMode = false;
         }
 
         private static void Release(ref RenderTexture rt)
@@ -720,6 +1048,8 @@ namespace UniverseCreator.TerrainSystem
             // Unity runs this for children of the selection too, and the sim usually
             // lives under the water system under the world root.
             if (UnityEditor.Selection.activeGameObject != gameObject) return;
+            // Same debug-only gate as the water volume box.
+            if (!UCWaterGizmos.ShowDebugBounds) return;
 #endif
             if (!originValid) return;
 

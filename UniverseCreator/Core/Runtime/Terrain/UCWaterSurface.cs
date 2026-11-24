@@ -50,9 +50,25 @@ namespace UniverseCreator.TerrainSystem
         [Tooltip("Must match _WaveSpeed.")]
         public float waveSpeed;
 
+        [Tooltip("How many wave trains are active, 1..4. Must match _WaveOctaves on " +
+                 "the material - a lake runs one or two, an open ocean four - or a boat " +
+                 "sits on a different swell than the one drawn.")]
+        public float octaves;
+
+        [Tooltip("Storm swell multiplier, 1 on a calm day. Must match _WaveStormAmp; " +
+                 "the weather layer raises both together so rough seas toss a hull the " +
+                 "same amount they visibly heave.")]
+        public float stormAmp;
+
         [Tooltip("Surface current in world XZ, metres per second. Drives the drift " +
                  "term on anything floating.")]
         public Vector2 flow;
+
+        /// <summary>UC-T04-09: downstream ambient-pattern advection multiplier, 0 for still water and 1 for rivers.</summary>
+        public float flowAdvection;
+
+        /// <summary>UC-T04-09: enable the renderer's bounded horizontal ambient displacement; false preserves legacy standalone queries.</summary>
+        public bool horizontalDisplacement;
 
         public static WaterSurfaceParams Default(float level)
         {
@@ -61,6 +77,8 @@ namespace UniverseCreator.TerrainSystem
             p.waveHeight = 0.12f;
             p.waveLength = 26f;
             p.waveSpeed = 0.6f;
+            p.octaves = 3f;
+            p.stormAmp = 1f;
             p.flow = new Vector2(0.06f, 0.03f);
             return p;
         }
@@ -96,29 +114,68 @@ namespace UniverseCreator.TerrainSystem
         /// Vertical wave displacement at a world XZ position.
         ///
         /// MIRROR OF UCAmbientWaveOffset IN UC_WaterInput.hlsl - the ambient term
-        /// specifically, not the UCWaveOffset wrapper around it. Three octaves at
-        /// incommensurate directions, vertical term only, same weights, same
-        /// direction vectors, same frequency ratios. If you change one, change the
+        /// specifically, not the UCWaveOffset wrapper around it. Up to four octaves
+        /// at incommensurate directions, vertical term only, same weights, same
+        /// direction vectors, same frequency ratios, same fractional octave gate off
+        /// <see cref="WaterSurfaceParams.octaves"/> and same storm scale off
+        /// <see cref="WaterSurfaceParams.stormAmp"/>. If you change one, change the
         /// other, or physics and rendering disagree about where the water is.
         ///
-        /// The wrapper's other two terms are left out on purpose and must stay out:
-        /// interactive ripples and wind chop are centimetres over a wavelength
-        /// shorter than a hull is wide, so a floating body integrates them away to
-        /// nothing, and mirroring them would cost a per-frame CPU evaluation to move
-        /// an object by less than its own draught. Both reasons are recorded beside
-        /// those terms in the shader.
+        /// The wrapper's other terms are left out on purpose and must stay out:
+        /// UC-T04-09: river advection now shares the material's accepted local flow.
+        /// Interactive ripple and wind micro-height remain GPU-only, capped at 5 cm
+        /// before the shared local-depth clamp; normals retain finer visual detail.
+        /// Accepted-mesh queries interpolate displaced triangle vertices instead of
+        /// evaluating this analytic function at an already displaced sample position.
         /// </summary>
         public static float WaveOffset(Vector2 worldXZ, float time, in WaterSurfaceParams p, float weight = 1f)
         {
             if (p.waveHeight <= 0.0001f) return 0f;
 
+            worldXZ -= p.flow * (time * p.flowAdvection); // UC-T04-09: mirror the river shader's current advection.
+
             float k = 6.28318530718f / Mathf.Max(0.5f, p.waveLength);
+
+            float o0 = Mathf.Clamp01(p.octaves);
+            float o1 = Mathf.Clamp01(p.octaves - 1f);
+            float o2 = Mathf.Clamp01(p.octaves - 2f);
+            float o3 = Mathf.Clamp01(p.octaves - 3f);
 
             float a = Mathf.Sin((worldXZ.x * 0.86f + worldXZ.y * 0.51f) * k + time * p.waveSpeed);
             float b = Mathf.Sin((worldXZ.x * -0.39f + worldXZ.y * 0.92f) * k * 1.71f + time * p.waveSpeed * 1.43f);
             float c = Mathf.Sin((worldXZ.x * 0.62f + worldXZ.y * -0.78f) * k * 2.63f + time * p.waveSpeed * 0.79f);
+            float d = Mathf.Sin((worldXZ.x * -0.81f + worldXZ.y * -0.34f) * k * 3.55f + time * p.waveSpeed * 1.17f);
 
-            return (a * 0.55f + b * 0.30f + c * 0.15f) * p.waveHeight * weight;
+            float h = a * 0.55f * o0 + b * 0.30f * o1 + c * 0.15f * o2 + d * 0.07f * o3;
+
+            float storm = p.stormAmp > 0f ? p.stormAmp : 1f;
+            return h * p.waveHeight * storm * weight;
+        }
+
+        /// <summary>UC-T04-09: horizontal ambient displacement in metres, using the same phases and conservative spectral derivative bound as the shader.</summary>
+        /// <param name="worldXZ">Undisplaced world XZ in metres.</param>
+        /// <param name="time">Finite simulation time in seconds.</param>
+        /// <param name="p">Accepted material parameters; horizontalDisplacement selects the legacy zero-offset fallback.</param>
+        /// <param name="weight">Shore/junction attenuation in 0…1.</param>
+        /// <returns>XZ offset; zero for disabled waves. The derivative bound applies to constant weight and flow, not arbitrary shore gradients.</returns>
+        public static Vector2 HorizontalOffset(Vector2 worldXZ, float time, in WaterSurfaceParams p, float weight = 1f)
+        {
+            if (!p.horizontalDisplacement || p.waveHeight <= 0.0001f) return Vector2.zero;
+            worldXZ -= p.flow * (time * p.flowAdvection);
+            float k = 6.28318530718f / Mathf.Max(0.5f, p.waveLength);
+            Vector2 a = new Vector2(0.86f, 0.51f), b = new Vector2(-0.39f, 0.92f);
+            Vector2 c = new Vector2(0.62f, -0.78f), d = new Vector2(-0.81f, -0.34f);
+            float o0 = Mathf.Clamp01(p.octaves), o1 = Mathf.Clamp01(p.octaves - 1);
+            float o2 = Mathf.Clamp01(p.octaves - 2), o3 = Mathf.Clamp01(p.octaves - 3);
+            Vector2 g = a * (Mathf.Cos(Vector2.Dot(worldXZ, a) * k + time * p.waveSpeed) * 0.55f * o0)
+                + b * (Mathf.Cos(Vector2.Dot(worldXZ, b) * k * 1.71f + time * p.waveSpeed * 1.43f) * 0.30f * o1)
+                + c * (Mathf.Cos(Vector2.Dot(worldXZ, c) * k * 2.63f + time * p.waveSpeed * 0.79f) * 0.15f * o2)
+                + d * (Mathf.Cos(Vector2.Dot(worldXZ, d) * k * 3.55f + time * p.waveSpeed * 1.17f) * 0.07f * o3);
+            float spectral = 0.55f * o0 * a.sqrMagnitude + 0.30f * 1.71f * o1 * b.sqrMagnitude
+                + 0.15f * 2.63f * o2 * c.sqrMagnitude + 0.07f * 3.55f * o3 * d.sqrMagnitude;
+            float storm = p.stormAmp > 0 ? p.stormAmp : 1;
+            float amplitude = Mathf.Min(p.waveHeight * storm * 0.5f, 0.35f / Mathf.Max(0.0001f, k * spectral));
+            return -g * (amplitude * weight * weight);
         }
 
         /// <summary>Absolute world height of the surface at a point.</summary>

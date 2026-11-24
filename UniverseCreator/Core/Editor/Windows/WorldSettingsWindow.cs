@@ -17,12 +17,14 @@ namespace UniverseCreator.Editor.Windows
     /// Global Universe Creator settings window.
     /// </summary>
     /// <remarks>
-    /// SKELETON (Module 1, Step 1). Implemented in Module 1, Step 6.
+    /// DELIBERATE SIGNPOST, not an unfinished screen. By design this window edits
+    /// nothing: per-world values live on the Universe Creator World component, and
+    /// project-wide defaults in Project Settings > Universe Creator. It exists so the
+    /// menu has a World Settings entry (one of the five mandatory windows, Module 6
+    /// F-15) and so a user who looks for settings here is pointed to where they are.
     /// </remarks>
     public class WorldSettingsWindow : EditorWindow
     {
-        // TODO (Module 1, Step 6): Project-wide defaults and template selection.
-
         public static void OpenWindow()
         {
             WorldSettingsWindow window = GetWindow<WorldSettingsWindow>("Universe Creator - World Settings");

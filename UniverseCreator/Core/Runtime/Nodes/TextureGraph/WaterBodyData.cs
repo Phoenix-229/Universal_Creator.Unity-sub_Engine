@@ -47,7 +47,8 @@ namespace UniverseCreator.Nodes
         Ocean = 0,
         Lake = 1,
         River = 2,
-        Pool = 3
+        Pool = 3,
+        Swamp = 4
     }
 
     /// <summary>
@@ -62,10 +63,13 @@ namespace UniverseCreator.Nodes
         public Vector3[] normals;
         public Vector4[] tangents;
 
-        /// <summary>x whitewater 0..1 from the Froude number, y water depth in
-        /// metres. UC_Water reads x; y is written for anything else that wants a
-        /// geometric depth without a depth texture.</summary>
+        /// <summary>UC-T04-08/09: x carries whitewater in 0…1, or -1 to keep junction geometry still without changing opacity;
+        /// y carries local water depth in metres. Forward/depth shaders and accepted gameplay queries share these physical inputs.</summary>
         public Vector2[] uv;
+        /// <summary>UC-T07-11: optional actual pre-skirt shore endpoints in local mesh coordinates, stored as consecutive A/B pairs.</summary>
+        /// <remarks>Null means unavailable. Empty means no shore was observed inside the source domain. Level bodies retain sampled physical water/bed crossings;
+        /// polygon/dam mask boundaries retain half-cell source uncertainty. Fitted rivers publish both bank rails, excluding inlet/outlet caps. Capture transforms to world XZ metres.</remarks>
+        public Vector3[] shorelineSegmentsLocal;
 
         /// <summary>rg flow direction packed around 0.5, b flow speed normalised by
         /// <see cref="maxFlowSpeed"/>, a water weight for the shoreline fade.</summary>

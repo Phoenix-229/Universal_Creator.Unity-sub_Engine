@@ -23,282 +23,93 @@
 
 using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.TerrainSystem; // UC-T03-08: lake criteria and reports share the captured world owner.
 
 namespace UniverseCreator.Nodes.Selectors
 {
+
     /// <summary>
-    /// Traces the world's river network from its own drainage and emits it as a
-    /// width-graded mask, 1 on the centreline falling to 0 at the channel edge.
+    /// Cuts a lake BASIN into the heightfield: a rugged, non-constant-depth bed with a
+    /// wave-cut shelf near the shore, a dish falling to the deep, and low-amplitude bed
+    /// ruggedness. The lake counterpart of River Carve - it authors the terrain the
+    /// water sits in, so a lake placed on this bed is flush to its shore and never
+    /// floats. Reads the Lake Mask (where water stands) and the Water Level (the flat
+    /// surface it fills to); the depth profile runs from 0 at the waterline to full in
+    /// the deep, shaped by the shared WaterBedMath.LakeBasin profile.
     /// </summary>
     /// <remarks>
-    /// SOLVED ONCE FOR THE WORLD, STAMPED PER CHUNK
-    /// Flow accumulation is the land draining THROUGH a cell, and that land can
-    /// begin tens of chunks upstream. Solved chunk by chunk it restarts from zero at
-    /// every seam, so each chunk traces a different network: the courses break into
-    /// disconnected veins along the tile grid, one set per chunk, and the bed
-    /// see-saws wherever two chunks disagree about which way the water went. No
-    /// ghost margin fixes that, because the neighbourhood is unbounded rather than
-    /// merely wide - a larger margin only moves the seam outwards.
+    /// WHY THE PROFILE IS A DISTANCE FIELD, NOT THE MASK
+    /// The Lake Mask is 1 across the whole interior and only softens at the very edge,
+    /// so it cannot say how far from shore a cell is. A shore-to-deep fraction has to
+    /// come from an actual distance to the waterline. SpreadLinear on the INVERTED mask
+    /// gives distance inward from the dry bank, from which t (0 at the shore, 1 in the
+    /// deep) falls straight out - the same t the runtime WaterCarveLayer feeds
+    /// WaterBedMath.DepthFraction, so the graph guide and the placed lake read the same
+    /// bed shape.
     ///
-    /// So the drainage is solved once over the whole world on a coarse grid, which
-    /// is where the TOPOLOGY lives: which way water leaves a cell, and how much land
-    /// stands behind it, are decided by the shape of the landscape and not by its
-    /// last metre. What comes out is a set of world-space courses, and each chunk
-    /// stamps the reaches that cross it at its own full resolution. The network is
-    /// therefore identical no matter which chunk asks, while the channel edge stays
-    /// as crisp as the heightmap allows.
-    ///
-    /// WIDTHS AND THRESHOLDS IN REAL UNITS
-    /// Both are areas of drained land in square metres, not counts of grid cells, so
-    /// the same settings describe the same river whatever resolution the solve runs
-    /// at. A cell count silently means a different river on every world size.
-    ///
-    /// See WorldDrainage for why the solve is coarse, why the stamp is not, and why
-    /// none of it is cached.
+    /// DEEPENING ONLY. Like River Carve, the bed is a Min against the ground: a basin
+    /// is a hole, and lifting ground to meet a shallow bed would fill a valley the lake
+    /// happens to sit in.
     /// </remarks>
     [System.Serializable]
-    public class RiverNetworkTraceNode : Generator
+    public class LakeBasinNode : Generator
     {
-        public override string NodeName { get { return "River Network Trace"; } }
-        public override NodeCategory Category { get { return NodeCategory.Selector; } }
-        public override string Tooltip { get { return "Traces connected river courses from world-wide flow accumulation."; } }
-
-        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
-        public override Port[] GetOutputs() { return Outs; }
-
-        /// <summary>
-        /// The traced course. This is the SOURCE FEED of the whole river chain: River
-        /// Carve digs it, River Fill fills what it dug, Water Bank Seat seats the banks
-        /// against the water that ended up in it. It is named for what it carries, not
-        /// as a generic mask, because every node downstream declares a "River Mask"
-        /// input and the pair has to read as one connection.
-        /// </summary>
-        private static readonly Port[] Outs =
-        {
-            new Port("River Mask", PortType.Matrix, PortDirection.Output, true)
-        };
-
-        /// <summary>
-        /// Cells per side of the world drainage solve. Coarse on purpose: it decides
-        /// where the rivers run, not how sharp their banks are.
-        /// </summary>
-        public int drainageResolution = 256;
-
-        /// <summary>
-        /// Land a channel must drain before it counts as a river, in square metres.
-        /// Below roughly a quarter of a square kilometre of temperate hillside the
-        /// runoff is sheet flow and gullies that only run after rain, not a permanent
-        /// watercourse. Lower it on a small test world, which may not contain a
-        /// catchment that large anywhere.
-        /// </summary>
-        public float channelHeadArea = 250000f;
-
-        /// <summary>Channel width where a channel first forms, in world metres.</summary>
-        public float baseWidth = 6f;
-
-        /// <summary>
-        /// How width grows with catchment. Downstream hydraulic geometry - Leopold
-        /// and Maddock, 1953 - puts width proportional to discharge^0.5.
-        /// </summary>
-        public float widthExponent = 0.5f;
-
-        /// <summary>Cap on channel width, in world metres.</summary>
-        public float maxWidth = 60f;
-
-        /// <summary>Rivers stop at this elevation. Below it they have reached the sea.</summary>
-        public float seaLevel = 0.35f;
-
-        /// <summary>Most courses traced. Guards pathological heightfields.</summary>
-        public int maxChannels = 512;
-
-        public override object Generate(int outputIndex, TileData tile, StopToken stop)
-        {
-            Matrix mask = tile.CreateMatrix();
-
-            WorldDrainage solve = WorldDrainage.Solve(this, 0, tile, drainageResolution,
-                                                      1e-6f, true, stop);
-            if (solve == null) return mask;
-            if (stop != null && stop.StopRequested) return null;
-
-            System.Func<bool> cancel = null;
-            if (stop != null) cancel = delegate { return stop.StopRequested; };
-
-            Matrix world = solve.height;
-            int resX = solve.resX;
-            float headArea = Mathf.Max(solve.cellArea, channelHeadArea);
-
-            List<List<int>> channels = Hydrology.TraceChannels(
-                solve.dir, solve.accum, resX, solve.resZ,
-                solve.CellsForArea(channelHeadArea), Mathf.Max(1, maxChannels), cancel);
-
-            if (stop != null && stop.StopRequested) return null;
-
-            Vector2 solvePixel = world.PixelSize;
-            float sea = Mathf.Clamp01(seaLevel);
-            float cap = Mathf.Max(baseWidth, maxWidth);
-            float originX = world.worldPos.x;
-            float originZ = world.worldPos.z;
-
-            for (int c = 0; c < channels.Count; c++)
-            {
-                if (stop != null && stop.StopRequested) return null;
-
-                List<int> channel = channels[c];
-
-                // XZ only: a course is a plan-view line. Its elevation is whatever the
-                // ground under it turns out to be, which River Carve then cuts.
-                Vector2 previous = Vector2.zero;
-                float previousWidth = 0f;
-                bool have = false;
-
-                for (int p = 0; p < channel.Count; p++)
-                {
-                    int i = channel[p];
-                    if (world.arr[i] < sea) break;   // reached the sea; the course ends
-
-                    // Hydraulic geometry: discharge grows with catchment and width
-                    // with the root of discharge, so a trunk is wide without absurdity.
-                    float catchment = solve.AreaOfCells(solve.accum[i]);
-                    float grown = Mathf.Pow(Mathf.Max(1f, catchment / headArea), widthExponent);
-                    float width = Mathf.Min(baseWidth * grown, cap);
-
-                    // Inverse of Matrix.PixelToWorld for a local array index.
-                    Vector2 here = new Vector2(originX + (i % resX) * solvePixel.x,
-                                               originZ + (i / resX) * solvePixel.y);
-
-                    if (have) StampReach(mask, previous, previousWidth, here, width);
-
-                    previous = here;
-                    previousWidth = width;
-                    have = true;
-                }
-            }
-
-            return mask;
-        }
-
-        /// <summary>
-        /// Draws one reach of a course into the chunk: a capsule measured in world
-        /// metres, tapering from one node's width to the next.
-        /// </summary>
-        /// <remarks>
-        /// Only the pixels the reach can possibly touch are visited - its own bounding
-        /// box grown by half a width, clipped to the chunk - so a world-wide network
-        /// costs the length of the courses crossing this chunk, not the chunk's area
-        /// once per reach. Points are XZ world positions packed into a Vector2.
-        /// </remarks>
-        private static void StampReach(Matrix mask, Vector2 a, float widthA,
-                                       Vector2 b, float widthB)
-        {
-            float halfMax = Mathf.Max(widthA, widthB) * 0.5f;
-            if (halfMax <= 1e-4f) return;
-
-            Vector2 pixel = mask.PixelSize;
-            float mppX = Mathf.Max(1e-4f, pixel.x);
-            float mppZ = Mathf.Max(1e-4f, pixel.y);
-
-            float originX = mask.worldPos.x;
-            float originZ = mask.worldPos.z;
-
-            int resX = mask.rect.size.x;
-            int resZ = mask.rect.size.z;
-
-            int x0 = Mathf.FloorToInt((Mathf.Min(a.x, b.x) - halfMax - originX) / mppX);
-            int x1 = Mathf.CeilToInt((Mathf.Max(a.x, b.x) + halfMax - originX) / mppX);
-            int z0 = Mathf.FloorToInt((Mathf.Min(a.y, b.y) - halfMax - originZ) / mppZ);
-            int z1 = Mathf.CeilToInt((Mathf.Max(a.y, b.y) + halfMax - originZ) / mppZ);
-
-            if (x1 < 0 || z1 < 0 || x0 > resX - 1 || z0 > resZ - 1) return;
-
-            if (x0 < 0) x0 = 0;
-            if (z0 < 0) z0 = 0;
-            if (x1 > resX - 1) x1 = resX - 1;
-            if (z1 > resZ - 1) z1 = resZ - 1;
-
-            Vector2 along = b - a;
-            float lengthSq = along.sqrMagnitude;
-
-            for (int z = z0; z <= z1; z++)
-            {
-                int row = z * resX;
-                float worldZ = originZ + z * mppZ;
-
-                for (int x = x0; x <= x1; x++)
-                {
-                    float worldX = originX + x * mppX;
-
-                    // How far along the reach the nearest point lies, 0-1.
-                    float t = 0f;
-                    if (lengthSq > 1e-6f)
-                    {
-                        float dot = (worldX - a.x) * along.x + (worldZ - a.y) * along.y;
-                        t = Mathf.Clamp01(dot / lengthSq);
-                    }
-
-                    float half = Mathf.Lerp(widthA, widthB, t) * 0.5f;
-                    if (half <= 1e-4f) continue;
-
-                    float offX = worldX - (a.x + along.x * t);
-                    float offZ = worldZ - (a.y + along.y * t);
-                    float d = Mathf.Sqrt(offX * offX + offZ * offZ);
-                    if (d >= half) continue;
-
-                    // 1 on the thalweg falling to 0 at the bank, so the mask doubles as
-                    // distance from the centreline: River Carve reads it to shape the
-                    // cross-section and River Fill to find the bank.
-                    float v = 1f - InterpolationMath.SmoothStep(d / half);
-                    if (v > mask.arr[row + x]) mask.arr[row + x] = v;
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Cuts the river channel into the heightfield. Separate from the trace so a
-    /// user can carve one network and texture another, and so the carve can be
-    /// masked without recomputing drainage.
-    /// </summary>
-    [System.Serializable]
-    public class RiverCarveNode : Generator
-    {
-        public override string NodeName { get { return "River Carve"; } }
+        public override string NodeName { get { return "Lake Basin"; } }
         public override NodeCategory Category { get { return NodeCategory.Modifier; } }
-        public override string Tooltip { get { return "Cuts a channel profile into the terrain along a river mask."; } }
+        public override string Tooltip { get { return "Cuts a rugged, shelved lake basin into the terrain under a lake mask."; } }
 
         private static readonly Port[] Ins =
         {
             new Port("Height", PortType.Matrix, PortDirection.Input),
-            new Port("River Mask", PortType.Matrix, PortDirection.Input)
+            new Port("Lake Mask", PortType.Matrix, PortDirection.Input),
+            new Port("Water Level", PortType.Matrix, PortDirection.Input)
         };
 
         public override Port[] GetInputs() { return Ins; }
         public override Port[] GetOutputs() { return SharedPorts.HeightOut; }
 
-        /// <summary>Channel depth at full mask, as a fraction of world height.</summary>
-        public float depth = 0.012f;
+        /// <summary>Deepest the basin digs below its surface, as a fraction of world height.</summary>
+        public float maxDepth = 0.03f;
 
-        /// <summary>Width of the banks either side of the channel, in metres.</summary>
-        public float bankWidth = 25f;
+        /// <summary>How far from shore the dish reaches full depth, in metres.</summary>
+        public float shoreRunMetres = 120f;
 
-        /// <summary>Cross-section shape. 1 is V-shaped, 2+ approaches a flat bed.</summary>
-        public float profilePower = 1.6f;
+        /// <summary>
+        /// How much of the shore-to-deep run is the wave-cut shelf (shallow bench).
+        /// Read by the LakeBasin profile - see WaterBedMath.DepthFraction.
+        /// </summary>
+        public float shelfFraction = 0.25f;
 
-        /// <summary>Flattens the channel floor so the river bed does not undulate.</summary>
-        public float bedFlattening = 0.6f;
+        /// <summary>Bed roughness amplitude, as a fraction of world height. 0 is a smooth dish.</summary>
+        public float ruggedness = 0.004f;
 
-        /// <summary>Raises a levee alongside the channel, as real rivers deposit.</summary>
-        public float leveeHeight;
+        /// <summary>Feature size of the bed roughness, in metres.</summary>
+        public float ruggednessFeatureMetres = 40f;
+
+        /// <summary>Octaves of the bed roughness.</summary>
+        public int ruggednessOctaves = 3;
+
+        /// <summary>Roughness persistence, 0..1.</summary>
+        public float ruggednessPersistence = 0.5f;
+
+        /// <summary>Seed for the bed roughness, so a basin is identical on every rebuild.</summary>
+        public int seed = 12345;
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             Matrix src = GetInputMatrix(tile, 0, stop);
             if (src == null) return tile.CreateMatrix();
 
-            Matrix river = GetInputMatrix(tile, 1, stop);
-            if (river == null) return new Matrix(src);
+            Matrix lake = GetInputMatrix(tile, 1, stop);
+            if (lake == null) return new Matrix(src);
             if (stop != null && stop.StopRequested) return null;
 
+            Matrix waterLevel = GetInputMatrix(tile, 2, stop);
+
             Matrix dst = new Matrix(src);
+            // UC-T03-03: lake excavation belongs in both ground versions; it must not
+            // become a river exemption merely because this branch already carries a river.
+            if (src.trenchReference != null) dst.trenchReference = new Matrix(src.trenchReference);
 
             int resX = src.rect.size.x;
             int resZ = src.rect.size.z;
@@ -306,15 +117,22 @@ namespace UniverseCreator.Nodes.Selectors
             Vector2 ps = src.PixelSize;
             float mpp = Mathf.Max(1e-4f, (ps.x + ps.y) * 0.5f);
 
-            // Bank width in pixels sets the blur sigma used to find the local river
-            // grade: the bed follows the smoothed valley floor, not every bump.
-            float sigma = Mathf.Clamp(bankWidth / mpp, 0.5f, 32f);
-            Matrix smoothed = MatrixOperations.GaussianBlur(src, sigma);
+            // Distance INWARD from the shore, in pixels, capped at the shore run. On the
+            // inverted mask the dry bank is the seed, so the field is 1 at the waterline
+            // falling to 0 in the deep; t is its complement, matching WaterBedMath.
+            float runPixels = Mathf.Max(1f, shoreRunMetres / mpp);
+            Matrix inv = src.Blank();
+            for (int i = 0; i < inv.arr.Length; i++)
+                inv.arr[i] = 1f - Mathf.Clamp01(lake.arr[i]);
 
+            Matrix shoreField = MatrixOperations.SpreadLinear(inv, 0.5f, runPixels);
             if (stop != null && stop.StopRequested) return null;
 
-            float power = Mathf.Max(0.2f, profilePower);
-            float flatten = Mathf.Clamp01(bedFlattening);
+            float depth = Mathf.Max(0f, maxDepth);
+            float shelf = Mathf.Clamp(shelfFraction, 0.02f, 0.9f);
+            float rug = Mathf.Max(0f, ruggedness);
+            float originX = src.worldPos.x;
+            float originZ = src.worldPos.z;
 
             for (int z = 0; z < resZ; z++)
             {
@@ -325,27 +143,48 @@ namespace UniverseCreator.Nodes.Selectors
                 for (int x = 0; x < resX; x++)
                 {
                     int i = row + x;
-                    float w = Mathf.Clamp01(river.arr[i]);
-                    if (w <= 0.001f) continue;
+                    float wet = Mathf.Clamp01(lake.arr[i]);
+                    if (wet <= 0.001f) continue;
 
-                    // Mask value doubles as distance from the centreline: 1 at the
-                    // thalweg, 0 at the bank. Raising it to a power sets the profile.
-                    float profile = Mathf.Pow(w, power);
+                    // t = 0 at the waterline, 1 in the deep. shoreField is 1 at the bank.
+                    float t = Mathf.Clamp01(1f - shoreField.arr[i]);
 
-                    float bed = Mathf.Lerp(src.arr[i], smoothed.arr[i], flatten * w);
-                    float cut = bed - depth * profile;
+                    // Shared lake profile: shallow shelf, then a dish. bankExponent is
+                    // unused by the LakeBasin case, so any value passes. Fully qualified:
+                    // WaterBedMath lives in the terrain layer, reached by its namespace.
+                    float frac = UniverseCreator.TerrainSystem.WaterBedMath.DepthFraction(
+                        UniverseCreator.TerrainSystem.BedProfile.LakeBasin, t, shelf, 2f);
 
-                    float value = Mathf.Min(dst.arr[i], cut);
+                    // Surface the basin is measured DOWN from: the flat fill level where
+                    // wired, else the local ground (a self-consistent hollow).
+                    float surface = waterLevel != null
+                        ? Mathf.Clamp01(waterLevel.arr[i])
+                        : src.arr[i];
 
-                    if (leveeHeight > 1e-5f)
+                    float bed = surface - depth * frac;
+
+                    // Bed ruggedness, faded out toward the shore so it never breaks the
+                    // waterline into a dashed line of islands (t^2 fade, as the runtime
+                    // carve does).
+                    if (rug > 1e-6f)
                     {
-                        // Levees sit on the shoulder: strongest where the mask is
-                        // partial, absent in the channel itself.
-                        float shoulder = w * (1f - w) * 4f;
-                        value += leveeHeight * shoulder;
+                        float fade = t * t;
+                        float worldX = originX + x * ps.x;
+                        float worldZ = originZ + z * ps.y;
+                        float n = UniverseCreator.TerrainSystem.WaterBedMath.Ruggedness(
+                            worldX, worldZ, ruggednessFeatureMetres,
+                            ruggednessOctaves, ruggednessPersistence, seed);
+                        bed += n * rug * fade;
                     }
 
-                    dst.arr[i] = Mathf.Clamp01(value);
+                    // Never above its own surface, and deepening only.
+                    if (bed > surface) bed = surface;
+                    dst.arr[i] = Mathf.Clamp01(Mathf.Min(dst.arr[i], bed));
+                    if (dst.trenchReference != null)
+                    {
+                        float referenceBed = bed + (waterLevel == null ? src.trenchReference.arr[i] - src.arr[i] : 0f);
+                        dst.trenchReference.arr[i] = Mathf.Clamp01(Mathf.Min(dst.trenchReference.arr[i], referenceBed));
+                    }
                 }
             }
 
@@ -387,7 +226,12 @@ namespace UniverseCreator.Nodes.Selectors
     {
         public override string NodeName { get { return "Lake Fill"; } }
         public override NodeCategory Category { get { return NodeCategory.Selector; } }
-        public override string Tooltip { get { return "Floods closed basins to their spill elevation. Outputs mask, depth and level."; } }
+        // Role: LAKE SURFACE LEVEL. It computes the flat elevation each basin fills to
+        // (plus the wet mask and depth that fall out of it). It does NOT place or shape a
+        // basin - Lake Basin cuts the rugged bed, and the water body reads this level to
+        // know how high to fill. Kept separate so the surface and the bed have one author
+        // each and cannot disagree about the waterline.
+        public override string Tooltip { get { return "Lake surface level: floods closed basins to their spill elevation. Outputs mask, depth and level."; } }
 
         // Same split as River Fill: the input mask RESTRICTS where lakes may form, the
         // first output is the water that ended up there. One name for both made the
@@ -421,6 +265,8 @@ namespace UniverseCreator.Nodes.Selectors
         /// big water; lowering it below 60 starts reading noise as lakes.
         /// </summary>
         public float minAreaSquareMetres = 60f;
+        /// <summary>UC-T03-08: optional world-area count/area scaling; defaults retain all eligible basins and the absolute minimum above.</summary>
+        public LakeDistributionSettings lakeDistribution = new LakeDistributionSettings();
 
         /// <summary>Basins shallower than this are ignored, 0..1 of world height.</summary>
         public float minDepth = 0.002f;
@@ -458,13 +304,23 @@ namespace UniverseCreator.Nodes.Selectors
             // No solve means no standing water anywhere. Water Level still answers with
             // the ground so a wired port is never a hole in the world.
             if (solve == null)
-                return outputIndex == 2 ? new Matrix(src) : dst;
+            {
+                // UC-T03-03: even a ground-valued water-level fallback is a water product,
+                // not terrain carrying a river excavation reference.
+                if (outputIndex == 2) System.Array.Copy(src.arr, dst.arr, dst.arr.Length);
+                return dst;
+            }
 
-            float[] worldLevel = LakeSurface(solve, floor, sea,
-                                             Mathf.Max(0f, minAreaSquareMetres), stop);
+            // UC-T03-08: resolve once in world units, never per chunk or by changing the fill elevation.
+            var distribution = (lakeDistribution ?? new LakeDistributionSettings()).Resolve(
+                (double)tile.fullWorldSize.x * tile.fullWorldSize.z, 0, 0, 0, Mathf.Max(0f, minAreaSquareMetres));
+            using var lakeSelectionMemory = tile.ReserveProductMemory(4096L + (long)solve.resX * solve.resZ * 64L); // UC-T03-08: selection scratch remains admitted through sampling.
+            float[] worldLevel = LakeSurface(solve, floor, sea, distribution.MinimumAreaM2, distribution.MaximumAreaM2,
+                lakeDistribution != null && lakeDistribution.scaleToWorld ? distribution.TargetCount : -1, out var report, stop);
             if (stop != null && stop.StopRequested) return null;
+            tile.AddPublication(new LakeDistributionGraphPublication(id + ":lakes", report));
 
-            float[] level = solve.ReadAtChunk(worldLevel, dst, WorldRead.Minimum);
+            float[] level = solve.ReadAtChunk(worldLevel, dst, WorldRead.Minimum, stop); // UC-T03-04: cancel during chunk reads.
             if (stop != null && stop.StopRequested) return null;
 
             float norm = 1f / Mathf.Max(1e-4f, depthNormalise);
@@ -508,22 +364,45 @@ namespace UniverseCreator.Nodes.Selectors
         /// The flood fill is iterative over an explicit stack rather than recursive: a
         /// single basin can cover most of the grid, and recursion would overflow the
         /// worker thread's stack long before it finished.
+        ///
+        /// Shared with the Hydrology Spawner for the same reason River Network Trace's
+        /// stamp is: the basins this finds are the basins the spawner places Lake
+        /// objects in. A second copy of the fill would drift from this one and put a
+        /// lake where no basin was flooded.
         /// </remarks>
-        private static float[] LakeSurface(WorldDrainage solve, float floor, float sea,
-                                           float minArea, StopToken stop)
+        internal static float[] LakeSurface(WorldDrainage solve, float floor, float sea,
+                                            float minArea, StopToken stop)
+        { return LakeSurface(solve, floor, sea, minArea, float.PositiveInfinity, -1, out _, stop); } // UC-T03-08: preserve the original method group.
+
+        // UC-T03-08: select only already eligible connected pools. Count limits never alter filled heights.
+        // Largest area ranks first, lowest solve cell breaks ties; one membership scan bounds retained work.
+        internal static float[] LakeSurface(WorldDrainage solve, float floor, float sea, float minArea,
+            float maxArea, int maximumCount, out LakeDistributionReport report, StopToken stop)
         {
+            report = null;
+            if (solve == null || solve.height == null || solve.height.arr == null || solve.filled == null ||
+                maximumCount < -1 || float.IsNaN(minArea) || float.IsInfinity(minArea) || minArea < 0 ||
+                float.IsNaN(maxArea) || maxArea < minArea || float.IsNaN(floor) || float.IsInfinity(floor) || floor < 0 ||
+                float.IsNaN(sea) || float.IsInfinity(sea))
+                throw new System.ArgumentException("Invalid lake selection area/count limits.");
+            if (stop != null && stop.StopRequested) return null;
             int resX = solve.resX;
             int resZ = solve.resZ;
             int count = resX * resZ;
 
             float[] ground = solve.height.arr;
             float[] filled = solve.filled;
+            if (ground.Length != count || filled.Length != count)
+                throw new System.ArgumentException("Lake selection lattice dimensions do not match the supplied fields."); // UC-T03-08.
 
             float[] level = new float[count];
             bool[] wet = new bool[count];
 
             for (int i = 0; i < count; i++)
             {
+                if (stop != null && (i & 1023) == 0 && stop.StopRequested) return null;
+                if (float.IsNaN(ground[i]) || float.IsInfinity(ground[i]) || float.IsNaN(filled[i]) || float.IsInfinity(filled[i]))
+                    throw new System.ArgumentException("Lake selection requires finite ground and filled samples.");
                 level[i] = ground[i];
                 wet[i] = filled[i] > sea + 1e-5f && filled[i] - ground[i] > floor;
             }
@@ -531,11 +410,14 @@ namespace UniverseCreator.Nodes.Selectors
             bool[] seen = new bool[count];
             int[] stack = new int[count];
             int[] body = new int[count];
+            int[] membership = new int[count];
+            for (int i = 0; i < count; i++) membership[i] = -1;
+            var eligible = new System.Collections.Generic.List<(int start, float area)>();
 
             for (int start = 0; start < count; start++)
             {
                 if (!wet[start] || seen[start]) continue;
-                if (stop != null && stop.StopRequested) return level;
+                if (stop != null && stop.StopRequested) return null;
 
                 // One standing body: every wet cell reachable from this one.
                 int top = 0;
@@ -545,6 +427,7 @@ namespace UniverseCreator.Nodes.Selectors
 
                 while (top > 0)
                 {
+                    if (stop != null && (size & 1023) == 0 && stop.StopRequested) return null; // UC-T03-08: large connected pools remain cancellable.
                     int i = stack[--top];
                     body[size++] = i;
 
@@ -557,263 +440,38 @@ namespace UniverseCreator.Nodes.Selectors
                     if (z < resZ - 1) { int n = i + resX; if (wet[n] && !seen[n]) { seen[n] = true; stack[top++] = n; } }
                 }
 
-                if (solve.AreaOfCells(size) < minArea) continue;   // a pond, not a lake
+                float area = solve.AreaOfCells(size);
+                if (area < minArea || area > maxArea) continue;
 
                 for (int k = 0; k < size; k++)
-                    level[body[k]] = filled[body[k]];
+                    membership[body[k]] = eligible.Count;
+                eligible.Add((start, area));
             }
 
+            System.Collections.Generic.List<int> ranked = null;
+            if (maximumCount >= 0)
+            {
+                ranked = new System.Collections.Generic.List<int>(eligible.Count);
+                for (int i = 0; i < eligible.Count; i++) ranked.Add(i);
+                ranked.Sort((a, b) => { int order = eligible[b].area.CompareTo(eligible[a].area);
+                    return order != 0 ? order : eligible[a].start.CompareTo(eligible[b].start); });
+            }
+            int selectedCount = maximumCount < 0 ? eligible.Count : Mathf.Min(maximumCount, eligible.Count);
+            var selected = new bool[eligible.Count];
+            report = new LakeDistributionReport { RequestedCount = maximumCount, EligibleCount = eligible.Count, SelectedCount = selectedCount };
+            for (int i = 0; i < selectedCount; i++)
+            {
+                int bodyIndex = ranked != null ? ranked[i] : i; selected[bodyIndex] = true; float area = eligible[bodyIndex].area;
+                report.SelectedAreaM2 += area;
+                report.SmallestAreaM2 = i == 0 ? area : Mathf.Min(report.SmallestAreaM2, area);
+                report.LargestAreaM2 = Mathf.Max(report.LargestAreaM2, area);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                if (stop != null && (i & 1023) == 0 && stop.StopRequested) { report = null; return null; }
+                if (membership[i] >= 0 && selected[membership[i]]) level[i] = filled[i];
+            }
             return level;
-        }
-    }
-
-    /// <summary>
-    /// Turns a carved river channel into actual water: the surface the flow stands
-    /// at, how deep it is, and where its edge lies.
-    /// </summary>
-    /// <remarks>
-    /// The five ports are one calculation, not three. Height and River Mask come in,
-    /// the channel is measured against its own banks, and Water Level, Depth and the
-    /// cleaned River Mask all fall out of that single surface - so they cannot
-    /// disagree about where the waterline is.
-    ///
-    /// WHY THE SURFACE IS MEASURED RATHER THAN OFFSET
-    /// A water surface is flat across the channel and never climbs along it. Adding a
-    /// constant to the ground fails both tests: it reproduces every bump of the bed,
-    /// so the "surface" undulates and the depth comes out the same everywhere. Here
-    /// the bed and the bank crest are each read as a sliding extreme over the
-    /// channel's own width - a min for the thalweg, a max for the crest. Both are
-    /// flat across the channel by construction and change only as the window slides
-    /// along the valley, so the surface is level bank to bank and follows the valley
-    /// downhill. The stage is then a fraction of the way from bed to crest: the
-    /// channel filled to a height, which is what bankfull geometry describes.
-    ///
-    /// Depth is measured from that surface down to the real ground, so it reaches
-    /// zero exactly where the water meets the bank and the mask edge IS the
-    /// waterline - no gap and no overlap for the shader to expose.
-    ///
-    /// The bed is read from a depression-filled copy of the height so that a channel
-    /// which see-saws by a pixel cannot make the water climb: filling guarantees a
-    /// downhill path from every source to the outlet.
-    /// </remarks>
-    [System.Serializable]
-    public class RiverFillNode : Generator
-    {
-        public override string NodeName { get { return "River Fill"; } }
-        public override NodeCategory Category { get { return NodeCategory.Selector; } }
-        public override string Tooltip { get { return "Computes river water surfaces and depths. Outputs mask and depth."; } }
-
-        // The input is the CHANNEL - the course River Network Trace drew. The first
-        // output is the WATER - the part of that channel the stage actually covers,
-        // which is narrower and stops short of the head where the channel is too
-        // shallow to hold anything. Two different things, so two different names; they
-        // used to share one and the graph could not tell the feed from the result.
-        private static readonly Port[] Outs =
-        {
-            new Port("Water Mask", PortType.Matrix, PortDirection.Output, true),
-            new Port("Depth", PortType.Matrix, PortDirection.Output, true),
-            new Port("Water Level", PortType.Matrix, PortDirection.Output, true)
-        };
-
-        private static readonly Port[] Ins =
-        {
-            new Port("Height", PortType.Matrix, PortDirection.Input),
-            new Port("River Mask", PortType.Matrix, PortDirection.Input)
-        };
-
-        public override Port[] GetInputs() { return Ins; }
-        public override Port[] GetOutputs() { return Outs; }
-
-        /// <summary>
-        /// Distance out to the bank crest, in world metres. Set it to the River
-        /// Carve node's bank width: it is the same bank being described.
-        /// </summary>
-        public float bankWidth = 25f;
-
-        /// <summary>How full the channel runs, 0-1. 1 is brim-full at the crest.</summary>
-        public float bankfullFraction = 0.7f;
-
-        /// <summary>Water thinner than this does not count as river, 0-1 of world height.</summary>
-        public float minDepth = 0.0005f;
-
-        /// <summary>
-        /// Depth at which the depth port saturates. Smaller than the lake node's
-        /// because a river of the same standing is far shallower than a lake.
-        /// </summary>
-        public float depthNormalise = 0.02f;
-
-        /// <summary>Sea level, 0-1 of world height. At and below it the river surface is the sea's.</summary>
-        public float seaLevel = 0.35f;
-
-        /// <summary>Softness of the waterline in the mask, 0-1.</summary>
-        public float shoreSoftness = 0.15f;
-
-        // Out-of-channel sentinels for the two sliding windows: high enough that a
-        // pixel outside the course can never win the minimum, low enough that it can
-        // never win the maximum. Heights are 0-1 of world height, so these sit far
-        // outside any real value while staying ordinary finite floats.
-        private const float OutsideForMin = 1e6f;
-        private const float OutsideForMax = -1e6f;
-
-        public override object Generate(int outputIndex, TileData tile, StopToken stop)
-        {
-            // The bed and crest are sliding extremes over the channel's own width, so
-            // a pixel within one window of the chunk edge would otherwise measure only
-            // the part of the channel that happens to be inside this chunk - a
-            // different water level on each side of the seam. A ghost ring the width
-            // of the window makes every returned pixel see its whole channel; the ring
-            // is cropped off at the end. Bounded neighbourhood, so a margin is the
-            // complete fix here - see TileWindows.
-            int margin = WindowRadius(MetresPerPixel(tile));
-            TileData view = TileWindows.Expand(tile, margin);
-            if (view == null) { view = tile; margin = 0; }
-
-            Matrix src = view.PullInput(this, 0, stop) as Matrix;
-            if (src == null) return tile.CreateMatrix();
-            Matrix inputMask = view.PullInput(this, 1, stop) as Matrix;
-            if (stop != null && stop.StopRequested) return null;
-
-            Matrix dst = src.Blank();
-
-            int resX = src.rect.size.x;
-            int resZ = src.rect.size.z;
-            int count = resX * resZ;
-            if (count == 0) return tile.CreateMatrix();
-
-            // No traced course means no channel to fill, and the geometry alone cannot
-            // stand in for one: on any slope the sliding min sits downhill of the
-            // sliding max, so a bare hillside would read as filled. Water Level still
-            // answers with the ground, so a wired port is never a hole.
-            if (inputMask == null)
-            {
-                Matrix bare = outputIndex == 2 ? new Matrix(src) : dst;
-                return margin > 0 ? TileWindows.Crop(bare, tile, margin) : bare;
-            }
-
-            System.Func<bool> cancel = null;
-            if (stop != null) cancel = delegate { return stop.StopRequested; };
-
-            // Local conditioning, not a drainage solve: filling removes the pixel-scale
-            // see-saw that would otherwise let the sliding min pick a pit and hold the
-            // water above its own reach. It only ever raises ground, and only inside
-            // pits, so the window min it feeds is still governed by the true thalweg.
-            float[] conditioned = Hydrology.FillDepressions(src.arr, resX, resZ, 1e-6f, cancel);
-            if (stop != null && stop.StopRequested) return null;
-
-            int radius = WindowRadius(src.PixelSize.x);
-
-            // MEASURED AGAINST ITS OWN BANKS, NOT AGAINST THE COUNTRYSIDE
-            // Both sliding extremes read a copy of the height in which everything
-            // outside the traced course is pushed out of range. Without that the crest
-            // is the highest ground anywhere within a bank width - the hillside above
-            // the river, a ridge, the shoulder of the next valley - and a stage set
-            // from it stands metres above the bank it is supposed to be held by. That
-            // is the reported fault exactly: a ribbon of water hanging over dry ground,
-            // and no depth where the river really is.
-            //
-            // Restricted to the footprint, the crest is the untouched rim of the
-            // channel (River Carve's dig scales with the same mask, so the mask edge is
-            // where the ground was left alone) and the bed is the thalweg it cut. The
-            // stage is then a fraction of the channel's OWN depth, which is what
-            // bankfull means, and it cannot exceed the rim because the rim IS the top.
-            //
-            // The sentinels are large finite numbers rather than infinities so the
-            // window pass stays in ordinary float arithmetic, and neither can leak into
-            // a value that is read: a pixel is only read where the mask is positive,
-            // and such a pixel lies inside its own window, so every window that matters
-            // holds at least one real sample.
-            float[] channelBed = new float[count];
-            float[] channelTop = new float[count];
-
-            for (int i = 0; i < count; i++)
-            {
-                if (inputMask.arr[i] > 0f)
-                {
-                    channelBed[i] = conditioned[i];
-                    channelTop[i] = src.arr[i];
-                }
-                else
-                {
-                    channelBed[i] = OutsideForMin;
-                    channelTop[i] = OutsideForMax;
-                }
-            }
-
-            float[] bed = MatrixOperations.WindowMin(channelBed, resX, resZ, radius);
-            float[] crest = MatrixOperations.WindowMax(channelTop, resX, resZ, radius);
-            if (stop != null && stop.StopRequested) return null;
-
-            float fill = Mathf.Clamp01(bankfullFraction);
-            float floor = Mathf.Max(0f, minDepth);
-            float norm = 1f / Mathf.Max(1e-4f, depthNormalise);
-            float soft = Mathf.Clamp01(shoreSoftness);
-            float sea = Mathf.Clamp01(seaLevel);
-
-            for (int i = 0; i < count; i++)
-            {
-                float m = Mathf.Clamp01(inputMask.arr[i]);
-                float ground = src.arr[i];
-
-                if (m <= 0.001f)
-                {
-                    if (outputIndex == 2) dst.arr[i] = ground;
-                    continue;
-                }
-
-                // Both extremes come from the channel's own footprint, so the crest is
-                // its rim and the bed is its thalweg. Inside a basin the fill can still
-                // raise the thalweg above that rim; taking the higher of the two is what
-                // keeps the stage from inverting there.
-                float top = crest[i] > bed[i] ? crest[i] : bed[i];
-                float level = bed[i] + (top - bed[i]) * fill;
-
-                // At the mouth the river IS the sea. Returning the level the ocean
-                // uses is what makes that join seamless instead of a step.
-                if (ground <= sea && level < sea) level = sea;
-
-                float d = level - ground;
-
-                if (d < floor)
-                {
-                    if (outputIndex == 2) dst.arr[i] = ground;
-                    continue;
-                }
-
-                if (outputIndex == 1) { dst.arr[i] = Mathf.Clamp01(d * norm); continue; }
-                if (outputIndex == 2) { dst.arr[i] = Mathf.Clamp01(level); continue; }
-
-                // Mask: the waterline itself, intersected with the traced course so
-                // the water can never be wider than the river it belongs to. Fading
-                // over the first slice of depth keeps a shallow bank from ending in a
-                // one-pixel cliff.
-                float edge = soft > 1e-4f
-                    ? Mathf.Clamp01((d - floor) / (soft * Mathf.Max(1e-4f, depthNormalise)))
-                    : 1f;
-
-                dst.arr[i] = InterpolationMath.SmoothStep(edge) * m;
-            }
-
-            return margin > 0 ? TileWindows.Crop(dst, tile, margin) : dst;
-        }
-
-        /// <summary>Metres one heightmap pixel of this chunk covers.</summary>
-        private static float MetresPerPixel(TileData tile)
-        {
-            if (tile == null) return 1f;
-            return tile.rect.size.x > 1
-                ? tile.worldSize.x / (tile.rect.size.x - 1)
-                : tile.worldSize.x;
-        }
-
-        /// <summary>
-        /// Half-width of the bed and crest windows, in pixels. Capped because the
-        /// ghost ring it doubles as makes the whole upstream graph re-evaluate over a
-        /// larger rect, and past a point that costs more than the seam is worth.
-        /// </summary>
-        private int WindowRadius(float metresPerPixel)
-        {
-            float mpp = Mathf.Max(1e-4f, metresPerPixel);
-            return Mathf.Clamp(Mathf.RoundToInt(Mathf.Max(1f, bankWidth) / mpp), 1, 64);
         }
     }
 
@@ -869,12 +527,20 @@ namespace UniverseCreator.Nodes.Selectors
         /// </summary>
         public float benchWidth = 3f;
 
+        /// <summary>Steepest bank left beside the water, rise over run. 0.5 = about 27 degrees.
+        /// Lower gives a wider, gentler valley side; the cliff around a lake was this being unlimited.</summary>
+        [Range(0.1f, 2f)] public float bankSlope = 0.5f;
+
+        /// <summary>Most a dry bank may be raised to meet the water, in metres. Stops the seat
+        /// building a flat levee around a lake whose surface sits above the nearby ground.</summary>
+        public float maxRaiseMetres = 1.5f;
+
         /// <summary>
         /// Distance over which the bench eases back to the natural terrain, in
         /// metres. Too small reads as a moat; roughly a bank's own width reads as a
         /// bank.
         /// </summary>
-        public float skirtWidth = 30f;
+        public float skirtWidth = 90f;
 
         /// <summary>
         /// Clearance kept between the bed and the surface, 0-1 of world height. Stops
@@ -888,6 +554,7 @@ namespace UniverseCreator.Nodes.Selectors
         // Past this the padded pull re-evaluates the whole upstream graph over a much
         // larger rect for a blend the eye cannot follow anyway.
         private const int MaxMargin = 96;
+        private const float MinSkirtMetres = 60f;
 
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
@@ -896,7 +563,10 @@ namespace UniverseCreator.Nodes.Selectors
             // ring the width of the bench plus skirt is the complete fix. See
             // TileWindows for why drainage needs something else entirely.
             float mpp = MetresPerPixel(tile);
-            int margin = WaterBankSeat.MarginPixels(benchWidth, skirtWidth, mpp, MaxMargin);
+            // A skirt shorter than this cannot hold a hillside to a valley slope, which is what
+            // made the cliffs. Applied here so graphs saved with the old 30 m value are fixed too.
+            float skirt = Mathf.Max(skirtWidth, MinSkirtMetres);
+            int margin = WaterBankSeat.MarginPixels(benchWidth, skirt, mpp, MaxMargin);
 
             TileData view = TileWindows.Expand(tile, margin);
             if (view == null) { view = tile; margin = 0; }
@@ -921,13 +591,26 @@ namespace UniverseCreator.Nodes.Selectors
 
             float[] seated = WaterBankSeat.Apply(src.arr, level.arr, mask.arr,
                                                  resX, resZ, src.PixelSize.x,
-                                                 benchWidth, skirtWidth,
-                                                 minDepth, strength, cancel);
+                                                 benchWidth, skirt,
+                                                 minDepth, strength,
+                                                 src.worldHeight > 1e-3f ? src.worldHeight : 600f,
+                                                 bankSlope, maxRaiseMetres, cancel);
 
             if (stop != null && stop.StopRequested) return null;
 
             Matrix dst = src.Blank();
             System.Array.Copy(seated, dst.arr, dst.arr.Length);
+            // UC-T03-03: seat the same declared water on reference ground before cropping;
+            // otherwise this specialized writer discards river relief downstream of a seat.
+            if (src.trenchReference != null)
+            {
+                float[] referenceSeated = WaterBankSeat.Apply(src.trenchReference.arr, level.arr, mask.arr,
+                    resX, resZ, src.PixelSize.x, benchWidth, skirt, minDepth, strength,
+                    src.worldHeight > 1e-3f ? src.worldHeight : 600f, bankSlope, maxRaiseMetres, cancel);
+                if (stop != null && stop.StopRequested) return null;
+                dst.trenchReference = new Matrix(src.rect, referenceSeated) {
+                    worldPos = src.worldPos, worldSize = src.worldSize, worldHeight = src.worldHeight };
+            }
 
             return margin > 0 ? TileWindows.Crop(dst, tile, margin) : dst;
         }
@@ -1241,8 +924,8 @@ namespace UniverseCreator.Nodes.Selectors
 
             // Throughflow is a smooth quantity, so it blends. The ponded surface is a
             // water level, so it takes the lowest of its neighbours - see WorldDrainage.
-            float[] accum = solve.ReadAtChunk(solve.accum, dst, WorldRead.Bilinear);
-            float[] filled = solve.ReadAtChunk(solve.filled, dst, WorldRead.Minimum);
+            float[] accum = solve.ReadAtChunk(solve.accum, dst, WorldRead.Bilinear, stop);
+            float[] filled = solve.ReadAtChunk(solve.filled, dst, WorldRead.Minimum, stop);
             if (stop != null && stop.StopRequested) return null;
 
             Matrix slopes = MatrixOperations.SlopeAngles(src);
@@ -1376,7 +1059,7 @@ namespace UniverseCreator.Nodes.Selectors
 
                 if (solve != null)
                 {
-                    accum = solve.ReadAtChunk(solve.accum, m, WorldRead.Bilinear);
+                    accum = solve.ReadAtChunk(solve.accum, m, WorldRead.Bilinear, stop);
                     canyonCells = solve.CellsForArea(canyonCatchmentArea);
                     if (stop != null && stop.StopRequested) return;
                 }
@@ -1438,6 +1121,267 @@ namespace UniverseCreator.Nodes.Selectors
                     m.arr[i] = Mathf.Clamp(value, 0f, sea - 1e-5f);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Shapes a swamp: a low-energy, flat depression where a static water table sits at or
+    /// just above a hummocky floor (§25). It does NOT trench like a river - it flattens a
+    /// low-lying, gently-sloped region toward a swamp floor and lays low-amplitude hummock
+    /// micro-relief over it, then emits a Swamp Mask whose value is the water-table depth
+    /// zone (0 = dry mound, ~0.5 = saturated shallows, 1 = deep pool) for the splat and
+    /// scatter to read. The swamp region is either hand-painted (wire a mask into Swamp Mask
+    /// in) or detected procedurally (flat AND lying near the water table). Placement is the
+    /// graph author's or a painted mask's; a Swamp water body puts the visible water in.
+    /// </summary>
+    [System.Serializable]
+    public class SwampBasinNode : Generator
+    {
+        public override string NodeName { get { return "Swamp Basin"; } }
+        public override NodeCategory Category { get { return NodeCategory.Selector; } }
+        public override string Tooltip { get { return "Flattens a low-lying basin into a hummocky swamp floor and emits a water-table depth mask."; } }
+
+        private static readonly Port[] Ins =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Input),
+            new Port("Swamp Mask", PortType.Matrix, PortDirection.Input)
+        };
+
+        private static readonly Port[] Outs =
+        {
+            new Port("Height", PortType.Matrix, PortDirection.Output, true),
+            new Port("Swamp Mask", PortType.Matrix, PortDirection.Output, true)
+        };
+
+        public override Port[] GetInputs() { return Ins; }
+        public override Port[] GetOutputs() { return Outs; }
+
+        /// <summary>Water-table height, 0..1 of world height. The swamp forms around this.</summary>
+        public float swampLevel = 0.4f;
+
+        /// <summary>How far below the water table the flattened floor sits, 0..1. Sets pool depth.</summary>
+        public float floorDrop = 0.02f;
+
+        /// <summary>How strongly the swamp floor is flattened toward the level, 0..1.</summary>
+        public float flatten = 0.85f;
+
+        /// <summary>Procedural detection: max per-pixel height gradient still counted as "flat".</summary>
+        public float detectMaxSlope = 0.02f;
+
+        /// <summary>Detection band below the water table, 0..1 (a basin sits at/below the table).</summary>
+        public float bandBelow = 0.03f;
+
+        /// <summary>Detection band above the water table, 0..1 (micro-islands rise just above).</summary>
+        public float bandAbove = 0.01f;
+
+        /// <summary>Hummock micro-relief amplitude, 0..1 (keep tiny - real hummocks are ~0.3 m).</summary>
+        public float hummockAmp = 0.0015f;
+
+        /// <summary>Hummock feature size in metres.</summary>
+        public float hummockFeatureMetres = 25f;
+
+        /// <summary>Seed, so a swamp is identical on every rebuild.</summary>
+        public int seed = 4242;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+
+            Matrix paint = GetInputMatrix(tile, 1, stop);
+            if (stop != null && stop.StopRequested) return null;
+
+            // UC-T03-03: the swamp's detection/flattening must also transform reference
+            // ground, so only the remaining river relief survives terminal composition.
+            Matrix result = GenerateSwamp(src, paint, outputIndex, stop);
+            if (result != null && outputIndex != 1 && src.trenchReference != null &&
+                (stop == null || !stop.StopRequested))
+                result.trenchReference = GenerateSwamp(src.trenchReference, paint, 0, stop);
+            return result;
+        }
+
+        private Matrix GenerateSwamp(Matrix src, Matrix paint, int outputIndex, StopToken stop)
+        {
+            int resX = src.rect.size.x;
+            int resZ = src.rect.size.z;
+
+            Matrix dst = new Matrix(src);
+            Matrix maskOut = src.Blank();
+
+            Vector2 ps = src.PixelSize;
+            float originX = src.worldPos.x;
+            float originZ = src.worldPos.z;
+            Noise noise = new Noise(seed);
+
+            float level = Mathf.Clamp01(swampLevel);
+            float drop = Mathf.Max(0f, floorDrop);
+            float floor = Mathf.Clamp01(level - drop);
+            float flat = Mathf.Clamp01(flatten);
+            float amp = Mathf.Max(0f, hummockAmp);
+            float feat = Mathf.Max(1f, hummockFeatureMetres);
+            float maxSlope = Mathf.Max(1e-5f, detectMaxSlope);
+            float below = Mathf.Max(1e-4f, bandBelow);
+            float above = Mathf.Max(1e-4f, bandAbove);
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 31) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float h = src.arr[i];
+
+                    // Swamp presence 0..1: painted where a mask is wired, else detected as
+                    // FLAT ground lying near the water table (a low-energy depression). A
+                    // steep or high cell scores 0, so a swamp never climbs a hillside.
+                    float weight;
+                    if (paint != null)
+                    {
+                        weight = Mathf.Clamp01(paint.arr[i]);
+                    }
+                    else
+                    {
+                        float band = h > level
+                            ? 1f - Mathf.Clamp01((h - level) / above)
+                            : 1f - Mathf.Clamp01((level - h) / below);
+
+                        int xl = Mathf.Max(0, x - 1), xr = Mathf.Min(resX - 1, x + 1);
+                        int zl = Mathf.Max(0, z - 1), zr = Mathf.Min(resZ - 1, z + 1);
+                        float gx = src.arr[row + xr] - src.arr[row + xl];
+                        float gz = src.arr[zr * resX + x] - src.arr[zl * resX + x];
+                        float grad = Mathf.Sqrt(gx * gx + gz * gz) * 0.5f;
+                        float flatF = 1f - Mathf.Clamp01(grad / maxSlope);
+
+                        weight = Mathf.Clamp01(band) * flatF;
+                    }
+
+                    float outH = h;
+                    if (weight > 0.001f)
+                    {
+                        // Flatten toward the floor, then lay low hummock mounds/hollows over
+                        // it. The mound relief is what makes the shallows read as organic mud
+                        // rather than a flat pond.
+                        outH = Mathf.Lerp(h, floor, flat * weight);
+                        if (amp > 1e-6f)
+                        {
+                            float wx = originX + x * ps.x;
+                            float wz = originZ + z * ps.y;
+                            float n = noise.Fractal(wx, wz, feat, 3) - 0.5f;
+                            outH += n * 2f * amp * weight;
+                        }
+                        outH = Mathf.Clamp01(outH);
+                    }
+
+                    dst.arr[i] = outH;
+
+                    // Water-table depth zone: dz = level - floor-adjusted ground. 0 at a dry
+                    // mound (dz <= 0), rising to 1 at pool depth, scaled by presence so the
+                    // mask is 0 outside the swamp.
+                    float dz = level - outH;
+                    maskOut.arr[i] = weight * Mathf.Clamp01(dz / Mathf.Max(1e-4f, drop));
+                }
+            }
+
+            return outputIndex == 1 ? maskOut : dst;
+        }
+    }
+
+    /// <summary>
+    /// Baked ambient / sky occlusion (§27a — the mobile-safe capture of Lumen's diffuse
+    /// indirect-shadowing intent). For each cell it measures how much of the sky the
+    /// heightfield hides — the maximum upward horizon slope in several directions — and
+    /// outputs a 0..1 sky-visibility mask (1 = open sky, lower = a shadowed crease, valley or
+    /// cliff base). Computed ONCE at generation and read cheaply by the splat/shader, so
+    /// hollows get believable soft indirect darkening at ZERO per-frame cost — the Lumen
+    /// LOOK a phone can afford, with no ray-march, no SDF volume and no runtime GI. Self-
+    /// consistent in the heightfield's own units, so it needs no world vertical scale.
+    /// </summary>
+    [System.Serializable]
+    public class SkyOcclusionNode : Generator
+    {
+        public override string NodeName { get { return "Sky Occlusion"; } }
+        public override NodeCategory Category { get { return NodeCategory.Selector; } }
+        public override string Tooltip { get { return "Baked horizon ambient occlusion from the heightfield: soft indirect darkening in valleys, mobile-cheap."; } }
+
+        public override Port[] GetInputs() { return SharedPorts.HeightIn; }
+        public override Port[] GetOutputs() { return SharedPorts.MaskOut; }
+
+        /// <summary>Directions sampled around each cell. 8 balances quality and phone cost.</summary>
+        public int directions = 8;
+
+        /// <summary>How far, in pixels, to look for occluding terrain along each direction.</summary>
+        public int reachPixels = 16;
+
+        /// <summary>Scales the measured horizon slope into occlusion. Higher = deeper shadows.</summary>
+        public float strength = 6f;
+
+        /// <summary>Floor on sky visibility, so a deep crease never goes pure black.</summary>
+        public float minVisibility = 0.25f;
+
+        public override object Generate(int outputIndex, TileData tile, StopToken stop)
+        {
+            Matrix src = GetInputMatrix(tile, 0, stop);
+            if (src == null) return tile.CreateMatrix();
+            if (stop != null && stop.StopRequested) return null;
+
+            int resX = src.rect.size.x;
+            int resZ = src.rect.size.z;
+            Matrix outAo = src.Blank();
+
+            int dirs = Mathf.Clamp(directions, 1, 16);
+            int reach = Mathf.Clamp(reachPixels, 1, 128);
+            float k = Mathf.Max(0f, strength);
+            float floor = Mathf.Clamp01(minVisibility);
+
+            float[] dcx = new float[dirs];
+            float[] dcz = new float[dirs];
+            for (int d = 0; d < dirs; d++)
+            {
+                float a = (Mathf.PI * 2f) * d / dirs;
+                dcx[d] = Mathf.Cos(a);
+                dcz[d] = Mathf.Sin(a);
+            }
+
+            for (int z = 0; z < resZ; z++)
+            {
+                if (stop != null && (z & 15) == 0 && stop.StopRequested) return null;
+
+                int row = z * resX;
+
+                for (int x = 0; x < resX; x++)
+                {
+                    int i = row + x;
+                    float h0 = src.arr[i];
+
+                    // Average over directions of the maximum UPWARD horizon slope (normalised
+                    // rise per pixel). More terrain rising around a cell = less visible sky =
+                    // more occlusion. This is horizon-based AO on the heightfield, in its own
+                    // units - no metre scale required, and fully baked so runtime cost is nil.
+                    float horizonSum = 0f;
+                    for (int d = 0; d < dirs; d++)
+                    {
+                        float maxSlope = 0f;
+                        for (int s = 1; s <= reach; s++)
+                        {
+                            int sx = Mathf.Clamp(x + Mathf.RoundToInt(dcx[d] * s), 0, resX - 1);
+                            int sz = Mathf.Clamp(z + Mathf.RoundToInt(dcz[d] * s), 0, resZ - 1);
+                            float rise = src.arr[sz * resX + sx] - h0;
+                            if (rise <= 0f) continue;
+                            float slope = rise / s;
+                            if (slope > maxSlope) maxSlope = slope;
+                        }
+                        horizonSum += maxSlope;
+                    }
+
+                    float occlusion = Mathf.Clamp01((horizonSum / dirs) * k);
+                    outAo.arr[i] = Mathf.Max(floor, 1f - occlusion);
+                }
+            }
+
+            return outAo;
         }
     }
 }

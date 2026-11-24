@@ -17,6 +17,7 @@ using UnityEditor.Experimental.GraphView;
 using UnityEngine.UIElements;
 using UnityEditor.UIElements;   // ColorField / CurveField / ObjectField are editor-only
 using UniverseCreator.Nodes;
+using UniverseCreator.TerrainSystem;   // ChunkManager, to adopt the generated terrain
 using GVPort = UnityEditor.Experimental.GraphView.Port;
 using UCPort = UniverseCreator.Nodes.Port;
 
@@ -33,6 +34,14 @@ namespace UniverseCreator.Editor.GraphUI
         private readonly UCGraphView owner;
         private readonly List<GVPort> inPorts = new List<GVPort>();
         private readonly List<GVPort> outPorts = new List<GVPort>();
+        // UC-T01-09: validation is presentation only; errors never rewrite a node or its wires.
+        private readonly Label validationMessage = new Label { name = "uc-validation", pickingMode = PickingMode.Ignore };
+        private readonly Image previewImage = new Image { name = "uc-preview", pickingMode = PickingMode.Ignore }; // UC-T05-08: owned by the canvas.
+        private readonly Label previewMessage = new Label { name = "uc-preview-status", pickingMode = PickingMode.Ignore };
+        private IMGUIContainer materialPreview; // UC-T07-08: Unity's installed material editor owns lit preview rendering.
+        private readonly Label runMessage = new Label { name = "uc-run-timing", pickingMode = PickingMode.Ignore }; // UC-T05-08: measured world data is separate from preview data.
+        private SerializedObject serializedFields; // UC-T05-11: native array/nested editing owns one binding per node view.
+        private readonly List<PropertyField> nativeFields = new List<PropertyField>();
 
         // Fields that every node inherits and that must not appear as parameters:
         // they are engine bookkeeping, not authoring surface.
@@ -49,7 +58,11 @@ namespace UniverseCreator.Editor.GraphUI
             "lacunarity", "persistence", "wrapMode", "interpolation"
         };
 
-        public UCNodeView(Generator node, UCGraphView owner)
+        /// <summary>UC-T01-09: builds an editable node, retaining a visible diagnostic when its plugin ports are invalid.</summary>
+        /// <param name="node">Non-null authored generator; this view never repairs its data.</param>
+        /// <param name="owner">Owning canvas, or null for a standalone view.</param>
+        /// <param name="invalidPorts">True after validation rejected the port metadata; suppresses port construction.</param>
+        public UCNodeView(Generator node, UCGraphView owner, bool invalidPorts = false)
         {
             this.Node = node;
             this.owner = owner;
@@ -61,12 +74,56 @@ namespace UniverseCreator.Editor.GraphUI
             if (node is IOutputNode) AddToClassList("uc-terminal");
 
             StyleTitleBar();
-            BuildPorts();
+            if (!invalidPorts) BuildPorts();
             BuildBody();
+            validationMessage.style.whiteSpace = WhiteSpace.Normal;
+            validationMessage.style.display = DisplayStyle.None;
+            mainContainer.Add(validationMessage);
+            previewImage.style.width = 96; previewImage.style.height = 96; previewImage.style.display = DisplayStyle.None;
+            previewMessage.style.whiteSpace = WhiteSpace.Normal; previewMessage.style.display = DisplayStyle.None;
+            mainContainer.Add(previewImage); mainContainer.Add(previewMessage); // UC-T05-08: preview state is separate from validation and applied world state.
+            runMessage.style.whiteSpace = WhiteSpace.Normal; runMessage.style.display = DisplayStyle.None; mainContainer.Add(runMessage);
 
             SetPosition(new Rect(node.editorPosition, new Vector2(210f, 120f)));
             RefreshExpandedState();
             RefreshPorts();
+        }
+
+        // UC-T01-09: replacing the message also clears a repaired node's former diagnostic.
+        internal void SetValidationMessage(string message, bool error)
+        {
+            validationMessage.text = message ?? string.Empty;
+            validationMessage.style.display = string.IsNullOrEmpty(message) ? DisplayStyle.None : DisplayStyle.Flex;
+            validationMessage.style.color = error ? new Color(1f, 0.55f, 0.5f) : new Color(1f, 0.85f, 0.45f);
+        }
+
+        internal void SetPreview(Texture2D texture, string message)
+        {
+            if (materialPreview != null) { materialPreview.RemoveFromHierarchy(); materialPreview = null; }
+            previewImage.image = texture;
+            previewImage.style.display = texture != null ? DisplayStyle.Flex : DisplayStyle.None;
+            previewMessage.text = message ?? string.Empty;
+            previewMessage.style.display = string.IsNullOrEmpty(message) ? DisplayStyle.None : DisplayStyle.Flex;
+        }
+
+        internal void SetMaterialPreview(UnityEditor.Editor editor, string message)
+        {
+            SetPreview(null, message);
+            materialPreview = new IMGUIContainer(() =>
+            {
+                Rect area = GUILayoutUtility.GetRect(96, 96);
+                if (editor != null && GraphExecutionGuard.HasGraphicsDevice && editor.HasPreviewGUI())
+                    editor.OnPreviewGUI(area, GUIStyle.none);
+                else GUI.Label(area, "Lit preview needs an Editor graphics device.");
+            });
+            materialPreview.style.width = 96; materialPreview.style.height = 96;
+            mainContainer.Add(materialPreview);
+        }
+
+        internal void SetRunTiming(string message)
+        {
+            runMessage.text = message ?? string.Empty;
+            runMessage.style.display = string.IsNullOrEmpty(message) ? DisplayStyle.None : DisplayStyle.Flex;
         }
 
         // ------------------------------------------------------------------
@@ -91,12 +148,18 @@ namespace UniverseCreator.Editor.GraphUI
 
         private void BuildPorts()
         {
+            // A portal's socket type is DERIVED, never authored: resolve it off the
+            // live graph before reading the ports so the socket colours itself by the
+            // data actually crossing the channel. No-op for every non-portal node.
+            if (Node is IPortalTyped portal && owner != null && owner.Graph != null)
+                portal.ResolveType(owner.Graph);
+
             UCPort[] inputs = Node.GetInputs();
             for (int i = 0; i < inputs.Length; i++)
             {
                 GVPort p = InstantiatePort(
                     Orientation.Horizontal, Direction.Input,
-                    inputs[i].allowMultiple ? GVPort.Capacity.Multi : GVPort.Capacity.Single,
+                    GVPort.Capacity.Single, // UC-T05-07: new authoring has one incoming wire; restored legacy fan-in remains preserved in the asset.
                     typeof(float));
 
                 p.portName = inputs[i].name;
@@ -111,7 +174,7 @@ namespace UniverseCreator.Editor.GraphUI
             {
                 GVPort p = InstantiatePort(
                     Orientation.Horizontal, Direction.Output,
-                    outputs[i].allowMultiple ? GVPort.Capacity.Multi : GVPort.Capacity.Single,
+                    GVPort.Capacity.Multi, // UC-T05-07: an output can feed independent consumers without duplicating its generator.
                     typeof(float));
 
                 p.portName = outputs[i].name;
@@ -141,12 +204,170 @@ namespace UniverseCreator.Editor.GraphUI
         //  Body - the parameters, drawn in the node rather than a side pane
         // ------------------------------------------------------------------
 
+        /// <summary>
+        /// CTL-3. The manager that owns the scene-side half of this node's concept, or null
+        /// when the node has no manager behind it.
+        ///
+        /// WHY A LOOKUP AND NOT EMBEDDED FIELDS. CTL-3's point is that an author should not
+        /// hunt one concept in two places. The obvious way - draw the manager's fields in the
+        /// node body - would give every manager dial TWO writers, the manager's inspector and
+        /// the node, which is exactly the fault CTL-1 removed one layer down and CTL-2 refused
+        /// in the other direction. So the node names its manager and offers to select it: one
+        /// place to look, still one place that writes.
+        ///
+        /// Only mappings verified against a real class declaration are listed. A node with no
+        /// entry shows no row at all, which is why adding one is additive and cannot regress.
+        /// </summary>
+        public static Type ManagerTypeFor(Generator node)
+        {
+            if (node == null) return null;
+
+            // Every scatter node - tree, shrub, grass, rock, object, debris - shares this base,
+            // and the vegetation manager is the scene half of all of them.
+            if (node is UniverseCreator.Nodes.Scatter.ScatterNodeBase)
+                return typeof(UCVegetationSystemManager);
+
+            if (node is UniverseCreator.Nodes.Creators.HydrologyNode)
+                return typeof(UCWaterSystemManager);
+
+            if (node is UniverseCreator.Nodes.Outputs.WeatherOutputNode)
+                return typeof(UCWeatherSystemManager);
+
+            if (node is UniverseCreator.Nodes.Outputs.LightingOutputNode)
+                return typeof(UCLightingSystemManager);
+
+            return null;
+        }
+
+        // The manager lookup is a scene-wide search, and a graph view rebuilds every node's
+        // body at once - so without a cache a 40-node graph would run 40 searches. One search
+        // per manager type per TTL instead, and the TTL (rather than a null check) is also what
+        // makes the row self-healing: add the manager to the scene and it appears shortly after,
+        // and a manager destroyed inside the window reads as absent, which is the truth.
+        private static readonly Dictionary<Type, Component> managerCache =
+            new Dictionary<Type, Component>();
+        private static double managerCacheStamp;
+        private const double ManagerCacheSeconds = 2.0;
+
+        private static Component FindManagerCached(Type managerType)
+        {
+            if (managerType == null) return null;
+
+            double now = EditorApplication.timeSinceStartup;
+            if (now - managerCacheStamp > ManagerCacheSeconds)
+            {
+                managerCache.Clear();
+                managerCacheStamp = now;
+            }
+
+            Component hit;
+            if (managerCache.TryGetValue(managerType, out hit)) return hit;   // null is a real answer
+
+            // FindObjectsSortMode is deprecated in Unity 6; the FindObjectsInactive overload is
+            // the supported one, and excluding inactive is what we want anyway - a disabled
+            // manager is not the one driving the scene.
+            UnityEngine.Object[] found =
+                UnityEngine.Object.FindObjectsByType(managerType, FindObjectsInactive.Exclude);
+
+            Component c = (found != null && found.Length > 0) ? found[0] as Component : null;
+            managerCache[managerType] = c;
+            return c;
+        }
+
+        /// <summary>
+        /// CTL-3. One row naming the manager behind this node, with a button that selects it.
+        /// READ-ONLY on purpose - see <see cref="ManagerTypeFor"/> for why nothing is editable
+        /// here. Draws nothing for a node that has no manager.
+        /// </summary>
+        private void BuildManagerLink()
+        {
+            Type managerType = ManagerTypeFor(Node);
+            if (managerType == null) return;
+
+            Component manager = FindManagerCached(managerType);
+
+            VisualElement row = new VisualElement();
+            row.AddToClassList("uc-manager-link");
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.alignItems = Align.Center;
+
+            string pretty = Prettify(managerType.Name);
+
+            Label label = new Label(manager != null ? pretty : pretty + " - none in scene");
+            label.tooltip = manager != null
+                ? "The scene-side half of this node's settings lives on " + managerType.Name +
+                  ". It is shown here so you do not have to hunt for it, and it stays editable " +
+                  "only there - two places writing one dial is how they end up disagreeing."
+                : "This node's scene-side settings live on " + managerType.Name +
+                  ", and there is none in this scene yet.";
+            row.Add(label);
+
+            if (manager != null)
+            {
+                Button select = new Button(() =>
+                {
+                    Selection.activeObject = manager.gameObject;
+                    EditorGUIUtility.PingObject(manager.gameObject);
+                });
+                select.text = "Select";
+                row.Add(select);
+            }
+
+            extensionContainer.Add(row);
+        }
+
+        /// <summary>"UCVegetationSystemManager" to "Vegetation System Manager".</summary>
+        private static string Prettify(string typeName)
+        {
+            if (string.IsNullOrEmpty(typeName)) return string.Empty;
+
+            string s = typeName.StartsWith("UC") ? typeName.Substring(2) : typeName;
+
+            System.Text.StringBuilder sb = new System.Text.StringBuilder(s.Length + 8);
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (i > 0 && char.IsUpper(s[i]) && !char.IsUpper(s[i - 1])) sb.Append(' ');
+                sb.Append(s[i]);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// CTL-3. The name of the section this field OPENS, or null when it opens none.
+        ///
+        /// Its own method, and public, for two reasons: the grouping rule is then one
+        /// statement with one home instead of a condition buried in a layout loop, and it
+        /// can be pinned by a gate without standing up a GraphView - which a headless run
+        /// cannot do. A blank header is treated as "no section" deliberately: Unity allows
+        /// `[Header("")]` and a foldout with no name is worse than no foldout.
+        /// </summary>
+        public static string SectionNameFor(FieldInfo f)
+        {
+            if (f == null) return null;
+
+            HeaderAttribute head =
+                (HeaderAttribute)Attribute.GetCustomAttribute(f, typeof(HeaderAttribute));
+
+            if (head == null) return null;
+            if (string.IsNullOrEmpty(head.header)) return null;
+
+            return head.header;
+        }
+
         private void BuildBody()
         {
             VisualElement body = new VisualElement();
             body.AddToClassList("uc-params");
 
             Foldout advanced = null;
+
+            // CTL-3. Where basic fields land. It stays `body` until a field carries a
+            // [Header], and becomes that header's section from then on - so a node with no
+            // header renders exactly the layout it always did. The section is created only
+            // when its first real widget arrives, so a header sitting on a field type the
+            // view cannot draw never leaves an empty group behind.
+            VisualElement section = body;
+            string pendingHeader = null;
 
             FieldInfo[] fields = Node.GetType().GetFields(
                 BindingFlags.Public | BindingFlags.Instance);
@@ -157,6 +378,12 @@ namespace UniverseCreator.Editor.GraphUI
                 if (Hidden.Contains(f.Name)) continue;
                 if (f.IsNotSerialized) continue;
                 if (f.IsDefined(typeof(HideInInspector), true)) continue;
+
+                // CTL-3: group by Unity's OWN grouping attribute rather than a new one. An
+                // author already knows [Header], the runtime Generator stays free of editor
+                // types, and a plugin author's node groups itself with no extra API.
+                string header = SectionNameFor(f);
+                if (header != null) pendingHeader = header;
 
                 VisualElement widget = BuildWidget(f);
                 if (widget == null) continue;
@@ -173,14 +400,54 @@ namespace UniverseCreator.Editor.GraphUI
                 }
                 else
                 {
-                    // Insert before the foldout so basic fields stay on top even
-                    // when a later field in reflection order is an advanced one.
-                    if (advanced != null) body.Insert(body.IndexOf(advanced), widget);
-                    else body.Add(widget);
+                    // Open the pending section now that something is going into it. Inserted
+                    // before Advanced so Advanced stays last whatever order reflection used.
+                    if (pendingHeader != null)
+                    {
+                        Foldout group = new Foldout { text = pendingHeader, value = true };
+                        group.AddToClassList("uc-section");
+
+                        if (advanced != null) body.Insert(body.IndexOf(advanced), group);
+                        else body.Add(group);
+
+                        section = group;
+                        pendingHeader = null;
+                    }
+
+                    if (section != body)
+                    {
+                        section.Add(widget);
+                    }
+                    else
+                    {
+                        // Insert before the foldout so basic fields stay on top even
+                        // when a later field in reflection order is an advanced one.
+                        if (advanced != null) body.Insert(body.IndexOf(advanced), widget);
+                        else body.Add(widget);
+                    }
                 }
             }
 
+            if (Node is UniverseCreator.Nodes.Texturing.TextureFunctionCallNode functionCall && owner != null)
+            {
+                // UC-T07-08: refreshing is an explicit structural edit, using the existing graph Undo/commit path.
+                var notice = new Label();
+                body.Add(new Button(() =>
+                {
+                    try
+                    {
+                        Undo.RegisterCompleteObjectUndo(owner.Graph, "Refresh function ports");
+                        functionCall.RefreshPorts(); owner.MarkGraphDirty(); owner.QueueRegenerate(Node); owner.ReloadView();
+                    }
+                    catch (InvalidOperationException error) { notice.text = error.Message; }
+                }) { text = "Refresh Function Ports" });
+                body.Add(notice);
+            }
             if (body.childCount > 0) extensionContainer.Add(body);
+
+            // CTL-3: last, under the parameters, so it reads as "and the rest of this concept
+            // lives there" rather than competing with the node's own fields.
+            BuildManagerLink();
         }
 
         /// <summary>
@@ -256,6 +523,37 @@ namespace UniverseCreator.Editor.GraphUI
                 Commit(vf, v => f.SetValue(Node, v));
                 created = vf;
             }
+            else if (t == typeof(Vector3))
+            {
+                Vector3Field vf = new Vector3Field(label) { value = (Vector3)f.GetValue(Node) };
+                Commit(vf, v => f.SetValue(Node, v));
+                created = vf;
+            }
+            else if (t == typeof(Vector4))
+            {
+                Vector4Field vf = new Vector4Field(label) { value = (Vector4)f.GetValue(Node) };
+                Commit(vf, v => f.SetValue(Node, v));
+                created = vf;
+            }
+            else if (t == typeof(Vector2Int))
+            {
+                Vector2IntField vf = new Vector2IntField(label) { value = (Vector2Int)f.GetValue(Node) };
+                Commit(vf, v => f.SetValue(Node, v));
+                created = vf;
+            }
+            else if (t == typeof(Vector3Int))
+            {
+                Vector3IntField vf = new Vector3IntField(label) { value = (Vector3Int)f.GetValue(Node) };
+                Commit(vf, v => f.SetValue(Node, v));
+                created = vf;
+            }
+            else if (t == typeof(Gradient))
+            {
+                Gradient g = (Gradient)f.GetValue(Node);
+                GradientField gf = new GradientField(label) { value = g ?? new Gradient() };
+                Commit(gf, v => f.SetValue(Node, v));
+                created = gf;
+            }
             else if (t == typeof(Color))
             {
                 ColorField cf = new ColorField(label) { value = (Color)f.GetValue(Node) };
@@ -272,49 +570,479 @@ namespace UniverseCreator.Editor.GraphUI
             }
             else if (typeof(UnityEngine.Object).IsAssignableFrom(t))
             {
+                if (Node is WorldGraphInputNode && f.Name == nameof(WorldGraphInputNode.mainGraph))
+                {
+                    return BuildMainGraphSelector(f, label);
+                }
+                // A scene Component (Terrain, and anything like it) can only ever be
+                // a scene object, never a project asset - so an assets-only picker
+                // shows an empty "Select Terrain" window. Allow scene objects for
+                // those types; keep assets-only for real asset refs (Texture2D etc.).
+                bool sceneType = typeof(Component).IsAssignableFrom(t) || t == typeof(GameObject);
+
+                UnityEngine.Object current = (UnityEngine.Object)f.GetValue(Node);
+
+                // Convenience the user asked for: a Terrain field left empty adopts
+                // the world's own generated terrain (a Terrain owned by a ChunkManager)
+                // so the field shows a real chunk instead of "None". An explicit
+                // assignment always wins, and an unrelated hand-made terrain is never
+                // adopted because it is not a ChunkManager child.
+                if (current == null && typeof(Terrain).IsAssignableFrom(t))
+                {
+                    Terrain adopted = FindGeneratedTerrain();
+                    if (adopted != null)
+                    {
+                        current = adopted;
+                        f.SetValue(Node, adopted);
+                        Node.version++;
+                        owner.MarkGraphDirty();
+                    }
+                }
+
                 ObjectField of = new ObjectField(label)
                 {
                     objectType = t,
-                    allowSceneObjects = false,
-                    value = (UnityEngine.Object)f.GetValue(Node)
+                    allowSceneObjects = sceneType,
+                    value = current
                 };
                 Commit(of, v => f.SetValue(Node, v));
                 created = of;
             }
+            else if (t == typeof(RiverHierarchyTargets) || t == typeof(LakeDistributionSettings))
+            {
+                created = BuildSettingsWidget(f, label); // UC-T03-08: lake criteria edit the same serialized settings as the inspector.
+            }
+            else if (TryGetListElementType(t, out Type elementType))
+            {
+                // T3: List<T> fields (splat rules, scatter prototypes, spot brushes...)
+                // had no in-node UI at all. A reorderable list of element widgets gives
+                // them one. Element slots start EMPTY (no hardcoded asset per the project
+                // rule); the buyer fills them.
+                // UC biome repair: variable-height managed-reference rows must not recycle stale rule bindings.
+                created = Node is UniverseCreator.Nodes.Outputs.BiomeSplatOutputNode && elementType == typeof(UniverseCreator.Nodes.Outputs.BiomeSplatRule)
+                    ? BuildBiomeRulesWidget(label)
+                    : BuildSerializedFieldWidget(f, label) ?? BuildListWidget(f, label, elementType);
+            }
+            else if (t.IsArray || t.IsDefined(typeof(SerializableAttribute), false))
+                created = BuildSerializedFieldWidget(f, label); // UC-T05-11: arrays and nested schemas use Unity's supported serialized controls.
 
             if (created != null && tip != null) created.tooltip = tip.tooltip;
             return created;
         }
 
+        private VisualElement BuildSerializedFieldWidget(FieldInfo field, string label)
+        {
+            if (owner == null || owner.Graph == null) return null;
+            int index = owner.Graph.nodes.IndexOf(Node);
+            if (index < 0) return new Label("This field is not bound to its authored graph.");
+            if (serializedFields == null) serializedFields = new SerializedObject(owner.Graph);
+            var nodesProperty = serializedFields.FindProperty("nodes");
+            var property = nodesProperty.GetArrayElementAtIndex(index).FindPropertyRelative(field.Name);
+            if (property == null) return new Label(label + ": Unity cannot serialize this schema; the saved field is preserved.");
+            var widget = new PropertyField(property, label) { name = "uc-serialized-" + field.Name };
+            widget.Bind(serializedFields);
+            widget.RegisterCallback<PointerDownEvent>(evt => evt.StopPropagation()); // UC biome repair: nested controls edit values without starting a node drag.
+            widget.RegisterCallback<SerializedPropertyChangeEvent>(_ =>
+            {
+                Node.version++; owner.MarkGraphDirty(); owner.QueueRegenerate(Node); // Native binding records keyboard/list/nested Undo before mutation.
+            });
+            nativeFields.Add(widget); return widget;
+        }
+
+        internal void ReleaseSerializedFields()
+        {
+            foreach (var widget in nativeFields) widget.Unbind(); nativeFields.Clear();
+            serializedFields?.Dispose(); serializedFields = null; // UC-T05-11: no native serialized binding survives canvas replacement/close.
+        }
+
+        // UC biome repair: explicit, nonvirtual rows keep list edits independent of native array-size/recycling state.
+        // All mutations still belong to the authored graph and its existing Undo/commit dispatcher.
+        private VisualElement BuildBiomeRulesWidget(string label)
+        {
+            var node = (UniverseCreator.Nodes.Outputs.BiomeSplatOutputNode)Node;
+            var foldout = new Foldout { text = label, value = false, name = "uc-biome-rules" };
+            foldout.AddToClassList("uc-biome-rules");
+            foldout.RegisterCallback<PointerDownEvent>(evt => evt.StopPropagation());
+            var help = new Label { name = "uc-biome-rules-help" };
+            help.style.whiteSpace = WhiteSpace.Normal;
+            var rows = new ScrollView(ScrollViewMode.Vertical) { name = "uc-biome-rule-rows" };
+            rows.style.maxHeight = 420;
+            int revision = 0;
+            Action refresh = null;
+            Action<Action<List<UniverseCreator.Nodes.Outputs.BiomeSplatRule>>> change = mutation =>
+            {
+                if (owner?.Graph == null || !owner.Graph.nodes.Contains(Node)) return;
+                Undo.RegisterCompleteObjectUndo(owner.Graph, "Edit biome splat rules");
+                if (node.rules == null) node.rules = new List<UniverseCreator.Nodes.Outputs.BiomeSplatRule>();
+                mutation(node.rules); Node.version++;
+                owner.MarkGraphDirty(); owner.QueueRegenerate(Node); refresh();
+            };
+            refresh = () =>
+            {
+                revision++; // UC biome repair: callbacks from removed/reordered rows cannot edit a replacement row.
+                rows.Clear();
+                int count = node.rules?.Count ?? 0;
+                foldout.text = label + " (" + count + ")";
+                help.text = node.palette != null && node.palette.rules != null && node.palette.rules.Count > 0
+                    ? "The selected palette supplies the active rules. These inline rules are saved as the fallback."
+                    : "Add one rule per biome. Layer indices are zero based; the last duplicate biome wins. Empty rules use the default layer.";
+                for (int i = 0; i < count; i++)
+                {
+                    int index = i;
+                    int rowRevision = revision;
+                    var rule = node.rules[index];
+                    var row = new Foldout { text = "Rule " + (i + 1) + " — " + rule.biome, value = true, name = "uc-biome-rule-" + i };
+                    row.AddToClassList("uc-biome-rule");
+                    Action<Func<UniverseCreator.Nodes.Outputs.BiomeSplatRule, UniverseCreator.Nodes.Outputs.BiomeSplatRule>> write = update =>
+                    {
+                        // Read the current struct each time; a boxed initial row would overwrite earlier field edits.
+                        if (rowRevision != revision || node.rules == null || index >= node.rules.Count) return;
+                        node.rules[index] = update(node.rules[index]);
+                        row.text = "Rule " + (index + 1) + " — " + node.rules[index].biome;
+                    };
+                    var biome = new EnumField("Biome", rule.biome) { name = "biome" };
+                    Func<bool> currentRow = () => rowRevision == revision && owner?.Graph != null && owner.Graph.nodes.Contains(Node) && node.rules != null && index < node.rules.Count;
+                    Commit(biome, v => write(r => { r.biome = (UniverseCreator.Nodes.Biome.BiomeType)v; return r; }), currentRow); row.Add(biome);
+                    Action<string, string, int, Action<int>> integer = (name, text, value, apply) =>
+                    {
+                        var field = new IntegerField(text) { name = name, value = value, isDelayed = true };
+                        field.tooltip = "Zero-based Terrain Layer index, from 0 to Layer Count minus 1.";
+                        Commit(field, apply, currentRow); row.Add(field);
+                    };
+                    Action<string, string, float, string, Action<float>> number = (name, text, value, tip, apply) =>
+                    {
+                        var field = new FloatField(text) { name = name, value = value, isDelayed = true, tooltip = tip };
+                        Commit(field, apply, currentRow); row.Add(field);
+                    };
+                    integer("groundLayer", "Ground Layer", rule.groundLayer, v => write(r => { r.groundLayer = v; return r; }));
+                    integer("slopeLayer", "Slope Layer", rule.slopeLayer, v => write(r => { r.slopeLayer = v; return r; }));
+                    number("slopeStart", "Slope Start (°)", rule.slopeStart, "Slope in degrees, 0–90. End must exceed Start to enable slope blending.", v => write(r => { r.slopeStart = v; return r; }));
+                    number("slopeEnd", "Slope End (°)", rule.slopeEnd, "Slope in degrees, 0–90.", v => write(r => { r.slopeEnd = v; return r; }));
+                    integer("highLayer", "High Layer", rule.highLayer, v => write(r => { r.highLayer = v; return r; }));
+                    number("highStart", "High Start (0–1)", rule.highStart, "Height divided by the world's maximum height. Equal/reversed endpoints disable altitude blending.", v => write(r => { r.highStart = v; return r; }));
+                    number("highEnd", "High End (0–1)", rule.highEnd, "Normalized height, 0–1.", v => write(r => { r.highEnd = v; return r; }));
+                    number("weight", "Weight", rule.weight, "Nonnegative contribution multiplier. Zero disables this rule.", v => write(r => { r.weight = v; return r; }));
+                    var actions = new VisualElement(); actions.style.flexDirection = FlexDirection.Row;
+                    Action<Action<List<UniverseCreator.Nodes.Outputs.BiomeSplatRule>>> edit = mutation =>
+                    {
+                        if (rowRevision != revision || node.rules == null || index >= node.rules.Count) return;
+                        change(mutation);
+                    };
+                    var up = new Button(() => edit(list => { if (index == 0) return; var value = list[index]; list.RemoveAt(index); list.Insert(index - 1, value); })) { text = "Up", name = "up" };
+                    up.SetEnabled(index > 0); actions.Add(up);
+                    var down = new Button(() => edit(list => { if (index + 1 >= list.Count) return; var value = list[index]; list.RemoveAt(index); list.Insert(index + 1, value); })) { text = "Down", name = "down" };
+                    down.SetEnabled(index + 1 < count); actions.Add(down);
+                    actions.Add(new Button(() => edit(list => list.RemoveAt(index))) { text = "Remove", name = "remove" });
+                    row.Add(actions); rows.Add(row);
+                }
+            };
+            var add = new Button(() =>
+            {
+                foldout.value = true;
+                change(list =>
+                {
+                    // Native array growth duplicates/zero-initializes rules; use the node's actual default and first unused biome instead.
+                    int selected = 0;
+                    for (int candidate = 0; candidate < UniverseCreator.Nodes.Biome.BiomeClassifierNode.BiomeCount; candidate++)
+                        if (!list.Exists(r => (int)r.biome == candidate)) { selected = candidate; break; }
+                    list.Add(UniverseCreator.Nodes.Outputs.BiomeSplatRule.Default((UniverseCreator.Nodes.Biome.BiomeType)selected, node.defaultLayer));
+                });
+            }) { text = "+ Add Rule", name = "uc-biome-rule-add" };
+            foldout.Add(help); foldout.Add(add); foldout.Add(rows); refresh();
+            return foldout;
+        }
+
+        // UC-T03-05: reuse the node's commit/regeneration path; opening an old null setting does not dirty its graph.
+        // UC-T05-06: saved legacy selections remain visible, but new selections/dragged assets must pass current main-domain validation.
+        private VisualElement BuildMainGraphSelector(FieldInfo field, string label)
+        {
+            var area = new VisualElement();
+            var status = new Label();
+            var button = new Button { text = label + ": " + (field.GetValue(Node) is Graph selectedGraph ? selectedGraph.name : "Bound world's main graph") };
+            area.Add(button); area.Add(status);
+            Action<Graph> select = graph =>
+            {
+                if (!CanSelectMainGraph(graph)) { status.text = "Select a validated main Node Graph; the saved selection is preserved."; return; }
+                if (ReferenceEquals(field.GetValue(Node), graph)) return;
+                Undo.RegisterCompleteObjectUndo(owner.Graph, "Select accepted main graph");
+                field.SetValue(Node, graph); Node.version++; owner.MarkGraphDirty(); owner.QueueRegenerate(Node);
+                button.text = label + ": " + (graph != null ? graph.name : "Bound world's main graph"); status.text = string.Empty;
+            };
+            button.clicked += () =>
+            {
+                var menu = new GenericMenu();
+                menu.AddItem(new GUIContent("Bound world's main graph"), field.GetValue(Node) == null, () => select(null));
+                foreach (string guid in AssetDatabase.FindAssets("t:Graph"))
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guid);
+                    Graph candidate = AssetDatabase.LoadAssetAtPath<Graph>(path);
+                    if (!CanSelectMainGraph(candidate)) continue;
+                    menu.AddItem(new GUIContent(path), ReferenceEquals(field.GetValue(Node), candidate), () => select(candidate));
+                }
+                menu.DropDown(button.worldBound);
+            };
+            area.RegisterCallback<DragUpdatedEvent>(evt =>
+            {
+                DragAndDrop.visualMode = DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Graph candidate && CanSelectMainGraph(candidate)
+                    ? DragAndDropVisualMode.Link : DragAndDropVisualMode.Rejected;
+                evt.StopPropagation();
+            });
+            area.RegisterCallback<DragPerformEvent>(evt =>
+            {
+                if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Graph candidate)
+                { select(candidate); DragAndDrop.AcceptDrag(); }
+                evt.StopPropagation();
+            });
+            area.tooltip = "Accepted main Node Graph for this bound world. A valid foreign-world selection remains pending at Run; it never builds a separate world.";
+            return area;
+        }
+
+        internal static bool CanSelectMainGraph(Graph graph) => graph == null ||
+            (graph.HasSupportedDomainMetadata && graph.Domain == UCGraphDomain.TerrainWater && GraphValidationReport.Analyze(graph).IsValid);
+
+        private VisualElement BuildSettingsWidget(FieldInfo field, string label)
+        {
+            var foldout = new Foldout { text = label, value = false };
+            object current = field.GetValue(Node) ?? Activator.CreateInstance(field.FieldType); // UC-T03-08: supported bool/int/float setting groups.
+            foreach (FieldInfo member in field.FieldType.GetFields(BindingFlags.Instance | BindingFlags.Public))
+            {
+                string name = ObjectNames.NicifyVariableName(member.Name);
+                Action<object> write = value =>
+                {
+                    object settings = field.GetValue(Node) ?? Activator.CreateInstance(field.FieldType);
+                    member.SetValue(settings, value); field.SetValue(Node, settings);
+                };
+                VisualElement control;
+                if (member.FieldType == typeof(bool))
+                {
+                    var toggle = new Toggle(name) { value = (bool)member.GetValue(current) };
+                    Commit(toggle, v => write(v)); control = toggle;
+                }
+                else if (member.FieldType == typeof(int))
+                {
+                    var count = new IntegerField(name) { value = (int)member.GetValue(current) };
+                    Commit(count, v => write(v)); control = count;
+                }
+                else
+                {
+                    var number = new FloatField(name) { value = (float)member.GetValue(current) };
+                    Commit(number, v => write(v)); control = number;
+                }
+                var tip = (TooltipAttribute)Attribute.GetCustomAttribute(member, typeof(TooltipAttribute));
+                if (tip != null) control.tooltip = tip.tooltip;
+                foldout.Add(control);
+            }
+            return foldout;
+        }
+
+        /// <summary>True for a List&lt;T&gt; field; hands back the element type T.</summary>
+        private static bool TryGetListElementType(Type t, out Type elementType)
+        {
+            elementType = null;
+            if (t == null || !t.IsGenericType) return false;
+            if (t.GetGenericTypeDefinition() != typeof(List<>)) return false;
+            elementType = t.GetGenericArguments()[0];
+            return true;
+        }
+
+        /// <summary>
+        /// A reorderable list editor for a List&lt;T&gt; field. Each row is an element
+        /// widget for a type BuildElementWidget understands; add/remove and reorder are
+        /// the ListView's own, and every edit bumps the node version and marks the graph
+        /// dirty so a regen is queued exactly as a scalar field would.
+        /// </summary>
+        private VisualElement BuildListWidget(FieldInfo f, string label, Type elementType)
+        {
+            System.Collections.IList list = f.GetValue(Node) as System.Collections.IList;
+            if (list == null)
+            {
+                list = (System.Collections.IList)Activator.CreateInstance(f.FieldType);
+                f.SetValue(Node, list);
+            }
+
+            Foldout foldout = new Foldout { text = label, value = false };
+
+            ListView view = new ListView
+            {
+                itemsSource = list,
+                reorderable = true,
+                showAddRemoveFooter = true,
+                showBorder = true,
+                selectionType = SelectionType.Single,
+                virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight,
+                reorderMode = ListViewReorderMode.Animated
+            };
+
+            view.makeItem = () => new VisualElement();
+            view.bindItem = (element, i) =>
+            {
+                element.Clear();
+                object value = i >= 0 && i < list.Count ? list[i] : null;
+                int captured = i;
+                VisualElement row = BuildElementWidget(elementType, value, v =>
+                {
+                    if (captured >= 0 && captured < list.Count)
+                    {
+                        list[captured] = v;
+                        Node.version++;
+                        owner.MarkGraphDirty();
+                        owner.QueueRegenerate(Node);
+                    }
+                });
+                if (row != null) element.Add(row);
+            };
+
+            // Add/remove through the footer changes the count; re-bind and regen.
+            view.itemsAdded += _ => { Node.version++; owner.MarkGraphDirty(); owner.QueueRegenerate(Node); };
+            view.itemsRemoved += _ => { Node.version++; owner.MarkGraphDirty(); owner.QueueRegenerate(Node); };
+            view.itemIndexChanged += (a, b) => { Node.version++; owner.MarkGraphDirty(); owner.QueueRegenerate(Node); };
+
+            foldout.Add(view);
+            return foldout;
+        }
+
+        /// <summary>
+        /// A single list-element widget for the element types the node fields actually
+        /// use (numbers, vectors, string, enum, and asset/scene object refs). Returns
+        /// null for a type with no editor, so an exotic element simply shows nothing
+        /// rather than throwing.
+        /// </summary>
+        private VisualElement BuildElementWidget(Type t, object value, Action<object> set)
+        {
+            if (t == typeof(float))
+            {
+                FloatField ff = new FloatField { value = value is float fv ? fv : 0f };
+                Commit(ff, v => set(v));
+                return ff;
+            }
+            if (t == typeof(int))
+            {
+                IntegerField inf = new IntegerField { value = value is int iv ? iv : 0 };
+                Commit(inf, v => set(v));
+                return inf;
+            }
+            if (t == typeof(string))
+            {
+                TextField tf = new TextField { value = value as string ?? "" };
+                Commit(tf, v => set(v));
+                return tf;
+            }
+            if (t == typeof(Vector2))
+            {
+                Vector2Field vf = new Vector2Field { value = value is Vector2 vv ? vv : Vector2.zero };
+                Commit(vf, v => set(v));
+                return vf;
+            }
+            if (t == typeof(Vector3))
+            {
+                Vector3Field vf = new Vector3Field { value = value is Vector3 vv ? vv : Vector3.zero };
+                Commit(vf, v => set(v));
+                return vf;
+            }
+            if (t == typeof(Color))
+            {
+                ColorField cf = new ColorField { value = value is Color cv ? cv : Color.white };
+                Commit(cf, v => set(v));
+                return cf;
+            }
+            if (t.IsEnum)
+            {
+                EnumField ef = new EnumField(value as Enum ?? (Enum)Enum.GetValues(t).GetValue(0));
+                Commit(ef, v => set(v));
+                return ef;
+            }
+            if (typeof(UnityEngine.Object).IsAssignableFrom(t))
+            {
+                bool sceneType = typeof(Component).IsAssignableFrom(t) || t == typeof(GameObject);
+                ObjectField of = new ObjectField
+                {
+                    objectType = t,
+                    allowSceneObjects = sceneType,
+                    value = value as UnityEngine.Object
+                };
+                Commit(of, v => set(v));
+                return of;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Finds the terrain the node graph generated - a Terrain living under a
+        /// ChunkManager - so an empty Terrain field can adopt it instead of showing
+        /// "None". A hand-made terrain that is not a ChunkManager child is deliberately
+        /// ignored, which is what keeps an unrelated "Islands" terrain from being
+        /// picked up. Returns null when no generated world is in the scene.
+        /// </summary>
+        private static Terrain FindGeneratedTerrain()
+        {
+            ChunkManager[] managers =
+                UnityEngine.Object.FindObjectsByType<ChunkManager>(FindObjectsInactive.Exclude);
+
+            for (int i = 0; i < managers.Length; i++)
+            {
+                Terrain[] cells = managers[i].GetComponentsInChildren<Terrain>(true);
+                if (cells.Length > 0) return cells[0];
+            }
+            return null;
+        }
+
         /// <summary>
         /// Wires a field widget to the async regeneration path. The value is stored
         /// on every change so nothing is lost, but a regeneration is only queued on
-        /// commit - Enter, focus-out, or the end of a drag. That is what stops a
-        /// slider drag from firing one full generation per pixel moved.
+        /// commit - Enter, focus-out, or the end of a drag - AND only when the value
+        /// actually changed since focus was gained. That is what stops a slider drag
+        /// from firing one full generation per pixel moved, and - the bug this guard
+        /// fixes - stops merely clicking into a field to place the cursor and clicking
+        /// away again from regenerating the whole world for nothing. Clicking a node,
+        /// focusing a field, and leaving it untouched now costs zero generations.
         /// </summary>
-        private void Commit<T>(BaseField<T> field, Action<T> apply)
+        private void Commit<T>(BaseField<T> field, Action<T> apply, Func<bool> canApply = null)
         {
+            // Per-field: did the value actually change since this field gained focus?
+            // RegisterValueChangedCallback only fires when newValue != previousValue, so
+            // this flag is true only after a genuine edit, never on a bare focus/click.
+            bool dirtySinceFocus = false;
+
+            field.RegisterCallback<FocusInEvent>(_ => dirtySinceFocus = false);
+
             field.RegisterValueChangedCallback(evt =>
             {
+                if (canApply != null && !canApply()) return; // UC biome repair: detached rows must not dirty or regenerate the replacement list.
+                if (!dirtySinceFocus && owner != null && owner.Graph != null) Undo.RegisterCompleteObjectUndo(owner.Graph, "Edit UC node field"); // UC-T05-11: keyboard edits share scalar Undo without requiring a pointer click.
                 apply(evt.newValue);
                 Node.version++;
                 owner.MarkGraphDirty();
+                dirtySinceFocus = true;
             });
 
-            field.RegisterCallback<FocusOutEvent>(_ => owner.QueueRegenerate(Node));
+            field.RegisterCallback<FocusOutEvent>(_ =>
+            {
+                if (!dirtySinceFocus || (canApply != null && !canApply())) return;   // clicked in and out, changed nothing
+                dirtySinceFocus = false;
+                owner.QueueRegenerate(Node);
+            });
 
             field.RegisterCallback<KeyDownEvent>(evt =>
             {
                 if (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
                 {
-                    owner.QueueRegenerate(Node);
+                    if (dirtySinceFocus && (canApply == null || canApply()))
+                    {
+                        dirtySinceFocus = false;
+                        owner.QueueRegenerate(Node);
+                    }
                     evt.StopPropagation();
                 }
             });
 
             // A slider commits when the pointer is released, which is the drag
-            // equivalent of focus-out.
-            field.RegisterCallback<PointerCaptureOutEvent>(_ => owner.QueueRegenerate(Node));
+            // equivalent of focus-out - but only regenerate if the drag moved the value.
+            field.RegisterCallback<PointerCaptureOutEvent>(_ =>
+            {
+                if (!dirtySinceFocus || (canApply != null && !canApply())) return;
+                dirtySinceFocus = false;
+                owner.QueueRegenerate(Node);
+            });
 
             // Keep clicks inside a field from starting a node drag.
             field.RegisterCallback<PointerDownEvent>(evt => evt.StopPropagation());

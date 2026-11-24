@@ -46,6 +46,10 @@ namespace UniverseCreator.Nodes
     {
         public override NodeCategory Category { get { return NodeCategory.Texture; } }
 
+        /// <summary>UC-T07-10: native texture/material authoring defaults to the main thread; immutable CPU image operations explicitly declare Worker.</summary>
+        /// <remarks>GPU submission requires an explicit MainThreadGpu override and supported fallback/resource contracts.</remarks>
+        public override NodeExecutionDomain ExecutionDomain { get { return NodeExecutionDomain.MainThread; } }
+
         // ------------------------------------------------------------------
         //  Typed pulls
         //
@@ -80,6 +84,14 @@ namespace UniverseCreator.Nodes
         {
             return tile.PullInput(this, index, stop) as TextureRef;
         }
+
+        /// <summary>UC-T07-02: borrows immutable CPU image pixels without dereferencing a Unity object.</summary>
+        /// <param name="tile">Bound evaluation tile.</param>
+        /// <param name="index">Zero-based image input port.</param>
+        /// <param name="stop">Optional cancellation token.</param>
+        /// <returns>Image input or null for missing/incompatible input; no image allocation occurs.</returns>
+        protected TextureImageProduct GetInputImage(TileData tile, int index, StopToken stop)
+        { return tile.PullInput(this, index, stop) as TextureImageProduct; }
 
         protected UVTransform GetInputUV(TileData tile, int index, StopToken stop)
         {
@@ -156,8 +168,15 @@ namespace UniverseCreator.Nodes
         public override Port[] GetInputs() { return TexturePorts.SurfaceChainIn; }
         public override Port[] GetOutputs() { return TexturePorts.SurfaceOut; }
 
+        /// <summary>UC-T07-10: builds a copied material description after admitting the node's declared execution thread.</summary>
+        /// <param name="outputIndex">The sole surface output, zero.</param>
+        /// <param name="tile">Bound evaluation tile with typed upstream products and resource ownership.</param>
+        /// <param name="stop">Optional cooperative cancellation token.</param>
+        /// <returns>A fresh surface description, or null when cancelled.</returns>
+        /// <exception cref="System.InvalidOperationException">The calling thread cannot satisfy the declared native/CPU execution domain.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            GraphExecutionGuard.Require(this, ExecutionDomain, HasCpuFallback); // UC-T07-10: direct surface calls preserve the declared native/CPU boundary.
             SurfaceProduct upstream = GetInputSurface(tile, 0, stop);
             SurfaceProduct surface = upstream != null ? upstream.Copy() : new SurfaceProduct();
 
@@ -180,8 +199,15 @@ namespace UniverseCreator.Nodes
         public override Port[] GetInputs() { return SharedPorts.None; }
         public override Port[] GetOutputs() { return TexturePorts.LayerOut; }
 
+        /// <summary>UC-T07-10: builds a layer after admitting the native/CPU execution domain, preserving borrowed resource ownership.</summary>
+        /// <param name="outputIndex">The sole layer output, zero.</param>
+        /// <param name="tile">Bound evaluation tile with upstream layer/texture inputs.</param>
+        /// <param name="stop">Optional cooperative cancellation token.</param>
+        /// <returns>A layer description, or null when cancelled.</returns>
+        /// <exception cref="System.InvalidOperationException">The calling thread cannot satisfy the declared execution domain.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            GraphExecutionGuard.Require(this, ExecutionDomain, HasCpuFallback); // UC-T07-10: reject unsupported threads before native layer fields are examined.
             if (stop != null && stop.StopRequested) return null;
             return BuildLayer(tile, stop);
         }
@@ -204,8 +230,15 @@ namespace UniverseCreator.Nodes
         public override Port[] GetInputs() { return TexturePorts.SurfaceIn; }
         public override Port[] GetOutputs() { return SharedPorts.None; }
 
+        /// <summary>UC-T07-10: records an admitted surface output for later explicit Apply without mutating a renderer.</summary>
+        /// <param name="outputIndex">Terminal pull slot, zero.</param>
+        /// <param name="tile">Bound evaluation tile whose output bag receives the material description.</param>
+        /// <param name="stop">Optional cooperative cancellation token.</param>
+        /// <returns>Null; absent/cancelled inputs publish no output.</returns>
+        /// <exception cref="System.InvalidOperationException">The calling thread cannot satisfy the declared execution domain.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
+            GraphExecutionGuard.Require(this, ExecutionDomain, HasCpuFallback); // UC-T07-10: output consumers keep the same execution guard as evaluator calls.
             SurfaceProduct surface = GetInputSurface(tile, 0, stop);
             if (surface == null) return null;
             if (stop != null && stop.StopRequested) return null;

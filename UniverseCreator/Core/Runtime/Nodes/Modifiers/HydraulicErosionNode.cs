@@ -39,9 +39,47 @@ namespace UniverseCreator.Nodes.Modifiers
         /// <summary>Post-pass blur sigma in pixels.</summary>
         public float relax = 0.5f;
 
+        // RIV-1 guards (opt-in, default off = today's erosion exactly). From OCG's non-destructive
+        // erosion strategy: keep droplet erosion from carving the ocean floor or inventing peaks.
+        /// <summary>Floor cells that were ABOVE sea so erosion can never sink dry land below the waterline.</summary>
+        public bool respectSeaLevel = false;
+
+        /// <summary>Clamp each cell to at most its ORIGINAL height, so erosion only removes material (no invented peaks).</summary>
+        public bool nonDestructive = false;
+
+        /// <summary>Normalised sea height the sea-level guard floors land to (matches the output node's).</summary>
+        public float seaLevel = 0.35f;
+
+        // RIV-1b droplet pass (opt-in, default off = today's grid-only erosion exactly).
+        /// <summary>
+        /// Run a PARTICLE (droplet) pass after the grid solver. The grid solver carves globally
+        /// consistent drainage; droplets add the fine rills and alluvial fans it cannot. Off by
+        /// default, so every existing world erodes byte-identically.
+        /// </summary>
+        public bool useDropletPass = false;
+
+        /// <summary>Droplets to simulate at full resolution (scaled down by the coarse factor).</summary>
+        public int dropletCount = 20000;
+
+        /// <summary>Radius in cells of the droplet erosion brush.</summary>
+        public int dropletBrushRadius = 2;
+
+        /// <summary>
+        /// 1 = full resolution. 2+ erodes a downsampled field and adds the smooth delta back,
+        /// cutting droplet work by about the square of the factor. This is the mid-flagship
+        /// mobile lever; 2 is a good default there.
+        /// </summary>
+        public int dropletCoarseFactor = 2;
+
+        /// <summary>Spawn seed. The same seed reproduces the droplet pass bit for bit.</summary>
+        public int dropletSeed = 0;
 
         protected override void Modify(Matrix m, TileData tile, StopToken stop)
         {
+            // RIV-1: snapshot the source silhouette before eroding, so the guards below can tell
+            // what was land and cap the result to the original. Only when a guard is on.
+            float[] original = (respectSeaLevel || nonDestructive) ? (float[])m.arr.Clone() : null;
+
             Erosion.HydraulicSettings settings = new Erosion.HydraulicSettings
             {
                 iterations = Mathf.Clamp(iterations, 1, 32),
@@ -56,6 +94,46 @@ namespace UniverseCreator.Nodes.Modifiers
             // leaves the field partially eroded but still valid.
             Erosion.Hydraulic(m, settings, null, null, null,
                               stop != null ? (System.Func<bool>)(() => stop.StopRequested) : null);
+
+            // RIV-1b: the droplet pass runs AFTER the grid solver, on the drainage it carved -
+            // droplets following an already-consistent network cut rills along the real valleys
+            // instead of inventing their own competing ones.
+            if (useDropletPass)
+            {
+                DropletSettings ds = DropletSettings.Default;
+                ds.droplets = Mathf.Clamp(dropletCount, 0, 2000000);
+                ds.brushRadius = Mathf.Clamp(dropletBrushRadius, 0, 8);
+                ds.coarseFactor = Mathf.Clamp(dropletCoarseFactor, 1, 8);
+                ds.seed = dropletSeed;
+
+                DropletErosion.Run(m.arr, m.rect.size.x, m.rect.size.z, ds,
+                                   stop != null ? (System.Func<bool>)(() => stop.StopRequested) : null);
+            }
+
+            if (original != null)
+                ApplyErosionGuards(m.arr, original, Mathf.Clamp01(seaLevel), nonDestructive, respectSeaLevel);
+        }
+
+        /// <summary>
+        /// RIV-1 non-destructive + sea-level guards, as a pure array op so they are directly
+        /// testable. <paramref name="nonDestructive"/> caps each cell to its original height (erosion
+        /// only ever removes). <paramref name="respectSeaLevel"/> floors a cell that was ABOVE sea
+        /// back up to sea if erosion pushed it under - genuine sub-sea ground (original below sea) is
+        /// left alone, so the ocean floor keeps its depth.
+        /// </summary>
+        internal static void ApplyErosionGuards(float[] arr, float[] original, float sea,
+                                                bool nonDestructive, bool respectSeaLevel)
+        {
+            if (arr == null || original == null) return;
+            int n = Mathf.Min(arr.Length, original.Length);
+            for (int i = 0; i < n; i++)
+            {
+                float h = arr[i];
+                float o = original[i];
+                if (nonDestructive && h > o) h = o;                       // no invented peaks
+                if (respectSeaLevel && o >= sea && h < sea) h = sea;      // dry land never sinks under the sea
+                arr[i] = h;
+            }
         }
     }
 }

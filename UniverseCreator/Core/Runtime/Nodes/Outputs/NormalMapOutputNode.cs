@@ -18,7 +18,8 @@ namespace UniverseCreator.Nodes.Outputs
         public override NodeCategory Category { get { return NodeCategory.Output; } }
         public override string Tooltip { get { return "Write Sobel normals for custom mesh or shader workflows."; } }
 
-        public float strength = 1f;
+        /// <summary>Normal blend strength in 0..1; invalid values use 1. Native commits reconcile this optional output with final ground.</summary>
+        public float strength = 1f; // UC-T03-10: preserve the control through post-graph shaping.
 
         protected override void WriteOutput(Matrix src, TileData tile, StopToken stop)
         {
@@ -26,9 +27,10 @@ namespace UniverseCreator.Nodes.Outputs
             if (stop != null && stop.StopRequested) return;
 
             // Blend toward vertical when strength < 1.
-            if (strength < 0.99f)
+            float resolvedStrength = float.IsNaN(strength) || float.IsInfinity(strength) ? 1 : Mathf.Clamp01(strength); // UC-T03-10.
+            if (resolvedStrength < 1f)
             {
-                float t = Mathf.Clamp01(strength);
+                float t = resolvedStrength;
                 Vector3 up = Vector3.up;
 
                 for (int i = 0; i < normals.Length; i++)
@@ -38,6 +40,7 @@ namespace UniverseCreator.Nodes.Outputs
             }
 
             tile.outputs.normals = normals;
+            tile.outputs.normalStrength = resolvedStrength;
         }
     }
 }

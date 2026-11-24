@@ -55,10 +55,12 @@ namespace UniverseCreator.Editor.Windows
 
         private void CreateGUI()
         {
-            rootVisualElement.Add(BuildToolbar());
-
+            view?.Dispose(); rootVisualElement.Clear(); // UC-T05-02: domain reload/rebuilt UI retires its old binding.
             view = new UCGraphView();
+            rootVisualElement.Add(BuildToolbar());
+            view.EntryFilter = AcceptNode; // UC-T05-05: explicit main assets author terrain/water; legacy contents remain inspectable.
             view.style.flexGrow = 1f;
+            view.HostWindow = this;   // so the add-node picker opens over this window
             view.StructureChanged += RefreshChrome;
             rootVisualElement.Add(view);
 
@@ -69,6 +71,11 @@ namespace UniverseCreator.Editor.Windows
             RefreshChrome();
         }
 
+        private void OnDisable()
+        {
+            view?.Dispose(); view = null; // UC-T05-02: release native menu and shared edit subscriptions.
+        }
+
         // ------------------------------------------------------------------
         //  Toolbar
         // ------------------------------------------------------------------
@@ -76,6 +83,7 @@ namespace UniverseCreator.Editor.Windows
         private VisualElement BuildToolbar()
         {
             Toolbar bar = new Toolbar();
+            bar.Add(view.CreateNavigationToolbar()); // UC-T08-15: shared hand/pointer navigation.
 
             bar.Add(new ToolbarButton(() => { if (graph != null) view.ShowAddNodeMenu(); })
             { text = "Add Node" });
@@ -128,12 +136,25 @@ namespace UniverseCreator.Editor.Windows
             statusLabel.style.marginRight = 8f;
             bar.Add(statusLabel);
 
+            // A narrow window used to crush this bar: each ToolbarButton shrank
+            // below its own label until the names collided and clipped into one
+            // another ("Add Node" reading as "dd No", overlapping "Frame All").
+            // Stop every control from shrinking below its content, and let the bar
+            // wrap onto a second row instead of overlapping when the width runs out.
+            // A wide window still lays out as one row, so its look is unchanged.
+            foreach (VisualElement child in bar.Children())
+                child.style.flexShrink = 0f;
+            bar.style.flexWrap = Wrap.Wrap;
+            bar.style.height = StyleKeyword.Auto;
+
             return bar;
         }
 
         private void RefreshChrome()
         {
             bool loaded = graph != null;
+            if (view != null) view.Controller.AutomaticGeneration = !loaded || graph.Domain == UCGraphDomain.LegacyMixed ||
+                (graph.HasSupportedDomainMetadata && graph.Domain == UCGraphDomain.TerrainWater);
 
             if (emptyState != null)
                 emptyState.style.display = loaded ? DisplayStyle.None : DisplayStyle.Flex;
@@ -147,10 +168,17 @@ namespace UniverseCreator.Editor.Windows
             if (statusLabel != null)
             {
                 statusLabel.text = loaded
-                    ? graph.nodes.Count + " nodes  |  " + graph.connections.Count + " links"
+                    ? graph.nodes.Count + " nodes  |  " + graph.connections.Count + " links  |  " +
+                        (graph.Domain == UCGraphDomain.LegacyMixed ? "Legacy mixed graph — preserved for migration" :
+                         graph.Domain == UCGraphDomain.TerrainWater ? "Terrain / Water" : "Incompatible domain — preserved for inspection")
                     : string.Empty;
             }
         }
+
+        // UC-T05-05: inspecting an asset never deletes unsupported nodes or changes its saved domain.
+        private bool AcceptNode(NodeCatalogEntry entry) => graph != null && graph.HasSupportedDomainMetadata &&
+            (graph.Domain == UCGraphDomain.LegacyMixed ||
+             (graph.Domain == UCGraphDomain.TerrainWater && GraphDomainRules.Supports(entry.graphDomains, UCGraphDomain.TerrainWater)));
 
         // ------------------------------------------------------------------
         //  No-graph-loaded panel

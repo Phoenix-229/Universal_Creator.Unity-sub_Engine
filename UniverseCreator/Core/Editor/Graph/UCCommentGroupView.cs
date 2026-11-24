@@ -57,7 +57,7 @@ namespace UniverseCreator.Editor.GraphUI
             // Movable is what lets the view's SelectionDragger drag this frame;
             // Resizable is deliberately absent because the grip below does that job.
             capabilities |= Capabilities.Selectable | Capabilities.Movable |
-                            Capabilities.Deletable;
+                            Capabilities.Deletable | Capabilities.Copiable; // UC-T05-07: GraphView forwards selected frames to the shared clipboard serializer.
 
             ApplyTint();
 

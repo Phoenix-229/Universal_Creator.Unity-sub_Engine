@@ -30,12 +30,91 @@ using UnityEngine;
 
 namespace UniverseCreator.Nodes
 {
+    /// <summary>UC-T01-10: portable Unity object identity for one serialized field in an imported node.</summary>
+    [System.Serializable]
+    public sealed class NodeObjectReference
+    {
+        /// <summary>Serialized field path relative to the node, including array indices.</summary>
+        public string path;
+        /// <summary>Unity GlobalObjectId text, resolved only by the Editor on import.</summary>
+        public string globalId;
+    }
+
+    /// <summary>UC-T01-10: opaque imported node data retained until its original type is available.</summary>
+    /// <remarks>This is recovery data, never an executable replacement node. Payload units and fields belong to the original type.</remarks>
+    [System.Serializable]
+    public sealed class UnresolvedNodeRecord
+    {
+        /// <summary>Zero-based index of the preserved null slot in Graph.nodes.</summary>
+        public int slot;
+        /// <summary>Exact imported type identifier; empty for an explicitly empty slot.</summary>
+        public string type;
+        /// <summary>Unmodified node JSON, including unknown fields and object-reference information.</summary>
+        public string json;
+        /// <summary>Stable Unity asset/scene identities carried alongside the opaque payload.</summary>
+        public List<NodeObjectReference> objectReferences;
+        /// <summary>UC-T01-10: verified native original for a missing slot; null for JSON recovery.</summary>
+        public Graph nativeOriginal;
+        /// <summary>True for native recovery, including when its original asset is unavailable.</summary>
+        public bool nativeRecovery;
+        /// <summary>Zero-based slot in nativeOriginal before ordinary deletion moved the current slot.</summary>
+        public int nativeSlot;
+    }
+
     /// <summary>
     /// A procedural content graph: nodes + connections. Saved as a project asset,
     /// and read by GraphEvaluator to run the pull-based evaluation.
     /// </summary>
     public class Graph : ScriptableObject, ISerializationCallbackReceiver
     {
+        /// <summary>Current graph-domain metadata schema; zero denotes an unchanged legacy asset.</summary>
+        public const int CurrentDomainSchemaVersion = 1; // UC-T05-01: independent of the portable JSON container version.
+
+        [SerializeField, HideInInspector] private UCGraphDomain graphDomain = UCGraphDomain.LegacyMixed;
+        [SerializeField, HideInInspector] private int graphDomainSchemaVersion;
+
+        /// <summary>Saved domain identity, including unknown future numeric values retained for recovery.</summary>
+        public UCGraphDomain Domain => graphDomain;
+
+        /// <summary>Saved domain schema: zero is legacy, one is supported, and other values require recovery.</summary>
+        public int DomainSchemaVersion => graphDomainSchemaVersion;
+
+        /// <summary>Whether the saved metadata can be interpreted without guessing or changing authored data.</summary>
+        public bool HasSupportedDomainMetadata =>
+            (graphDomainSchemaVersion == 0 && graphDomain == UCGraphDomain.LegacyMixed) ||
+            (graphDomainSchemaVersion == CurrentDomainSchemaVersion && IsKnownDomain(graphDomain));
+
+        /// <summary>Empty for supported metadata; otherwise explains the retained schema/domain requiring recovery.</summary>
+        public string DomainDiagnostic => HasSupportedDomainMetadata ? string.Empty :
+            "Unsupported graph-domain metadata: schema " + graphDomainSchemaVersion + ", domain " + (int)graphDomain +
+            ". Preserve this asset and open it with a compatible UC version before execution or migration.";
+
+        /// <summary>Assigns supported domain metadata without changing nodes, wires, settings or world bindings.</summary>
+        /// <param name="domain">A declared UCGraphDomain value; LegacyMixed retains the mixed workflow.</param>
+        /// <exception cref="System.ArgumentOutOfRangeException">The requested domain is undeclared.</exception>
+        /// <exception cref="System.InvalidOperationException">Called outside the Unity main thread.</exception>
+        /// <remarks>UC-T05-01: main-thread authoring operation; callers own Undo and persistence. Never runs implicitly on load.</remarks>
+        public void SetDomain(UCGraphDomain domain)
+        {
+            GraphExecutionGuard.RequireMainThread("Graph domain authoring"); // UC-T05-01: metadata/index mutation belongs to the authoring thread.
+            if (!IsKnownDomain(domain)) throw new System.ArgumentOutOfRangeException(nameof(domain));
+            RestoreDomainMetadata(domain, CurrentDomainSchemaVersion);
+        }
+
+        // UC-T05-01: serializers preserve unsupported metadata verbatim; validation refuses to interpret it.
+        internal void RestoreDomainMetadata(UCGraphDomain domain, int schemaVersion)
+        {
+            graphDomain = domain; graphDomainSchemaVersion = schemaVersion;
+            compiledPlan = null;
+        }
+
+        private static bool IsKnownDomain(UCGraphDomain domain)
+        {
+            return domain == UCGraphDomain.LegacyMixed || domain == UCGraphDomain.TerrainWater ||
+                domain == UCGraphDomain.Vegetation || domain == UCGraphDomain.LightingClimateWeather ||
+                domain == UCGraphDomain.TextureMaterialShader;
+        }
+
         /// <summary>
         /// Flat list of all nodes in the graph. Unity's serialization system stores
         /// each Generator subclass via [SerializeReference] so polymorphism works.
@@ -43,12 +122,18 @@ namespace UniverseCreator.Nodes
         [SerializeReference]
         public List<Generator> nodes = new List<Generator>();
 
+        // UC-T01-08: only captured revisions attach indexes; live authoring keeps its mutable-list queries.
+        [System.NonSerialized] internal CompiledGraphPlan compiledPlan;
+
         /// <summary>
         /// All connections between nodes. Each entry links one output port to one
         /// input port. The evaluator walks backward from output nodes along these
         /// edges to pull dependencies.
         /// </summary>
         public List<Connection> connections = new List<Connection>();
+
+        /// <summary>UC-T01-10: unresolved JSON payloads associated with null node slots; never used for generation.</summary>
+        [HideInInspector] public List<UnresolvedNodeRecord> unresolvedNodes = new List<UnresolvedNodeRecord>();
 
         // The display name comes from ScriptableObject.name (i.e. the asset name),
         // so there is deliberately no `name` field here - declaring one would hide
@@ -81,6 +166,12 @@ namespace UniverseCreator.Nodes
         /// dead, whichever end it is. That sweep also collects edges left dangling by
         /// anything else, which Validate could report but not fix.
         /// </summary>
+        /// <returns>The number of missing node slots explicitly removed.</returns>
+        /// <remarks>
+        /// UC-O01 / UC-A06: destructive repair, never a serialization callback.
+        /// Call only after the author chooses to discard the missing nodes and their wires.
+        /// Ordinary saving/loading must preserve them so a restored node type can recover.
+        /// </remarks>
         public int PruneMissingNodes()
         {
             if (nodes == null)
@@ -89,15 +180,16 @@ namespace UniverseCreator.Nodes
                 return 0;
             }
 
-            // Fast path first. OnBeforeSerialize runs on every serialise, including
-            // the one the inspector does per repaint, so a healthy graph has to cost
-            // one scan and no allocation.
+            // UC-O01 / UC-A06: explicit repair of a healthy graph needs no allocation.
             int holes = 0;
             for (int i = 0; i < nodes.Count; i++)
                 if (nodes[i] == null) holes++;
             if (holes == 0) return 0;
 
+            compiledPlan = null; // UC-T01-08: explicit repairs replace the indexed revision.
             nodes.RemoveAll(n => n == null);
+            // UC-T01-11: only explicit repair discards the recoverable payloads.
+            unresolvedNodes.Clear();
 
             if (connections != null)
             {
@@ -112,24 +204,22 @@ namespace UniverseCreator.Nodes
             return holes;
         }
 
-        // Both directions. OnAfterDeserialize so nothing downstream ever meets a
-        // hole; OnBeforeSerialize so a save writes the graph without one. Pure
-        // managed list work, which is all these callbacks may do - no touching the
-        // UnityEngine.Object side, because OnAfterDeserialize can run off the main
-        // thread.
-        //
-        // Pruning here is not by itself enough to stop the warning: Unity keeps the
-        // missing type in a record beside the list, so the file still declares it.
-        // Tools > Universe Creator > Diagnostics > Repair Graphs clears that record;
-        // see GraphAssetUtility.RepairAll.
+        // UC-O01 / UC-A06: retain null slots and all wires during normal serialization.
+        // Unity keeps missing managed-reference payloads separately for type restoration.
+        // Removing their slots here makes a routine save/copy destructive. Validation
+        // already reports holes; only an explicitly chosen repair may discard them.
         void ISerializationCallbackReceiver.OnBeforeSerialize()
         {
-            PruneMissingNodes();
+            // Deliberately preserve authored data; this callback may run off the main thread.
         }
 
         void ISerializationCallbackReceiver.OnAfterDeserialize()
         {
-            PruneMissingNodes();
+            compiledPlan = null; // UC-T01-08: indexes belong to a prepared revision, never serialized state.
+            // Normalize absent containers only; never infer that an unresolved node was deleted.
+            if (nodes == null) nodes = new List<Generator>();
+            if (connections == null) connections = new List<Connection>();
+            if (unresolvedNodes == null) unresolvedNodes = new List<UnresolvedNodeRecord>();
         }
 
         // ------------------------------------------------------------------
@@ -140,6 +230,7 @@ namespace UniverseCreator.Nodes
         public Generator GetNodeById(string nodeId)
         {
             if (string.IsNullOrEmpty(nodeId)) return null;
+            if (compiledPlan != null) return compiledPlan.GetNode(nodeId);
             foreach (Generator n in nodes)
                 if (n != null && n.id == nodeId) return n;
             return null;
@@ -168,6 +259,7 @@ namespace UniverseCreator.Nodes
         /// </summary>
         public Connection GetInputConnection(string targetNodeId, int targetPortIndex)
         {
+            if (compiledPlan != null) return compiledPlan.GetInputConnection(targetNodeId, targetPortIndex);
             for (int i = connections.Count - 1; i >= 0; i--)
             {
                 Connection c = connections[i];
@@ -178,11 +270,32 @@ namespace UniverseCreator.Nodes
         }
 
         /// <summary>
+        /// Finds EVERY connection feeding the given input port, in list order. For a
+        /// single-connection port this is the one edge; for a multi-input (fan-in)
+        /// port it is all of them, which <see cref="GraphEvaluator.PullInputAll"/>
+        /// folds. Returns an empty list when the port is unconnected.
+        /// </summary>
+        public List<Connection> GetInputConnections(string targetNodeId, int targetPortIndex)
+        {
+            // UC-T01-08: public callers retain ownership of their mutable result list.
+            if (compiledPlan != null) return new List<Connection>(compiledPlan.GetInputEdges(targetNodeId, targetPortIndex));
+            List<Connection> result = new List<Connection>();
+            for (int i = 0; i < connections.Count; i++)
+            {
+                Connection c = connections[i];
+                if (c.targetNodeId == targetNodeId && c.targetPortIndex == targetPortIndex)
+                    result.Add(c);
+            }
+            return result;
+        }
+
+        /// <summary>
         /// Finds all connections originating from the given output port. Used when
         /// the evaluator needs to invalidate downstream nodes after a parameter change.
         /// </summary>
         public List<Connection> GetOutputConnections(string sourceNodeId, int sourcePortIndex)
         {
+            if (compiledPlan != null) return new List<Connection>(compiledPlan.GetOutputEdges(sourceNodeId, sourcePortIndex));
             List<Connection> result = new List<Connection>();
             foreach (Connection c in connections)
             {
@@ -190,6 +303,21 @@ namespace UniverseCreator.Nodes
                     result.Add(c);
             }
             return result;
+        }
+
+        /// <summary>
+        /// Counts the connections leaving one output port, without allocating a list. ENG-4
+        /// uses this to tell a SOLE consumer (safe to hand the product by reference for in-place
+        /// mutation) from a fan-out (must copy, since the same Matrix feeds other nodes).
+        /// </summary>
+        public int CountOutputConnections(string sourceNodeId, int sourcePortIndex)
+        {
+            if (compiledPlan != null) return compiledPlan.GetOutputEdges(sourceNodeId, sourcePortIndex).Count;
+            int n = 0;
+            for (int i = 0; i < connections.Count; i++)
+                if (connections[i].sourceNodeId == sourceNodeId &&
+                    connections[i].sourcePortIndex == sourcePortIndex) n++;
+            return n;
         }
 
         /// <summary>Returns true if any connection touches the given node.</summary>
@@ -221,34 +349,132 @@ namespace UniverseCreator.Nodes
         public Generator AddNode(Generator node)
         {
             if (node == null) return null;
+            compiledPlan = null; // UC-T01-08: supported topology edits invalidate indexes before querying.
             nodes.Add(node);
             return node;
         }
 
-        /// <summary>Removes a node and all connections touching it.</summary>
+        /// <summary>Removes the named live node and its wires, preserving unrelated missing nodes and recovery data.</summary>
+        /// <param name="nodeId">Exact authored node ID; null or empty is a no-op.</param>
+        /// <remarks>In the Editor, native missing types are retained in a verified recovery asset before moving slots.</remarks>
+        /// <exception cref="System.InvalidOperationException">A native original cannot be saved or verified; no node is removed.</exception>
         public void RemoveNode(string nodeId)
         {
-            // The `n == null` arm sweeps missing-type holes out at the same time -
-            // free, and it stops the lambda throwing on one.
-            nodes.RemoveAll(n => n == null || n.id == nodeId);
+            // UC-T01-10: deleting a healthy node must not destroy a missing plugin's slot.
+            if (string.IsNullOrEmpty(nodeId)) return;
+            compiledPlan = null; // UC-T01-08: deletion creates a new topology revision.
+#if UNITY_EDITOR
+            // UC-T01-10: Unity 6000.5 loses hidden type data on disk when a null slot
+            // moves, even through SerializedProperty. Preserve native bytes first.
+            if (UnityEditor.SerializationUtility.HasManagedReferencesWithMissingTypes(this))
+            {
+                if (GetNodeById(nodeId) == null) return;
+                PreserveNativeMissingSlots(UnityEditor.AssetDatabase.LoadAssetAtPath<Graph>(CreateNativeRecoveryOriginal()));
+            }
+#endif
+            for (int i = nodes.Count - 1; i >= 0; i--)
+            {
+                if (nodes[i] == null || nodes[i].id != nodeId) continue;
+                nodes.RemoveAt(i);
+                for (int r = 0; r < unresolvedNodes.Count; r++)
+                    if (unresolvedNodes[r].slot > i) unresolvedNodes[r].slot--;
+            }
             connections.RemoveAll(c => c.sourceNodeId == nodeId || c.targetNodeId == nodeId);
         }
 
+#if UNITY_EDITOR
+        // UC-T01-10: missing serializedData is a diagnostic summary, not a portable
+        // payload. A native asset retains binary/text formats and Unity references.
+        /// <summary>UC-T01-10/11: saves and verifies a native recovery original without moving missing slots.</summary>
+        /// <returns>Project-relative path of the new native asset, with the source filename retained.</returns>
+        /// <exception cref="System.InvalidOperationException">The graph is unsaved, or the copy cannot be verified.</exception>
+        /// <remarks>Editor main thread only. Saves current authored values; throws on filesystem/import failure before graph mutation.</remarks>
+        public string CreateNativeRecoveryOriginal()
+        {
+            string path = UnityEditor.AssetDatabase.GetAssetPath(this);
+            if (string.IsNullOrEmpty(path) || !path.EndsWith(".asset", System.StringComparison.OrdinalIgnoreCase))
+                throw new System.InvalidOperationException("Save the graph as an asset before deleting a node beside a missing native type.");
+            UnityEditor.AssetDatabase.SaveAssetIfDirty(this);
+            string folder = UnityEditor.AssetDatabase.GenerateUniqueAssetPath(path.Substring(0, path.Length - 6) + " Recovery");
+            string guid = UnityEditor.AssetDatabase.CreateFolder(System.IO.Path.GetDirectoryName(folder).Replace('\\', '/'), System.IO.Path.GetFileName(folder));
+            if (string.IsNullOrEmpty(guid)) throw new System.InvalidOperationException("Could not create a native graph recovery folder; no node was removed.");
+            string backup = folder + "/" + System.IO.Path.GetFileName(path);
+            System.IO.File.Copy(path, backup, false);
+            UnityEditor.AssetDatabase.ImportAsset(backup, UnityEditor.ImportAssetOptions.ForceUpdate);
+            Graph original = UnityEditor.AssetDatabase.LoadAssetAtPath<Graph>(backup);
+            if (original == null || original.nodes.Count != nodes.Count ||
+                UnityEditor.SerializationUtility.GetManagedReferencesWithMissingTypes(original).Length !=
+                UnityEditor.SerializationUtility.GetManagedReferencesWithMissingTypes(this).Length)
+                throw new System.InvalidOperationException("Native recovery verification failed; no node was removed from " + path);
+            return backup;
+        }
+
+        /// <summary>UC-T01-10/11: retains missing slots through a verified original instead of Unity's transient hidden records.</summary>
+        /// <param name="original">Saved native recovery graph with the same slot order; must differ from this graph.</param>
+        /// <exception cref="System.ArgumentException">The original is absent, unsaved or this graph itself.</exception>
+        /// <remarks>Editor main thread only, before deletion or after Undo. Marks this graph dirty; unavailable types remain non-executable.</remarks>
+        public void PreserveNativeMissingSlots(Graph original)
+        {
+            if (original == null || original == this || !UnityEditor.EditorUtility.IsPersistent(original) || original.nodes.Count != nodes.Count)
+                throw new System.ArgumentException("A separate saved native original is required.", nameof(original));
+            if (!UnityEditor.SerializationUtility.HasManagedReferencesWithMissingTypes(original)) return;
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (nodes[i] != null || unresolvedNodes.Exists(record => record.slot == i)) continue;
+                unresolvedNodes.Add(new UnresolvedNodeRecord { slot = i, type = "Native recovery slot",
+                    nativeOriginal = original, nativeSlot = i, nativeRecovery = true });
+            }
+            UnityEditor.SerializationUtility.ClearAllManagedReferencesWithMissingTypes(this);
+            UnityEditor.EditorUtility.SetDirty(this);
+        }
+#endif
+
         /// <summary>
-        /// Adds a connection. If the target input already has a connection (Module 1
-        /// inputs are single-connection), the old one is removed first. Rejects
-        /// connections that would create a cycle and returns false.
+        /// Adds a connection. A single-connection input keeps only the newest edge
+        /// (the old one is removed first - Module 1 last-write-wins); a multi-input
+        /// port (<see cref="Port.allowMultiple"/>) accumulates edges instead, so a
+        /// field can fan several sources into one merge. Rejects a connection that
+        /// would create a cycle, and an exact duplicate edge on a multi-input port,
+        /// returning false.
         /// </summary>
         public bool AddConnection(Connection conn)
         {
+            compiledPlan = null; // UC-T01-08: connection replacement changes ordering and consumer counts.
             if (conn.sourceNodeId == conn.targetNodeId) return false;
             if (WouldCreateCycle(conn.sourceNodeId, conn.targetNodeId)) return false;
 
-            // Remove any existing connection to the same input
-            connections.RemoveAll(c => c.targetNodeId == conn.targetNodeId &&
-                                       c.targetPortIndex == conn.targetPortIndex);
+            if (TargetInputAllowsMultiple(conn))
+            {
+                // Fan-in: keep every distinct edge, but never the exact same wire twice.
+                for (int i = 0; i < connections.Count; i++)
+                    if (connections[i].Equals(conn)) return false;
+            }
+            else
+            {
+                // Single-input: evict any existing edge into this port first.
+                connections.RemoveAll(c => c.targetNodeId == conn.targetNodeId &&
+                                           c.targetPortIndex == conn.targetPortIndex);
+            }
+
             connections.Add(conn);
             return true;
+        }
+
+        /// <summary>
+        /// True when the connection's target input port is declared as accepting
+        /// multiple incoming wires. Resolved from the live node's GetInputs(), so a
+        /// node that never opts in keeps the single-connection behaviour unchanged.
+        /// </summary>
+        private bool TargetInputAllowsMultiple(Connection conn)
+        {
+            Generator tgt = GetNodeById(conn.targetNodeId);
+            if (tgt == null) return false;
+
+            Port[] ins = tgt.GetInputs();
+            if (ins == null || conn.targetPortIndex < 0 || conn.targetPortIndex >= ins.Length)
+                return false;
+
+            return ins[conn.targetPortIndex].allowMultiple;
         }
 
         /// <summary>
@@ -280,14 +506,17 @@ namespace UniverseCreator.Nodes
         /// <summary>Removes a specific connection.</summary>
         public void RemoveConnection(Connection conn)
         {
+            compiledPlan = null; // UC-T01-08: disconnects invalidate captured indexes.
             connections.Remove(conn);
         }
 
         /// <summary>Clears all nodes and connections.</summary>
         public void Clear()
         {
+            compiledPlan = null; // UC-T01-08: no indexed node survives a clear.
             nodes.Clear();
             connections.Clear();
+            unresolvedNodes.Clear();
         }
 
         // ------------------------------------------------------------------
@@ -295,87 +524,17 @@ namespace UniverseCreator.Nodes
         // ------------------------------------------------------------------
 
         /// <summary>
-        /// Validates the graph and returns a list of error messages. Called by the
-        /// inspector and the chunking system before starting generation.
+        /// UC-T01-09: returns topology/type/cycle errors without repairing authored data.
         /// </summary>
+        /// <returns>Caller-owned error messages; empty for a valid graph. Portal fallback warnings are omitted.</returns>
+        /// <remarks>Admits all declared execution domains; dispatchers use GraphValidationReport with their narrower domain mask.</remarks>
         public List<string> Validate()
         {
+            // UC-T01-09: the legacy string API uses the same authoritative report as execution and the canvas.
+            GraphValidationReport report = GraphValidationReport.Analyze(this);
             List<string> errors = new List<string>();
-
-            // Check for duplicate node ids
-            HashSet<string> ids = new HashSet<string>();
-            foreach (Generator n in nodes)
-            {
-                if (n == null)
-                {
-                    errors.Add("A node slot is empty because its script was deleted or " +
-                               "renamed. Tools > Universe Creator > Diagnostics > " +
-                               "Repair Graphs clears it.");
-                    continue;
-                }
-                if (string.IsNullOrEmpty(n.id))
-                {
-                    errors.Add("Node has null or empty id.");
-                    continue;
-                }
-                if (ids.Contains(n.id))
-                    errors.Add("Duplicate node id: " + n.id);
-                ids.Add(n.id);
-            }
-
-            // Check for dangling connections
-            foreach (Connection c in connections)
-            {
-                Generator src = GetNodeById(c.sourceNodeId);
-                Generator tgt = GetNodeById(c.targetNodeId);
-
-                if (src == null)
-                {
-                    errors.Add("Connection references missing source node: " + c.sourceNodeId);
-                    continue;
-                }
-                if (tgt == null)
-                {
-                    errors.Add("Connection references missing target node: " + c.targetNodeId);
-                    continue;
-                }
-
-                Port[] srcOutputs = src.GetOutputs();
-                Port[] tgtInputs = tgt.GetInputs();
-
-                if (c.sourcePortIndex < 0 || c.sourcePortIndex >= srcOutputs.Length)
-                {
-                    errors.Add("Connection has out-of-range source port index: " + c);
-                    continue;
-                }
-                if (c.targetPortIndex < 0 || c.targetPortIndex >= tgtInputs.Length)
-                {
-                    errors.Add("Connection has out-of-range target port index: " + c);
-                    continue;
-                }
-
-                // Type check
-                if (srcOutputs[c.sourcePortIndex].type != tgtInputs[c.targetPortIndex].type)
-                {
-                    errors.Add("Type mismatch: " + c + " (" +
-                               srcOutputs[c.sourcePortIndex].type + " -> " +
-                               tgtInputs[c.targetPortIndex].type + ")");
-                }
-            }
-
-            // Check for at least one output node
-            bool hasOutputNode = false;
-            foreach (Generator n in nodes)
-            {
-                if (n is IOutputNode)
-                {
-                    hasOutputNode = true;
-                    break;
-                }
-            }
-            if (!hasOutputNode && nodes.Count > 0)
-                errors.Add("Graph has no output nodes (HeightOutput, SplatOutput, etc.).");
-
+            foreach (GraphDiagnostic diagnostic in report.Diagnostics)
+                if (diagnostic.Severity == GraphDiagnosticSeverity.Error) errors.Add(diagnostic.Message);
             return errors;
         }
     }

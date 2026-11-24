@@ -62,7 +62,9 @@ namespace UniverseCreator.TerrainSystem
         /// this scaled the span per ring (1/2/4) Unity refused every stitch and logged
         /// "…neighbor of the terrain has a different heightmap resolution. Stop
         /// neighboring." once per edge per pass, so the grid never seamed and the cracks
-        /// stayed. Resolution is therefore not the LOD dial - PixelErrorFor is.
+        /// stayed. Resolution is therefore not the LOD dial - the heightmap pixel error is,
+        /// derived per cell from the visual-acuity budget (L-49/L-50) by
+        /// ChunkManager.ApplyDensity and Geometry.TerrainDensityController.
         ///
         /// Kept as a method rather than deleted so callers keep a single place to ask,
         /// and so re-introducing per-ring resolution has to be a deliberate edit here.
@@ -70,28 +72,6 @@ namespace UniverseCreator.TerrainSystem
         public static int ResolutionFor(LODLevel level, int baseResolution)
         {
             return baseResolution;
-        }
-
-        /// <summary>
-        /// Screen-space error in pixels for a LOD class. This is Unity's native terrain
-        /// LOD: the renderer decimates each patch until its projected error reaches this
-        /// budget, continuously and per-patch, with no change to the stored heightfield.
-        /// Distant chunks tolerate more error and so draw far fewer triangles, which is
-        /// the saving the resolution divisor used to buy - minus the broken seams and
-        /// minus re-baking a cell every time it changes ring.
-        /// </summary>
-        public static float PixelErrorFor(LODLevel level, float basePixelError)
-        {
-            float scale;
-            switch (level)
-            {
-                case LODLevel.High: scale = 1f; break;
-                case LODLevel.Low: scale = 2f; break;
-                default: scale = 4f; break;   // Buffer
-            }
-
-            // Unity's own ceiling. Past 200 the setting is ignored rather than clamped.
-            return Mathf.Clamp(basePixelError * scale, 1f, 200f);
         }
 
         /// <summary>

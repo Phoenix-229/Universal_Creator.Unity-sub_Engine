@@ -25,10 +25,17 @@ using UniverseCreator.Optimization;
 
 namespace UniverseCreator.TerrainSystem
 {
-    public static class ScatterApplier
+    public static partial class ScatterApplier
     {
         // Channels that are detail layers rather than discrete instances.
         private const string DetailChannelPrefix = "detail_";
+
+        // Fixed, because the dither must be the same on every rebuild and on every
+        // machine. It is deliberately not derived from a graph seed: this decides a
+        // fraction of one blade inside one cell, and tying it to the world seed would
+        // make two worlds that differ only in seed disagree about grass totals for a
+        // reason no author could see.
+        private const int DetailDitherSeed = 24036583;
 
         /// <summary>
         /// Pushes the library's prototype definitions onto the TerrainData. Both
@@ -36,12 +43,24 @@ namespace UniverseCreator.TerrainSystem
         /// detailPrototypes drops every placed instance on that terrain, so doing
         /// it unconditionally would wipe the scatter on every regeneration pass.
         /// </summary>
-        public static void ApplyPrototypes(TerrainData data, ScatterPrototypeLibrary lib)
+        public static void ApplyPrototypes(TerrainData data, ScatterPrototypeLibrary lib,
+                                           UCVegetationSystemManager veg = null,
+                                           float chunkAltitudeM = 0f)
         {
             if (data == null || lib == null) return;
 
+            // UC-T06-08: validate shared settings/collision templates once before any native write.
+            var inspected = new HashSet<GameObject>();
+            foreach (var def in lib.trees)
+            {
+                def?.variation?.Validate();
+                if (def?.prefab != null && inspected.Add(def.prefab)) ValidateTreeCollisionParts(def.prefab);
+            }
+            foreach (var def in lib.shrubs) def?.variation?.Validate();
+            foreach (var def in lib.objects) def?.variation?.Validate();
+
             ApplyTreePrototypes(data, lib);
-            ApplyDetailPrototypes(data, lib);
+            ApplyDetailPrototypes(data, lib, veg, chunkAltitudeM);
             ApplyDetailWindClass(lib);
         }
 
@@ -100,19 +119,108 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>Shader that understands the vegetation class properties.</summary>
         public const string WindDetailShaderName = "UniverseCreator/WindDetail";
 
-        private static void ApplyTreePrototypes(TerrainData data, ScatterPrototypeLibrary lib)
+        /// <summary>Keyword that switches on the shader's own season handling.</summary>
+        public const string SeasonTintKeyword = "_SEASONTINT_ON";
+
+        /// <summary>
+        /// Whether this prototype resolves the season in its own shader, in which
+        /// case the CPU must not also write the seasonal prototype colours.
+        ///
+        /// Both halves have to be true. A material can only resolve the season if
+        /// the world is actually publishing the season globals, and those sit behind
+        /// their own switch - with them off the shader reads the zeroes that mean
+        /// "high summer, dry, no snow" and would hold the meadow in permanent June.
+        /// So if nobody is publishing, ownership stays on the CPU.
+        ///
+        /// On the material side the keyword is what decides it, not the
+        /// _SeasonTintEnable float, because the keyword is what the shader's #ifdef
+        /// actually reads. A material with the float raised but the keyword off
+        /// renders no season either.
+        ///
+        /// One renderer is enough. A prototype mixing our detail shader with another
+        /// gets the shader path, since the alternative double-applies the season to
+        /// the part that already handles it - too dark beats inconsistent.
+        /// </summary>
+        private static bool DetailShaderOwnsSeason(DetailPrototypeDef def, UCVegetationSystemManager veg)
         {
-            List<TreePrototype> wanted = new List<TreePrototype>(lib.trees.Count);
+            if (veg == null || !veg.publishSeasonGlobals) return false;
+
+            // Billboard-only prototypes have no prefab and therefore no material of
+            // ours, so they keep the CPU tint.
+            if (def == null || def.prefabMesh == null) return false;
+
+            Renderer[] renderers = def.prefabMesh.GetComponentsInChildren<Renderer>(true);
+            if (renderers == null) return false;
+
+            for (int r = 0; r < renderers.Length; r++)
+            {
+                Renderer rend = renderers[r];
+                if (rend == null) continue;
+
+                Material m = rend.sharedMaterial;
+                if (m == null || m.shader == null) continue;
+                if (m.shader.name != WindDetailShaderName) continue;
+
+                if (m.IsKeywordEnabled(SeasonTintKeyword)) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Library slot -> terrain prototype index, or -1 for a slot that has none.
+        ///
+        /// These two numbers are not the same one, and the difference is not cosmetic.
+        /// TerrainData holds only prototypes it can actually draw, so a library slot
+        /// with a null prefab contributes nothing and every slot after it shifts down
+        /// by one. Scatter nodes emit the LIBRARY slot, because that is the index an
+        /// author authored against. Feeding a library slot straight into
+        /// TreeInstance.prototypeIndex therefore plants the wrong species from the
+        /// first empty slot onward - and V-51 exists precisely because an empty slot
+        /// is a normal authoring state, not an impossible one.
+        ///
+        /// One helper, so the skip rule lives in one place: ApplyTreePrototypes builds
+        /// the array this maps into. If the two ever disagreed, the world would quietly
+        /// draw a pine where a birch was authored and nothing would report it.
+        /// </summary>
+        private static int[] BuildTreeSlotMap(ScatterPrototypeLibrary lib)
+        {
+            int[] map = new int[lib.trees.Count];
+            int next = 0;
 
             for (int i = 0; i < lib.trees.Count; i++)
             {
                 TreePrototypeDef def = lib.trees[i];
-                if (def == null || def.prefab == null) continue;
+                map[i] = (def != null && def.prefab != null) ? next++ : -1;
+            }
+
+            return map;
+        }
+
+        private static void ApplyTreePrototypes(TerrainData data, ScatterPrototypeLibrary lib)
+        {
+            int[] map = BuildTreeSlotMap(lib);
+
+            List<TreePrototype> wanted = new List<TreePrototype>(lib.trees.Count);
+
+            for (int i = 0; i < lib.trees.Count; i++)
+            {
+                if (map[i] < 0) continue;
+
+                TreePrototypeDef def = lib.trees[i];
 
                 TreePrototype p = new TreePrototype();
                 p.prefab = def.prefab;
                 p.bendFactor = Mathf.Max(0f, def.bendFactor);
                 wanted.Add(p);
+
+                // DEF-6: measure the prefab's own modelled height once, here, where we are
+                // demonstrably on the main thread (we are about to assign TerrainData). The
+                // applier needs it to turn a species' height in METRES into the heightScale
+                // MULTIPLIER Unity's tree renderer actually takes. Measured, never assumed -
+                // it is the buyer's model, not ours.
+                // UC-T06-07: re-registration also refreshes swapped/edited prototype geometry.
+                def.nativeHeightM = MeasureNativeHeightM(def.prefab);
             }
 
             TreePrototype[] current = data.treePrototypes;
@@ -121,9 +229,103 @@ namespace UniverseCreator.TerrainSystem
             data.treePrototypes = wanted.ToArray();
         }
 
-        private static bool SameTreeSet(TreePrototype[] current, List<TreePrototype> wanted)
+        /// <summary>
+        /// DEF-6. Turns a species' real mature height in METRES into the `heightScale` MULTIPLIER
+        /// Unity's tree renderer takes, given the prefab's own measured native height.
+        ///
+        /// Pure function so the sizing can be gated without a terrain, a prefab or a bake. Returns
+        /// <paramref name="drawnUnitScale"/> unchanged when either input is unusable, which is the
+        /// caller's "fall back to the authored unit-scale range" path.
+        ///
+        /// The authored range is preserved as PROPORTIONAL SPREAD, not discarded: the drawn value
+        /// is divided by the range's own midpoint, so a 0.8..1.25 range still varies each instance
+        /// by about -20%/+11% around its true height. An author who widens that range widens the
+        /// natural variation; one who sets it to a single value gets exact heights.
+        /// </summary>
+        internal static float ResolveHeightScale(float targetHeightM, float nativeHeightM,
+                                                 Vector2 authoredRange, float drawnUnitScale)
         {
-            if (current == null) return wanted.Count == 0;
+            if (targetHeightM <= 0f || nativeHeightM <= 1e-4f) return drawnUnitScale;
+
+            float lo  = Mathf.Min(authoredRange.x, authoredRange.y);
+            float hi  = Mathf.Max(authoredRange.x, authoredRange.y);
+            float mid = 0.5f * (lo + hi);
+
+            float spread = mid > 1e-4f ? drawnUnitScale / mid : 1f;
+            return (targetHeightM / nativeHeightM) * spread;
+        }
+
+        /// <summary>
+        /// DEF-6. The height in metres of a prefab as it was MODELLED, read off its meshes.
+        /// Returns 0 when it cannot be determined, which every caller must read as "fall back to
+        /// the authored unit-scale range" rather than as a height.
+        ///
+        /// MAIN THREAD ONLY - it touches the Unity object model (GameObject, MeshFilter, Mesh), so
+        /// it must never be called from a node's Generate/Modify, which run on worker Tasks. It is
+        /// called from prototype registration, which is already on the main thread because it is
+        /// about to assign TerrainData.
+        ///
+        /// Bounds are accumulated from each mesh's own `localToWorldMatrix` rather than read from
+        /// `Renderer.bounds`, because a prefab asset is not instantiated in a scene and its
+        /// renderer bounds are not meaningful. Each mesh's eight corners are transformed, so a
+        /// rotated or non-uniformly scaled child contributes its true extent instead of an
+        /// axis-aligned guess. Only the Y SPAN is returned, so any world translation cancels.
+        ///
+        /// THE ROOT'S OWN TRANSFORM IS DELIBERATELY INCLUDED. Measuring in the root's local space
+        /// would cancel the root's scale - and a prefab root scaled to 7 would measure as 1, so
+        /// every instance of it would come out seven times too small. The root's scale is part of
+        /// the prefab, and `heightScale` multiplies the whole prefab, so it has to be in the
+        /// divisor too.
+        ///
+        /// Inactive children are included: a billboard or a far LOD is still part of how tall the
+        /// model is, and excluding them would under-measure a prefab whose LOD0 happens to be
+        /// disabled in the asset.
+        /// </summary>
+        internal static float MeasureNativeHeightM(GameObject prefab)
+        {
+            if (prefab == null) return 0f;
+
+            MeshFilter[] filters = prefab.GetComponentsInChildren<MeshFilter>(true);
+            if (filters == null || filters.Length == 0) return 0f;
+
+            bool any = false;
+            float minY = float.MaxValue;
+            float maxY = float.MinValue;
+
+            for (int i = 0; i < filters.Length; i++)
+            {
+                MeshFilter mf = filters[i];
+                if (mf == null || mf.sharedMesh == null) continue;
+
+                Bounds b = mf.sharedMesh.bounds;
+                Matrix4x4 m = mf.transform.localToWorldMatrix;
+
+                Vector3 c = b.center;
+                Vector3 e = b.extents;
+
+                // All eight corners, so rotation and non-uniform scale are respected.
+                for (int k = 0; k < 8; k++)
+                {
+                    Vector3 corner = new Vector3(
+                        c.x + ((k & 1) == 0 ? -e.x : e.x),
+                        c.y + ((k & 2) == 0 ? -e.y : e.y),
+                        c.z + ((k & 4) == 0 ? -e.z : e.z));
+
+                    float y = m.MultiplyPoint3x4(corner).y;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    any = true;
+                }
+            }
+
+            if (!any) return 0f;
+
+            float h = maxY - minY;
+            return h > 1e-4f ? h : 0f;
+        }
+
+        private static bool SameTreeSet(TreePrototype[] current, List<TreePrototype> wanted)
+        {            if (current == null) return wanted.Count == 0;
             if (current.Length != wanted.Count) return false;
 
             for (int i = 0; i < current.Length; i++)
@@ -135,9 +337,21 @@ namespace UniverseCreator.TerrainSystem
             return true;
         }
 
-        private static void ApplyDetailPrototypes(TerrainData data, ScatterPrototypeLibrary lib)
+        /// <summary>UC-T06-13: shares native detail-prototype construction with the reference scene without writing shared source materials.</summary>
+        /// <param name="data">Owned native destination; replacing its prototype roster can clear its previous detail placement.</param>
+        /// <param name="lib">Borrowed detail definitions; empty slots retain their existing production collapse rules.</param>
+        /// <param name="veg">Optional appearance owner; null uses authored native sizes/colours.</param>
+        /// <param name="chunkAltitudeM">Finite world altitude in metres for seasonal appearance, when enabled.</param>
+        internal static void ApplyDetailPrototypes(TerrainData data, ScatterPrototypeLibrary lib,
+                                                  UCVegetationSystemManager veg,
+                                                  float chunkAltitudeM)
         {
             List<DetailPrototype> wanted = new List<DetailPrototype>(lib.details.Count);
+
+            // V-36/37/38. Resolved once for the chunk, not once per prototype: the
+            // season and the weather are world facts, and only the species envelope
+            // differs from one detail to the next.
+            bool seasonal = veg != null && veg.enableSeasonalPhenology;
 
             for (int i = 0; i < lib.details.Count; i++)
             {
@@ -173,7 +387,66 @@ namespace UniverseCreator.TerrainSystem
                 p.noiseSpread = Mathf.Max(0.001f, def.noiseSpread);
                 p.healthyColor = def.healthyColour;
                 p.dryColor = def.dryColour;
-                p.alignToGround = def.alignToGround ? 1f : 0f;
+                // VEG-GND1. Proportional, not binary. Unity's alignToGround is a 0-1 float and
+                // feeding it a hard 1 lays a blade flat against a steep hill - it reads as
+                // pressed down rather than growing. A partial lean seats the base on the ground
+                // while the blade still stands, which is the fault being fixed: grass held bolt
+                // upright on a slope lifts its base off the surface on the downhill side.
+                p.alignToGround = def.alignToGround ? Mathf.Clamp01(def.groundAlignStrength) : 0f;
+
+                if (seasonal && def.eco != null)
+                {
+                    Ecology.PhenologyState state = veg.PhenologyFor(def.eco, chunkAltitudeM);
+
+                    // V-37. Grass dies back to its winter height and returns to the
+                    // authored height in summer. Applied to both ends of the range so
+                    // the within-species variation survives the scaling.
+                    float hs = Ecology.Phenology.SeasonalHeightScale(
+                        def.eco.seasonalHeightScale, state.canopyFraction);
+
+                    p.minHeight = Mathf.Max(0.01f, p.minHeight * hs);
+                    p.maxHeight = Mathf.Max(p.minHeight, p.maxHeight * hs);
+
+                    // ONE OWNER FOR THE SEASON COLOUR, decided here in code rather
+                    // than by asking an author to remember to zero two properties.
+                    //
+                    // Unity's detail renderer delivers healthyColor/dryColor to the
+                    // shader as vertex colour, and the shader MULTIPLIES it into
+                    // albedo. A multiply cannot repigment: a green grass texture
+                    // carries almost no red for an autumn tint to scale, so this
+                    // path can only ever darken the sward toward dirty green. That
+                    // is the best a CPU tint can do through that renderer, and it is
+                    // what still runs for any prototype whose material is not ours.
+                    //
+                    // A material on UniverseCreator/WindDetail with _SEASONTINT_ON
+                    // does the same job properly - per pixel, hue rotated, and cured
+                    // tip-first along the blade from the same globals. Where that is
+                    // available the colour is left to it and the authored colours
+                    // pass through untouched, because writing both would apply the
+                    // season twice and land the meadow black in an autumn storm.
+                    //
+                    // Height is not in that argument. Only the CPU can resize a
+                    // prototype, so V-37 above applies either way.
+                    if (!DetailShaderOwnsSeason(def, veg))
+                    {
+                        // V-36/38. The healthy colour carries the season, rain and
+                        // snow. The dry colour is the same chain over the authored
+                        // dry tint, so Unity's own healthy/dry noise blend still has
+                        // two ends to work between instead of collapsing to one flat
+                        // colour.
+                        float wet = veg.ResolvedWetness;
+                        float snow = veg.SnowCoverFractionAt(chunkAltitudeM);
+                        float phase = veg.InterpolatedSeasonPhase;
+
+                        p.healthyColor = Ecology.Phenology.AppearanceColour(
+                            def.eco, phase, state, wet, snow);
+
+                        Color dry = Ecology.Phenology.WetDarken(def.dryColour, wet, def.eco.wetDarkening);
+                        p.dryColor = Ecology.Phenology.SnowBlend(
+                            dry, Ecology.Phenology.CanopySnowFraction(
+                                snow, def.eco.snowCanopyAccumulation, state.canopyFraction));
+                    }
+                }
 
                 // Padding keeps grass from poking through a carved tunnel mouth.
                 p.holeEdgePadding = 0f;
@@ -214,30 +487,97 @@ namespace UniverseCreator.TerrainSystem
         }
 
         /// <summary>
-        /// Commits every scatter channel for one chunk. Returns the GameObjects it
-        /// spawned so the caller can release them when the chunk is recycled;
-        /// trees and details need no such bookkeeping because the TerrainData owns
-        /// them and is overwritten on the next pass.
+        /// Commits every scatter channel for one chunk and records spawned objects
+        /// through the caller's list for exact region retirement. UC-T06-12
+        /// stages native trees/details, objects, draws and registration together;
+        /// application failure retains accepted resources and persistent edits.
+        ///
+        /// The vegetation manager arrives as a parameter rather than being looked up
+        /// here (V-54). ForWorld walks GetComponentInParent then GetComponentInChildren,
+        /// and this runs once per chunk per apply - on a streaming grid that is the same
+        /// hierarchy search repeated every time a cell lands, for an answer that cannot
+        /// change between cells. ChunkManager caches it exactly as it caches the wind
+        /// manager, and null stays a legitimate value: a world with no vegetation
+        /// manager scatters with pre-Module-3 behaviour rather than failing.
+        /// UC-T06-07: main-thread commit samples the supplied final TerrainData; procedural
+        /// contacts retain their authored offsets and keys, while unowned transforms remain fixed.
         /// </summary>
+        /// <param name="terrain">Native terrain whose position supplies the world-metre origin; null skips application.</param>
+        /// <param name="data">Committed TerrainData with final heights/holes; null skips application.</param>
+        /// <param name="outputs">Accepted channel lists/detail grids, read without changing procedural transforms; null skips application.</param>
+        /// <param name="lib">World prototype rosters and bounded render budgets; null skips application.</param>
+        /// <param name="spawnParent">Optional hierarchy parent; world placement and nested prefab transforms are preserved.</param>
+        /// <param name="instancing">Optional native draw owner; UC-T06-10 uses bounded GameObject placement when batching is unavailable or the prefab needs native LOD/rendering.</param>
+        /// <param name="instancingOwner">Process ownership token used to replace this region's previous draws and diagnostics; neighbouring tokens remain untouched.</param>
+        /// <param name="veg">Optional cached vegetation manager for removal, appearance, budgets and diagnostics.</param>
+        /// <param name="spawnedOut">Optional list receiving spawned GameObjects for exact later release.</param>
+        /// <exception cref="System.InvalidOperationException">Unresolved legacy removals or invalid prototype/query evidence prevents safe application.</exception>
         public static void Apply(Terrain terrain, TerrainData data, OutputBag outputs,
                                  ScatterPrototypeLibrary lib, Transform spawnParent,
                                  GPUInstancingManager instancing, int instancingOwner,
+                                 UCVegetationSystemManager veg,
                                  List<GameObject> spawnedOut)
         {
             if (terrain == null || data == null || outputs == null || lib == null) return;
+            // UC-T06-12: direct callers receive the same staged replacement used by chunk publication.
+            using (var replacement = PrepareReplacement(terrain, data, outputs, lib, spawnParent, instancing, instancingOwner, veg, spawnedOut))
+                replacement.Commit();
+        }
 
-            // Withdraw this chunk's previous instanced draws before adding new ones,
-            // or a recentred grid draws every prop twice.
-            if (instancing != null) instancing.ClearOwner(instancingOwner);
+        private static void ApplyCore(Terrain terrain, TerrainData data, OutputBag outputs,
+            ScatterPrototypeLibrary lib, Transform spawnParent, GPUInstancingManager instancing, int instancingOwner,
+            UCVegetationSystemManager veg, List<GameObject> spawnedOut, TerrainData committedGround)
+        {
 
-            ApplyPrototypes(data, lib);
-            ApplyDetailGrids(data, outputs, lib);
+            // The device's shadow-caster range, resolved once per chunk rather than
+            // once per instance. A species can ask for less than this but never more,
+            // so the budget travels down and EcoEnvelope clamps against it. (V-32)
+            float shadowBudgetM = -1f;
+            if (veg != null && veg.vegetationEnabled) shadowBudgetM = veg.shadowCasterDistanceMetres;
 
+            // V-58. Opens this chunk's registry entry, discarding whatever it held
+            // before. Here rather than inside each channel because a chunk is the unit
+            // that streams: the entry has to exist before the first channel reports,
+            // and it has to be replaced wholesale when a recentred grid re-applies the
+            // same owner id. instancingOwner is reused as the registry key on purpose -
+            // it is already this chunk's identity for the instancing manager one line
+            // above, and a second identity scheme would be one more thing to keep in
+            // step across a stream-out.
+            if (veg != null) veg.BeginChunkRegistration(instancingOwner);
+
+            // V-52. The zone tally is already complete: species assignment filled it
+            // during graph eval, long before this main-thread apply. Reported here,
+            // right after the entry is opened, rather than at the end - the empty-scatter
+            // return below would otherwise skip it, and it belongs to what this chunk
+            // contains, not to any one commit path. It is the ADMITTED planting (before
+            // the render budgets thin the trees, shrubs and objects further down), which
+            // is why it is read from the bag and not summed from the placed instances.
+            if (veg != null) veg.RegisterZones(instancingOwner, outputs.zoneHistogram);
+
+            // The chunk's own ground altitude, sampled once at its centre. Phenology
+            // is altitude-dependent (lapse rate), and a chunk is small enough that
+            // one figure per chunk is the right grain - a figure per instance would
+            // be exactly the per-instance ecology V-40 forbids. (V-35)
+            float chunkAltitudeM = 0f;
+            if (veg != null && veg.enableSeasonalPhenology)
+            {
+                Vector3 tp = terrain.GetPosition();
+                chunkAltitudeM = tp.y + committedGround.GetInterpolatedHeight(0.5f, 0.5f); // UC-T06-12: stage reads accepted final ground, never the blank detail container.
+            }
+
+            ApplyPrototypes(data, lib, veg, chunkAltitudeM);
+            var world = terrain.GetComponentInParent<UniverseCreatorObject>(true); // UC-T06-07/12/18: one lookup preserves ownership beneath inactive/staged hierarchies.
+            ApplyDetailGrids(data, outputs, lib, veg, instancingOwner, world,
+                new Rect(terrain.transform.position.x, terrain.transform.position.z, committedGround.size.x, committedGround.size.z)); // UC-T06-18: native detail intent is applied after quality/resampling.
+            var ground = new FinalGroundContext(terrain, committedGround, world != null ? WorldGraphWaterInput.Capture(world) : null, world); // UC-T06-12
+
+            // Returns with the chunk's registry entry open and empty, which is the
+            // honest state: this chunk applied and placed nothing.
             if (outputs.scatter == null || outputs.scatter.Count == 0) return;
 
             List<ScatterInstance> trees;
             if (outputs.scatter.TryGetValue("trees", out trees))
-                ApplyTrees(terrain, data, trees, lib);
+                ApplyTrees(terrain, data, trees, lib, veg, chunkAltitudeM, instancingOwner, ground);
 
             // Shrubs are their own channel because they are their own thing: a
             // trigger collider you can walk through, and a wind model that holds
@@ -245,23 +585,29 @@ namespace UniverseCreator.TerrainSystem
             // solid collider and grass-like motion, both wrong.
             List<ScatterInstance> shrubs;
             if (outputs.scatter.TryGetValue("shrubs", out shrubs))
-                ApplyShrubs(shrubs, lib, spawnParent, instancing, instancingOwner, spawnedOut);
+                ApplyShrubs(shrubs, lib, spawnParent, instancing, instancingOwner, spawnedOut,
+                            shadowBudgetM, veg, ground);
 
             int objectBudget = Mathf.Max(0, lib.maxObjectsPerChunk);
+            bool manualObjectsFirst = outputs.scatter.TryGetValue("objects", out var authoredObjects) && authoredObjects.Exists(item => item.manualPose);
+            if (manualObjectsFirst) objectBudget -= ApplyObjects(authoredObjects, lib, spawnParent, instancing, instancingOwner,
+                spawnedOut, objectBudget, shadowBudgetM, veg, ground); // UC-T06-18: reserve locked poses before other deposit channels spend the shared object budget.
 
             foreach (KeyValuePair<string, List<ScatterInstance>> kvp in outputs.scatter)
             {
                 string channel = kvp.Key;
                 if (channel == "trees" || channel == "grass" || channel == "shrubs") continue;
+                if (manualObjectsFirst && channel == "objects") continue;
                 if (channel.StartsWith(DetailChannelPrefix)) continue;
 
                 List<ScatterInstance> list = kvp.Value;
                 if (list == null || list.Count == 0) continue;
 
                 objectBudget -= ApplyObjects(list, lib, spawnParent, instancing, instancingOwner,
-                                             spawnedOut, objectBudget);
+                                             spawnedOut, objectBudget, shadowBudgetM, veg, ground);
                 if (objectBudget <= 0) break;
             }
+            ground.ReportManualConflicts(); // UC-T06-18: one bounded advisory per application; authored transforms remain fixed.
         }
 
         /// <summary>
@@ -272,7 +618,9 @@ namespace UniverseCreator.TerrainSystem
         /// is not knowable.
         /// </summary>
         private static void ApplyDetailGrids(TerrainData data, OutputBag outputs,
-                                             ScatterPrototypeLibrary lib)
+                                             ScatterPrototypeLibrary lib,
+                                             UCVegetationSystemManager veg,
+                                             int instancingOwner, UniverseCreatorObject world, Rect region)
         {
             if (outputs.detailLayers == null || outputs.detailLayers.Count == 0) return;
 
@@ -288,6 +636,14 @@ namespace UniverseCreator.TerrainSystem
             if (detailRes < 1) return;
 
             float scale = Mathf.Max(0f, lib.globalDetailDensityScale);
+
+            // V-58. Details are registered against the LIBRARY slot, because that is
+            // the index the inspector's detail list is drawn from and therefore the
+            // one an author is looking at. The grid itself is keyed by the terrain
+            // layer index, which is what Grass Detail and Grass Output author directly,
+            // so the two are reconciled here rather than either side changing meaning.
+            int[] slotMap = veg != null ? BuildDetailSlotMap(lib) : null;
+            int[] placed = veg != null ? new int[lib.details.Count] : null;
 
             foreach (KeyValuePair<int, int[,]> kvp in outputs.detailLayers)
             {
@@ -316,6 +672,21 @@ namespace UniverseCreator.TerrainSystem
                     float stepZ = (float)srcZ / detailRes;
                     float stepX = (float)srcX / detailRes;
 
+                    // A count is instances in ONE cell, so changing the cell size
+                    // changes what the number means. Four destination cells covering
+                    // one source cell must share its blades, not each inherit the full
+                    // figure - without this a node's blades per square metre silently
+                    // multiplies by the resolution ratio, which is the whole reason
+                    // the shipped grassPerSquareMetre field never matched the scene.
+                    float areaRatio = stepX * stepZ;
+
+                    // The remainder is dithered rather than rounded. At a quarter of a
+                    // blade per cell, rounding gives zero everywhere and a sparse
+                    // meadow disappears; a hash of the cell decides instead, so the
+                    // total is preserved and the same cells decide the same way on
+                    // every rebuild.
+                    Noise dither = new Noise(DetailDitherSeed);
+
                     for (int z = 0; z < detailRes; z++)
                     {
                         int sz = Mathf.Min(srcZ - 1, (int)(z * stepZ));
@@ -324,13 +695,111 @@ namespace UniverseCreator.TerrainSystem
                             int sx = Mathf.Min(srcX - 1, (int)(x * stepX));
                             int v = src[sz, sx];
                             if (v <= 0) continue;
-                            dst[z, x] = Mathf.Max(0, Mathf.RoundToInt(v * scale));
+
+                            float exact = v * scale * areaRatio;
+                            int whole = (int)exact;
+
+                            if (exact - whole > dither.Random(x, z)) whole++;
+
+                            if (whole > 0) dst[z, x] = whole;
                         }
                     }
                 }
 
-                data.SetDetailLayer(0, 0, layer, dst);
+                if (veg != null && world != null && veg.RemovedInstances.ManualIntentCount > 0)
+                {
+                    int manualSlot = SlotForLayer(slotMap, layer);
+                    if (manualSlot >= 0)
+                    {
+                        if (ReferenceEquals(dst, src)) dst = (int[,])dst.Clone(); // UC-T06-18: accepted procedural products remain immutable.
+                        veg.RemovedInstances.ApplyManualDetails(dst, world.ReadVegetationIdentity(), lib.details[manualSlot].persistentId, region);
+                    }
+                }
+                SetDetailLayerBounded(data, layer, dst); // UC-T02-04: cap each native detail upload too.
+
+                if (placed == null) continue;
+
+                // Summed from the grid that was actually written, not from the source
+                // the node emitted: the resample path rescales counts by cell area and
+                // dithers the remainder, so the two figures differ by design whenever
+                // the node's resolution is not the terrain's.
+                int slot = SlotForLayer(slotMap, layer);
+                if (slot >= 0) placed[slot] += SumGrid(dst);
             }
+
+            // Detail instances carry no colliders, no GameObjects and no instanced draws
+            // of ours - the terrain's own detail renderer submits them - so only the
+            // counts are reported.
+            FlushRegistration(veg, instancingOwner, UCScatterKind.Detail, placed, 0, 0, 0);
+        }
+
+        /// <summary>
+        /// Library slot -> terrain detail layer index, or -1 for a slot that has none.
+        /// Same compaction as trees: a detail slot with neither a mesh nor a billboard
+        /// contributes no prototype, and every slot after it shifts down.
+        ///
+        /// Unlike trees, nothing in the scatter path needs this to be correct - Grass
+        /// Detail and Grass Output author the terrain layer index directly, so the grid
+        /// side never consults the library. It exists only so a count can be reported
+        /// under the species an author is actually looking at. That asymmetry is worth
+        /// a validation row rather than a silent remap (V-51): an author who deletes a
+        /// detail prefab shifts which layer their grass node feeds, and only a warning
+        /// can tell them so.
+        /// </summary>
+        private static int[] BuildDetailSlotMap(ScatterPrototypeLibrary lib)
+        {
+            int[] map = new int[lib.details.Count];
+            int next = 0;
+
+            for (int i = 0; i < lib.details.Count; i++)
+            {
+                DetailPrototypeDef def = lib.details[i];
+
+                bool drawable = def != null
+                             && (def.prefabMesh != null || def.billboardTexture != null);
+
+                map[i] = drawable ? next++ : -1;
+            }
+
+            return map;
+        }
+
+        /// <summary>
+        /// Reverses <see cref="BuildDetailSlotMap"/> for one layer. A linear scan
+        /// because a library holds a handful of details and this runs once per layer
+        /// per chunk, where an inverse array would be one more thing to keep in step.
+        /// </summary>
+        private static int SlotForLayer(int[] slotMap, int layer)
+        {
+            if (slotMap == null) return -1;
+
+            for (int i = 0; i < slotMap.Length; i++)
+                if (slotMap[i] == layer) return i;
+
+            return -1;
+        }
+
+        /// <summary>
+        /// Total instances a detail grid asks the terrain to draw.
+        ///
+        /// One pass over an array that was just written and is still in cache, once per
+        /// layer per chunk build. That is affordable next to SetDetailLayer above it,
+        /// which marshals the same array into native memory - and it is the only honest
+        /// way to get the figure, because a count grid has no running total.
+        /// </summary>
+        private static int SumGrid(int[,] grid)
+        {
+            if (grid == null) return 0;
+
+            int rows = grid.GetLength(0);
+            int cols = grid.GetLength(1);
+            int total = 0;
+
+            for (int z = 0; z < rows; z++)
+                for (int x = 0; x < cols; x++)
+                    total += grid[z, x];
+
+            return total;
         }
 
         /// <summary>
@@ -342,7 +811,10 @@ namespace UniverseCreator.TerrainSystem
         /// </summary>
         private static void ApplyTrees(Terrain terrain, TerrainData data,
                                        List<ScatterInstance> instances,
-                                       ScatterPrototypeLibrary lib)
+                                       ScatterPrototypeLibrary lib,
+                                       UCVegetationSystemManager veg,
+                                       float chunkAltitudeM,
+                                       int instancingOwner, FinalGroundContext ground)
         {
             TreePrototype[] protos = data.treePrototypes;
             if (protos == null || protos.Length == 0)
@@ -362,14 +834,52 @@ namespace UniverseCreator.TerrainSystem
             // the prototype it resolves to can differ per instance.
             Noise variation = new Noise(20749);
 
+            // Everything below indexes by LIBRARY slot and translates to the terrain
+            // prototype index only at the point of writing the instance. See
+            // BuildTreeSlotMap for why conflating the two plants the wrong species.
+            int[] slotMap = BuildTreeSlotMap(lib);
+
+            // V-36. One seasonal colour per species per chunk, solved before the
+            // instance loop. Trees of one species standing on one chunk are in the
+            // same season at the same altitude, so solving inside the loop would be
+            // the same answer computed a thousand times.
+            Color[] seasonColour = null;
+            if (veg != null && veg.enableSeasonalPhenology)
+            {
+                seasonColour = new Color[lib.trees.Count];
+                for (int p = 0; p < lib.trees.Count; p++)
+                {
+                    Ecology.EcoEnvelope eco = lib.trees[p] != null ? lib.trees[p].eco : null;
+
+                    seasonColour[p] = eco != null
+                        ? veg.SeasonalAppearance(eco, chunkAltitudeM)
+                        : Color.white;
+                }
+            }
+
+            // V-58. Trees register instances and no overheads: a terrain tree is not a
+            // GameObject we spawned and not a collider we attached - the TerrainCollider
+            // generates those itself - so reporting either would be a guess.
+            int[] placed = veg != null ? new int[lib.trees.Count] : null;
+
             List<TreeInstance> outList = new List<TreeInstance>(instances.Count);
+            var appearanceSources = veg != null ? new List<TreePrototypeDef>(instances.Count) : null; // UC-T06-09: exact species provenance survives collapsed native prototype slots.
 
             for (int i = 0; i < instances.Count; i++)
             {
                 ScatterInstance inst = instances[i];
 
-                int protoIndex = inst.prototypeIndex;
+                int slot = inst.prototypeIndex;
+                if (slot < 0 || slot >= slotMap.Length) continue;
+
+                int protoIndex = slotMap[slot];
                 if (protoIndex < 0 || protoIndex >= protos.Length) continue;
+
+                // PERF-2: a felled tree stays felled. Trees are terrain instances rather
+                // than GameObjects, so "removed" means its TreeInstance is never written -
+                // which also means the TerrainCollider stops generating its trunk collider,
+                // exactly as if it had never grown.
+                if (veg != null && veg.RemovedInstances.IsRemoved(inst)) continue; // UC-T06-06: compare full keys; unresolved legacy matches require explicit migration.
 
                 Vector3 local = inst.position - tPos;
 
@@ -377,17 +887,20 @@ namespace UniverseCreator.TerrainSystem
                 float nz = local.z / tSize.z;
                 if (nx < 0f || nx > 1f || nz < 0f || nz > 1f) continue;
 
-                float ny = Mathf.Clamp01(local.y / tSize.y);
+                // UC-T06-07: altitude admission uses final ground rather than a stale worker Y.
+                if (!ground.TrySurface(inst.position, out float surfaceY, out Vector3 normal)) continue; // UC-T06-12: shared final normal also supplies slope admission.
+                float ny = (surfaceY - tPos.y) / tSize.y;
 
-                TreePrototypeDef def = protoIndex < lib.trees.Count ? lib.trees[protoIndex] : null;
-                if (def != null)
+                TreePrototypeDef def = lib.trees[slot];
+                if (!inst.manualPose && def?.variation != null) inst = def.variation.Apply(inst); // UC-T06-08/18: explicit saved poses keep their exact authored scale/yaw.
+                if (def != null && !inst.manualPose) // UC-T06-18: locked poses are explicit intent, preserving upright authoring after slope/altitude changes.
                 {
                     if (ny < def.minAltitude || ny > def.maxAltitude) continue;
 
                     // Slope from the terrain itself, not from the graph's heightfield:
                     // this is the surface the tree will actually stand on, after
                     // sculpt overrides and stitching.
-                    float steepness = data.GetSteepness(nx, nz);
+                    float steepness = Vector3.Angle(Vector3.up, normal); // UC-T06-12: final contact normal comes from committed ground, not staged detail storage.
                     if (steepness > def.maxSlope) continue;
                 }
 
@@ -404,6 +917,33 @@ namespace UniverseCreator.TerrainSystem
                     rh = Mathf.Lerp(Mathf.Min(def.heightScale.x, def.heightScale.y),
                                     Mathf.Max(def.heightScale.x, def.heightScale.y), r2);
 
+                    // DEF-6: IF THE SPECIES KNOWS HOW TALL IT IS, THE SPECIES WINS.
+                    //
+                    // `TreeInstance.heightScale` is a multiplier on the prefab's modelled size,
+                    // so an authored height in metres can only be honoured by dividing by the
+                    // prefab's own native height. Until now nothing did that division: the
+                    // allometry's real metres were dropped in SpeciesAssignment and this lerp -
+                    // 0.8..1.25 of whatever the prefab happened to be modelled at - was the only
+                    // thing deciding tree size. A species authored at 20-35 m and one authored at
+                    // 2 m therefore produced the same tree, and on a small prefab every tree was
+                    // tiny. That is the author's "see also the trees how little they are".
+                    //
+                    // The unit-scale range is NOT discarded when the species is known - it is
+                    // re-used as the natural per-instance spread (the `r2` draw already made it),
+                    // normalised about its own midpoint so it varies the real height by the same
+                    // proportion the author dialled instead of replacing it. Age/vigour spread is
+                    // already inside targetHeightM via Allometry, so this stays modest.
+                    //
+                    // Both guards matter: no target (geometric scatter, ecology off) and no
+                    // measured native height (prefab with no mesh) each fall back to the exact
+                    // previous behaviour, so no existing world changes except the one that was
+                    // wrong.
+                    if (inst.targetHeightM > 0f && def.nativeHeightM > 1e-4f)
+                    {
+                        rh = ResolveHeightScale(inst.targetHeightM, def.nativeHeightM,
+                                                def.heightScale, rh);
+                    }
+
                     // The node's own scale still counts, so a scatter node set to
                     // half scale halves the whole stand.
                     rw *= inst.scale.x;
@@ -416,21 +956,191 @@ namespace UniverseCreator.TerrainSystem
                 }
 
                 TreeInstance t = new TreeInstance();
+                if (inst.manualPose) { rw = inst.scale.x; rh = inst.scale.y; } // UC-T06-18: native manual tree scale bypasses procedural species/allometry ranges.
+                if (!ground.TrySeat(inst, def.prefab, new Vector3(Mathf.Max(0.01f, rw), Mathf.Max(0.01f, rh), Mathf.Max(0.01f, rw)),
+                    0f, 0f, out Vector3 seated, out Quaternion upright)) continue;
+                ny = (seated.y - tPos.y) / tSize.y; // UC-T06-07: retain intentional embedding below the terrain origin; never clamp root contact.
                 t.position = new Vector3(nx, ny, nz);
                 t.prototypeIndex = protoIndex;
                 t.widthScale = Mathf.Max(0.01f, rw);
                 t.heightScale = Mathf.Max(0.01f, rh);
-                t.rotation = inst.rotation.eulerAngles.y * Mathf.Deg2Rad;
-                t.color = Color.white;
+                t.rotation = upright.eulerAngles.y * Mathf.Deg2Rad;
+
+                // Per-instance tint is how the native tree renderer carries season.
+                // lightmapColor stays white: it scales baked lighting, and darkening
+                // it would put the season into the world's light rather than the leaf.
+                t.color = seasonColour != null ? seasonColour[slot] : Color.white;
                 t.lightmapColor = Color.white;
 
                 outList.Add(t);
+                appearanceSources?.Add(def); // UC-T06-09: one source per actually committed native tree.
+
+                if (placed != null) placed[slot]++;
             }
 
-            // snapToHeightmap false: the Y already came from the graph's heightfield
-            // plus any sculpt override, and re-snapping would re-sample a heightmap
-            // that may not be synced yet on this pass.
+            // UC-T06-07: final contact includes prototype pivot/embedding; Unity must not snap it away.
             data.SetTreeInstances(outList.ToArray(), false);
+            RecordTreeAppearance(data, appearanceSources); // UC-T06-09: weakly owned metadata never retains the TerrainData key.
+
+            FlushRegistration(veg, instancingOwner, UCScatterKind.Tree, placed, 0, 0, 0);
+        }
+
+        /// <summary>
+        /// Instance count per prototype for this chunk. Per prototype rather than per
+        /// chunk because "dense" has to mean dense in one species: twenty prototypes of
+        /// twenty instances each must not all batch on the strength of a crowd none of
+        /// them is actually in.
+        /// </summary>
+        private static int[] CountByPrototype(List<ScatterInstance> instances, int protoCount)
+        {
+            int[] counts = new int[Mathf.Max(1, protoCount)];
+            if (instances == null) return counts;
+
+            for (int i = 0; i < instances.Count; i++)
+            {
+                int p = instances[i].prototypeIndex;
+                if (p >= 0 && p < protoCount) counts[p]++;
+            }
+
+            return counts;
+        }
+
+        /// <summary>
+        /// Hands one channel's COMMITTED tally to the vegetation registry (V-58).
+        ///
+        /// Why a per-prototype array is filled during the commit loop and flushed here
+        /// rather than the loop calling RegisterInstances once per instance: the
+        /// registry folds a repeated prototype by scanning that chunk's species list,
+        /// so a per-instance call would be O(species) each time. A chunk carrying five
+        /// thousand shrubs across twenty prototypes would spend a hundred thousand
+        /// comparisons in bookkeeping alone, every stream-in, which on a phone is a
+        /// stutter for a number nobody is looking at. One call per prototype makes it
+        /// twenty. Overheads go the same way, accumulated as plain locals and reported
+        /// once.
+        ///
+        /// Never confuse this with <see cref="CountByPrototype"/>. That one counts what
+        /// the graph REQUESTED and exists to decide batching; this one carries what the
+        /// applier actually COMMITTED, after out-of-range indices, null prefabs, thinned
+        /// instances, exhausted budgets and failed instancing calls have all been walked
+        /// past. V-52's bar is that the numbers match a profiler capture, and only the
+        /// second of those two ever could.
+        /// </summary>
+        private static void FlushRegistration(UCVegetationSystemManager veg, int owner,
+                                              UCScatterKind kind, int[] placed,
+                                              int colliders, int gameObjects, int draws)
+        {
+            if (veg == null) return;
+
+            if (placed != null)
+            {
+                for (int i = 0; i < placed.Length; i++)
+                {
+                    if (placed[i] <= 0) continue;
+                    veg.RegisterInstances(owner, kind, i, placed[i]);
+                }
+            }
+
+            veg.RegisterChunkOverheads(owner, colliders, gameObjects, draws);
+        }
+
+        /// <summary>
+        /// Removes the colliders a prefab ships with, for the case where the policy says
+        /// None but the instance still had to spawn as a GameObject. An author who set
+        /// instancing to Never asked for a transform, not for collision the policy denies.
+        /// </summary>
+        private static void StripColliders(GameObject go)
+        {
+            Collider[] cols = go.GetComponentsInChildren<Collider>(true); // UC-T06-08: inactive foliage cannot escape its collision policy.
+            if (cols == null) return;
+
+            for (int i = 0; i < cols.Length; i++)
+            {
+                if (cols[i] == null) continue;
+                cols[i].enabled = false; // UC-T06-08: deferred destruction must not leave a live collider this frame.
+
+                if (Application.isPlaying) Object.Destroy(cols[i]);
+                else Object.DestroyImmediate(cols[i]);
+            }
+        }
+
+        /// <summary>
+        /// The order in which instances get first claim on a budget: fittest first,
+        /// and emission order between equals.
+        ///
+        /// A budget has to drop something. Dropping the last-emitted means the
+        /// retained set changes whenever the emission order does, so a rebuild
+        /// silently moves colliders and triggers around a chunk the author did not
+        /// touch. Ordering by suitability instead makes the drop mean something -
+        /// the worst-sited instances go - and makes it reproducible.
+        ///
+        /// Returns null when there is nothing worth reordering, and the caller then
+        /// walks the list directly rather than through an index array it would have
+        /// had to allocate. (V-34)
+        /// </summary>
+        private static int[] SuitabilityOrder(List<ScatterInstance> instances)
+        {
+            if (instances == null || instances.Count < 2) return null;
+
+            int n = instances.Count;
+
+            // Unscored throughout means a graph that placed these geometrically -
+            // river cobble, a wall of deadfall - and there is no fitness to sort by.
+            // Emission order is then the honest order, and sorting would only
+            // shuffle equals for nothing.
+            bool anyScored = false;
+            for (int i = 0; i < n; i++)
+            {
+                if (instances[i].manualPose || instances[i].suitability > 0f) { anyScored = true; break; } // UC-T06-18: locked manual poses spend their bounded reservation first.
+            }
+            if (!anyScored) return null;
+
+            int[] order = new int[n];
+            for (int i = 0; i < n; i++) order[i] = i;
+
+            // The index is part of the key rather than left to the sort to preserve:
+            // Array.Sort is unstable, and "some equally valid set" is not the same
+            // promise as "the same set every rebuild". Comparing the index last makes
+            // the ordering total, so the result cannot depend on the sort's internals.
+            List<ScatterInstance> src = instances;
+            System.Array.Sort(order, delegate (int a, int b)
+            {
+                if (src[a].manualPose != src[b].manualPose) return src[a].manualPose ? -1 : 1; // UC-T06-18: quality thinning cannot evict authored poses in favor of procedural fill.
+                float sa = src[a].suitability;
+                float sb = src[b].suitability;
+                if (sa > sb) return -1;
+                if (sa < sb) return 1;
+                return a - b;
+            });
+
+            return order;
+        }
+
+        /// <summary>
+        /// Silences the shadow casters of a species that is not to cast at all, on a
+        /// spawn that stayed a GameObject.
+        ///
+        /// Only the never-casts case is handled here. A distance-driven flip would
+        /// mean testing every spawned instance against the camera every frame, which
+        /// is the per-frame per-instance work § 6 is not allowed to do; the instanced
+        /// path gets the distance test instead, once per batch, where it is cheap.
+        /// A negative budget means nothing resolved one, and the prefab's own setting
+        /// is then left alone rather than overridden from a value nobody authored.
+        /// (V-32)
+        /// </summary>
+        private static void ApplyShadowPolicy(GameObject go, Ecology.EcoEnvelope eco,
+                                              float shadowBudgetM)
+        {
+            if (go == null || eco == null || shadowBudgetM < 0f) return;
+            if (eco.ResolveShadowDistanceM(shadowBudgetM) > 0f) return;
+
+            Renderer[] rs = go.GetComponentsInChildren<Renderer>();
+            if (rs == null) return;
+
+            for (int i = 0; i < rs.Length; i++)
+            {
+                if (rs[i] == null) continue;
+                rs[i].shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            }
         }
 
         /// <summary>
@@ -443,25 +1153,45 @@ namespace UniverseCreator.TerrainSystem
         ///         right trade for fill you will never reach - a collider on a bush
         ///         600 metres away is pure cost.
         ///
-        /// The collider budget, not the distance, decides which: whichever shrubs
-        /// come first in the chunk get the colliders. Scatter nodes emit roughly in
-        /// placement order, so that lands sensibly without a distance sort per frame.
+        /// The collider budget, not the distance, decides which - and the budget is
+        /// spent in suitability order, so the shrubs that keep their trigger are the
+        /// ones best suited to where they stand rather than the ones the graph
+        /// happened to emit first. That is what makes the retained set survive a
+        /// rebuild unchanged. (V-34)
         /// </summary>
         private static void ApplyShrubs(List<ScatterInstance> instances,
                                         ScatterPrototypeLibrary lib, Transform parent,
                                         GPUInstancingManager instancing, int instancingOwner,
-                                        List<GameObject> spawnedOut)
+                                        List<GameObject> spawnedOut, float shadowBudgetM,
+                                        UCVegetationSystemManager veg, FinalGroundContext ground)
         {
             if (instances == null || instances.Count == 0) return;
             if (lib.shrubs.Count == 0) return;
 
             int budget = Mathf.Max(0, lib.maxShrubsPerChunk);
             int colliderBudget = Mathf.Max(0, lib.shrubColliderBudget);
+            int[] counts = CountByPrototype(instances, lib.shrubs.Count);
+
+            // Both budgets above are spent in this order, so the shrubs that survive
+            // a tight chunk and the ones that keep their trigger are the best-sited
+            // rather than the first-emitted. (V-34)
+            int[] order = SuitabilityOrder(instances);
             int spawned = 0;
 
-            for (int i = 0; i < instances.Count && spawned < budget; i++)
+            // V-58. What this chunk COMMITTED, tallied as it commits. counts[] above
+            // cannot serve: it counts what the graph asked for, and the loop below
+            // walks past out-of-range indices, null prefabs, thinned instances and
+            // failed instancing calls. Registering the request rather than the
+            // commitment would put a number in the diagnostics panel that no amount
+            // of profiling could reproduce.
+            int[] placed = veg != null ? new int[lib.shrubs.Count] : null;
+            int placedGameObjects = 0;
+            int placedColliders = 0;
+            int placedDraws = 0;
+
+            for (int k = 0; k < instances.Count && spawned < budget; k++)
             {
-                ScatterInstance inst = instances[i];
+                ScatterInstance inst = instances[order != null ? order[k] : k];
 
                 int protoIndex = inst.prototypeIndex;
                 if (protoIndex < 0 || protoIndex >= lib.shrubs.Count) continue;
@@ -469,28 +1199,45 @@ namespace UniverseCreator.TerrainSystem
                 ShrubPrototypeDef def = lib.shrubs[protoIndex];
                 if (def == null || def.prefab == null) continue;
 
+                // PERF-2: this one was taken out of the world. Checked here rather than at
+                // emission so the node stays a pure function of the graph, and skipped
+                // before any spawn work so a cleared thicket costs nothing to rebuild.
+                if (veg != null && veg.RemovedInstances.IsRemoved(inst)) continue; // UC-T06-06
+
                 // Zero scale is how a scatter node marks an instance it thinned
                 // out - Shrub Scatter uses it to cut gaps between thickets. Spawning
                 // one would put an invisible trigger collider in the world.
                 if (inst.scale.x <= 0.0001f) continue;
+                if (!inst.manualPose && def.variation != null) inst = def.variation.Apply(inst); // UC-T06-08/18: locked shrub poses retain authored transforms.
 
-                Vector3 pos = inst.position;
-                if (def.embedDepth > 0.0001f)
-                    pos.y -= def.embedDepth * inst.scale.y;
+                // UC-T06-07: prototype slope/altitude controls are final-surface admission rules.
+                if ((!inst.manualPose && !ground.Admits(inst.position, def.minAltitude, def.maxAltitude, def.maxSlope)) ||
+                    !ground.TrySeat(inst, def.prefab, inst.scale, def.normalAlignment, def.embedDepth,
+                        out Vector3 pos, out Quaternion rot)) continue;
 
-                bool wantsCollider = def.spawnCollider && spawned < colliderBudget;
-                bool instanced = !wantsCollider && def.gpuInstanceWhenDense;
+                // A collider can only exist on a GameObject, so both answers are resolved
+                // together on the envelope - deciding them apart is how a species silently
+                // loses its collision. The budget is what makes the trade tolerable: near
+                // shrubs keep their trigger, the fill past it batches and keeps only the
+                // shader-side wind.
+                Ecology.ColliderPolicy collider;
+                bool instanced;
+                def.eco.ResolveRouting(counts[protoIndex], lib.gpuInstancingThreshold,
+                                       spawned < colliderBudget, out collider, out instanced);
+                if (inst.manualPose) { instanced = false; collider = def.eco.ResolveColliderPolicy(); } // UC-T06-18: explicit transforms remain selectable scene objects within their reserved budget.
 
                 if (instanced)
                 {
-                    if (instancing == null) continue;
-                    if (!AddInstancedDraw(instancing, instancingOwner, def.prefab,
-                                          pos, inst.rotation, inst.scale, parent))
-                        continue;
+                    instanced = AddInstancedDraw(instancing, instancingOwner, def.prefab,
+                                          pos, rot, inst.scale, parent, ground,
+                                          def.eco.ResolveShadowDistanceM(shadowBudgetM),
+                                          def.eco.ResolveCullDistanceM(), def); // UC-T06-10: validate the whole prefab before registering any of its draws.
+                    if (!instanced) collider = spawned < colliderBudget ? def.eco.ResolveColliderPolicy() : Ecology.ColliderPolicy.None;
                 }
-                else
+                if (instanced) placedDraws++;
+                else // UC-T06-10: unavailable batching preserves placement through the existing bounded spawn owner.
                 {
-                    GameObject go = Object.Instantiate(def.prefab, pos, inst.rotation, parent);
+                    GameObject go = Object.Instantiate(def.prefab, pos, rot, parent);
                     go.transform.localScale = Vector3.Scale(def.prefab.transform.localScale,
                                                             inst.scale);
 
@@ -506,28 +1253,56 @@ namespace UniverseCreator.TerrainSystem
                     // Average of the instance scale: a shrub scaled unevenly still
                     // needs one number for its trigger and its wind pivot height.
                     float scale = (inst.scale.x + inst.scale.y + inst.scale.z) / 3f;
-                    shrub.Configure(def, scale);
+                    shrub.Configure(def, scale, collider != Ecology.ColliderPolicy.None);
+                    int colliderCount = collider != Ecology.ColliderPolicy.None ? ground.ApplyCollisionParts(def.prefab, go, collider) : 0; // UC-T06-08: reuse per-prototype templates, count surviving shapes.
 
+                    ApplyShadowPolicy(go, def.eco, shadowBudgetM);
+
+                    ground.BindResource(go, inst); // UC-T06-12: scene ownership/identity survives manager-parented reload and exact retirement.
                     if (spawnedOut != null) spawnedOut.Add(go);
+
+                    placedGameObjects++;
+
+                    // Counted from the policy that was actually resolved, not from the
+                    // budget test above it: ResolveRouting can refuse a collider a
+                    // species never wanted even while the budget is still open.
+                    placedColliders += colliderCount; // UC-T06-08: actual owned shapes, including retained structural children.
                 }
+
+                if (placed != null) placed[protoIndex]++;
 
                 spawned++;
             }
+
+            FlushRegistration(veg, instancingOwner, UCScatterKind.Shrub, placed,
+                              placedColliders, placedGameObjects, placedDraws);
         }
 
         private static int ApplyObjects(List<ScatterInstance> instances,
                                         ScatterPrototypeLibrary lib, Transform parent,
                                         GPUInstancingManager instancing, int instancingOwner,
-                                        List<GameObject> spawnedOut, int budget)
+                                        List<GameObject> spawnedOut, int budget,
+                                        float shadowBudgetM,
+                                        UCVegetationSystemManager veg, FinalGroundContext ground)
         {
             if (lib.objects.Count == 0 || budget <= 0) return 0;
 
-            bool forceInstanced = instances.Count > Mathf.Max(1, lib.gpuInstancingThreshold);
+            int[] counts = CountByPrototype(instances, lib.objects.Count);
+
+            // Fittest first, so a chunk that runs out of object budget drops the
+            // worst-sited deposits rather than the last-emitted ones. (V-34)
+            int[] order = SuitabilityOrder(instances);
             int used = 0;
 
-            for (int i = 0; i < instances.Count && used < budget; i++)
+            // V-58, as in ApplyShrubs: committed, not requested.
+            int[] placed = veg != null ? new int[lib.objects.Count] : null;
+            int placedGameObjects = 0;
+            int placedColliders = 0;
+            int placedDraws = 0;
+
+            for (int k = 0; k < instances.Count && used < budget; k++)
             {
-                ScatterInstance inst = instances[i];
+                ScatterInstance inst = instances[order != null ? order[k] : k];
 
                 int protoIndex = inst.prototypeIndex;
                 if (protoIndex < 0 || protoIndex >= lib.objects.Count) continue;
@@ -535,83 +1310,105 @@ namespace UniverseCreator.TerrainSystem
                 ObjectPrototypeDef def = lib.objects[protoIndex];
                 if (def == null || def.prefab == null) continue;
 
+                // PERF-2: mined, chopped or erased - it stays gone across a chunk reload.
+                if (veg != null && veg.RemovedInstances.IsRemoved(inst)) continue; // UC-T06-06
+
                 // Embed sinks the object so a boulder sits in the ground rather than
                 // balancing on it. Measured against the object's own scale, so a big
                 // rock buries proportionally deeper.
-                Vector3 pos = inst.position;
-                if (def.embedDepth > 0.0001f)
-                    pos.y -= def.embedDepth * inst.scale.y;
+                // UC-T06-07: object/aquatic contacts use the same plugin-neutral committed ground owner.
+                if (!inst.manualPose && def.variation != null) inst = def.variation.Apply(inst); // UC-T06-08/18: locked object poses retain authored transforms.
+                if (!ground.TrySeat(inst, def.prefab, inst.scale, def.normalAlignment, def.embedDepth,
+                    out Vector3 pos, out Quaternion rot)) continue;
 
-                Quaternion rot = inst.rotation;
+                // Objects have no collider budget of their own - a boulder's collider is
+                // not optional the way a shrub's trigger is - so the budget reads as open
+                // here and the hierarchy threshold is what strips colliders. The count
+                // budget above is the one V-34 orders by.
+                Ecology.ColliderPolicy collider;
+                bool instanced;
+                def.eco.ResolveRouting(counts[protoIndex], lib.gpuInstancingThreshold,
+                                       true, out collider, out instanced);
+                if (inst.manualPose) { instanced = false; collider = def.eco.ResolveColliderPolicy(); } // UC-T06-18: preserve authored object transform/collision under quality changes.
 
-                if (forceInstanced || def.gpuInstanced)
+                if (instanced)
                 {
-                    if (instancing == null) continue;
-                    if (!AddInstancedDraw(instancing, instancingOwner, def.prefab,
-                                          pos, rot, inst.scale, parent))
-                        continue;
+                    instanced = AddInstancedDraw(instancing, instancingOwner, def.prefab,
+                                          pos, rot, inst.scale, parent, ground,
+                                          def.eco.ResolveShadowDistanceM(shadowBudgetM),
+                                          def.eco.ResolveCullDistanceM()); // UC-T06-10: object species cull policy reaches the actual submit owner too.
+                    if (!instanced) collider = def.eco.ResolveColliderPolicy();
                 }
-                else
+                if (instanced) placedDraws++;
+                else // UC-T06-10: native GameObject LOD/billboards retain unsupported content and its authored collision.
                 {
                     GameObject go = Object.Instantiate(def.prefab, pos, rot, parent);
                     go.transform.localScale = Vector3.Scale(def.prefab.transform.localScale,
                                                             inst.scale);
                     if (def.markStatic) go.isStatic = true;
+
+                    // The prefab ships whatever colliders the artist put on it. A policy of
+                    // None means this species is not to be collided with, so a spawn that
+                    // had to stay a GameObject still has to shed them.
+                    int colliderCount = ground.ApplyCollisionParts(def.prefab, go, collider); // UC-T06-08: shared commit cache routes actual spawned shapes.
+
+                    ApplyShadowPolicy(go, def.eco, shadowBudgetM);
+
+                    ground.BindResource(go, inst); // UC-T06-12: generic/deposit objects use the same owned scene-resource path.
                     if (spawnedOut != null) spawnedOut.Add(go);
+
+                    placedGameObjects++;
+
+                    // Counted after StripColliders has run, so the figure is what the
+                    // object is left holding rather than what its prefab shipped with.
+                    placedColliders += colliderCount; // UC-T06-08: report real surviving colliders rather than one policy guess per object.
                 }
+
+                if (placed != null) placed[protoIndex]++;
 
                 used++;
             }
+
+            FlushRegistration(veg, instancingOwner, UCScatterKind.Object, placed,
+                              placedColliders, placedGameObjects, placedDraws);
 
             return used;
         }
 
         /// <summary>
-        /// Queues one instanced draw per renderer on the prefab. Walking the prefab's
-        /// renderers rather than assuming a single MeshRenderer matters because a rock
-        /// prefab commonly carries a separate moss or snow mesh.
+        /// UC-T06-10: queues validated cached renderer/submesh/LOD templates; unsupported native content uses the existing GameObject fallback.
         /// </summary>
         private static bool AddInstancedDraw(GPUInstancingManager instancing, int owner,
                                              GameObject prefab,
                                              Vector3 pos, Quaternion rot, Vector3 scale,
-                                             Transform parent)
+                                             Transform parent, FinalGroundContext ground,
+                                             float shadowDistanceM = -1f,
+                                             float cullDistanceM = -1f,
+                                             ShrubPrototypeDef shrubAppearance = null) // UC-T06-09: one shared species block per compatible batch.
         {
-            MeshRenderer[] renderers = prefab.GetComponentsInChildren<MeshRenderer>();
-            if (renderers == null || renderers.Length == 0) return false;
-
-            int layer = parent != null ? parent.gameObject.layer : prefab.layer;
-            bool any = false;
-
-            for (int r = 0; r < renderers.Length; r++)
-            {
-                MeshRenderer mr = renderers[r];
-                if (mr == null) continue;
-
-                MeshFilter mf = mr.GetComponent<MeshFilter>();
-                if (mf == null || mf.sharedMesh == null) continue;
-                if (mr.sharedMaterial == null) continue;
-
-                // The child's own offset inside the prefab has to survive, or a
-                // two-part prefab collapses onto one origin.
-                Matrix4x4 childLocal = Matrix4x4.TRS(mr.transform.localPosition,
-                                                     mr.transform.localRotation,
-                                                     mr.transform.localScale);
-                Matrix4x4 world = Matrix4x4.TRS(pos, rot, scale) * childLocal;
-
-                instancing.AddInstance(owner, mf.sharedMesh, mr.sharedMaterial, world, layer,
-                                       mr.shadowCastingMode, mr.receiveShadows);
-                any = true;
-            }
-
-            return any;
+            return instancing != null && instancing.CanAcceptInstances &&
+                ground.TryAddInstancedPrefab(instancing, owner, prefab, pos, rot, scale, parent,
+                    shadowDistanceM, cullDistanceM, shrubAppearance);
         }
 
         /// <summary>
-        /// Destroys the GameObjects a chunk spawned. Trees and details are not listed
-        /// here because the TerrainData owns those and overwriting it releases them.
+        /// UC-T06-12: deactivates and destroys only the supplied owned GameObjects and drops their registry entry.
+        /// Trees and details are not listed here because the TerrainData owns those and
+        /// overwriting it releases them - but they ARE registered, which is why the
+        /// registry release below is unconditional. (V-58)
         /// </summary>
-        public static void Release(List<GameObject> spawned)
+        /// <param name="spawned">Owned object list, cleared after withdrawal; null releases only registration.</param>
+        /// <param name="veg">Optional vegetation registry owner; shared prototype assets remain borrowed.</param>
+        /// <param name="owner">Exact registration token; GPU draws require their manager's separate ClearOwner.</param>
+        public static void Release(List<GameObject> spawned,
+                                   UCVegetationSystemManager veg, int owner)
         {
+            // Before the early return, not after. A chunk that placed only trees and
+            // grass has an empty spawned list and a full registry entry, and returning
+            // early would leave that entry behind for a chunk that no longer exists -
+            // which is precisely the leak V-58's bar forbids.
+            if (veg != null) veg.ReleaseChunk(owner);
+
             if (spawned == null || spawned.Count == 0) return;
 
             for (int i = spawned.Count - 1; i >= 0; i--)
@@ -619,6 +1416,7 @@ namespace UniverseCreator.TerrainSystem
                 GameObject go = spawned[i];
                 if (go == null) continue;
 
+                go.SetActive(false); // UC-T06-12: defer destruction without leaving a retired collider active this frame.
                 if (Application.isPlaying) Object.Destroy(go);
                 else Object.DestroyImmediate(go);
             }
@@ -633,6 +1431,7 @@ namespace UniverseCreator.TerrainSystem
         public static void ClearTerrainScatter(TerrainData data)
         {
             if (data == null) return;
+            treeAppearanceSources.Remove(data); // UC-T06-12: appearance provenance retires with this native placement.
 
             if (data.treeInstanceCount > 0)
                 data.SetTreeInstances(new TreeInstance[0], false);
@@ -645,7 +1444,23 @@ namespace UniverseCreator.TerrainSystem
 
             int[,] empty = new int[res, res];
             for (int i = 0; i < protos.Length; i++)
-                data.SetDetailLayer(0, 0, i, empty);
+                SetDetailLayerBounded(data, i, empty); // UC-T02-04: clearing obeys the same upload bound.
+        }
+
+        // UC-T02-04: the surrounding scatter commit stays indivisible, but no detail upload carries an entire large grid.
+        private static void SetDetailLayerBounded(TerrainData data, int layer, int[,] values)
+        {
+            int width = values.GetLength(1), height = values.GetLength(0);
+            if (width == 0 || height == 0) return;
+            int rows = Mathf.Max(1, Mathf.Min(32, TerrainBuilder.MaximumUploadBytes / (width * sizeof(int))));
+            int[,] strip = null;
+            for (int z = 0; z < height; z += rows)
+            {
+                int count = Mathf.Min(rows, height - z);
+                if (strip == null || strip.GetLength(0) != count) strip = new int[count, width];
+                System.Buffer.BlockCopy(values, z * width * sizeof(int), strip, 0, count * width * sizeof(int));
+                data.SetDetailLayer(0, z, layer, strip);
+            }
         }
     }
 }

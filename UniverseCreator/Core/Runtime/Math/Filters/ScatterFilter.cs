@@ -69,6 +69,24 @@ namespace UniverseCreator
         /// <summary>Swaps pass for fail, so the band becomes an exclusion zone.</summary>
         public bool invert;
 
+        /// <summary>
+        /// When true the band is not a plateau but a continuous bell: weight is full
+        /// at the band's centre (the optimum) and tapers smoothly to either side,
+        /// reaching about 0.135 at each stated bound and trailing off beyond it. This
+        /// is the knissen HeightToDensity / NormalToDensity idea - a continuous
+        /// weighting function feeding a density channel rather than a pass/fail band -
+        /// and it is what makes a field thickest where the ground suits it best and
+        /// thinner toward the margins, instead of flat across the whole band and
+        /// cut at the edge. Off by default, so an existing band is unchanged: a graded
+        /// band is opt-in per node (ScatterNodeBase.gradeDensityByTerrain).
+        ///
+        /// The curve matches EcoMath.GaussianTolerance (sigma = half-width x 0.5), so
+        /// the terrain-only grading reads the same as the ecology layer's own niche
+        /// curve - one shape across the whole system, not two that disagree. The
+        /// falloff field is ignored while graded; the bell is its own soft edge.
+        /// </summary>
+        public bool graded;
+
         /// <summary>A disabled filter. Contributes a weight of 1 to everything.</summary>
         public static RangeFilter Off
         {
@@ -80,6 +98,7 @@ namespace UniverseCreator
                 f.max = 1f;
                 f.falloff = 0f;
                 f.invert = false;
+                f.graded = false;
                 return f;
             }
         }
@@ -93,6 +112,23 @@ namespace UniverseCreator
             f.max = max;
             f.falloff = falloff;
             f.invert = false;
+            f.graded = false;
+            return f;
+        }
+
+        /// <summary>
+        /// An enabled band that grades as a bell from its centre rather than passing
+        /// flat across its width. See <see cref="graded"/>.
+        /// </summary>
+        public static RangeFilter GradedBand(float min, float max)
+        {
+            RangeFilter f;
+            f.enabled = true;
+            f.min = min;
+            f.max = max;
+            f.falloff = 0f;
+            f.invert = false;
+            f.graded = true;
             return f;
         }
 
@@ -105,6 +141,22 @@ namespace UniverseCreator
             if (!enabled) return 1f;
 
             float w;
+
+            if (graded)
+            {
+                // A continuous bell centred on the band, not a plateau. optimum is the
+                // band centre and the tolerance its half-width, so the curve is full in
+                // the middle and about 0.135 at either stated bound - the same reading
+                // EcoMath.GaussianTolerance gives one tolerance from its optimum.
+                float optimum = (min + max) * 0.5f;
+                float halfWidth = (max - min) * 0.5f;
+                float sigma = halfWidth * 0.5f;          // ToleranceToSigma, inlined
+                if (sigma < 1e-4f) sigma = 1e-4f;        // never divide by zero
+
+                float d = value - optimum;
+                w = Mathf.Exp(-(d * d) / (2f * sigma * sigma));
+                return invert ? 1f - w : w;
+            }
 
             if (falloff <= 1e-6f)
             {

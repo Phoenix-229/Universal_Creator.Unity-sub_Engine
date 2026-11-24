@@ -1,0 +1,1031 @@
+// -----------------------------------------------------------------------------
+//  Universe Creator - Procedural Content Generation Toolkit
+//
+//  File:    UCSystemManagerInspectors.cs
+//  Purpose: The real inspectors for the lighting and vegetation managers.
+//
+//  WHY THESE REPLACE THE PLANNED-MODULE INSPECTOR
+//  ----------------------------------------------
+//  The inspector these supersede drew both managers entirely disabled, under a
+//  notice saying nothing read them. That was true when it was written and is not
+//  any more: time of day and the whole vegetation field set are read now. A
+//  disabled inspector over live fields takes the author's control away and hides
+//  the work, so each manager now declares which groups are live and which are
+//  still declared, and gets both in one inspector.
+//
+//  Weather is not here. It already has its own inspector, which draws the wind
+//  manager's settings inline through a nested editor - a second weather inspector
+//  would be a duplicate CustomEditor for one type, which is a compile error, and
+//  would lose the wind editor besides.
+//
+//  THE READOUTS ARE THE POINT
+//  --------------------------
+//  A field dump tells the author what they typed. The readouts tell them what it
+//  means: how long the day is, where the treeline lands, what spacing their
+//  density actually implies. Those are the numbers the laws act on, so showing
+//  them is what lets someone author a world rather than guess at one - and every
+//  readout is computed by the same accessor the generator will call, so an
+//  inspector that reads wrong is a generator that builds wrong, found early.
+//
+//  NO DIALOGS.
+// -----------------------------------------------------------------------------
+
+using UnityEngine;
+using UnityEditor;
+using UniverseCreator.Ecology;
+using UniverseCreator.Optimization;
+using UniverseCreator.TerrainSystem;
+using UniverseCreator.TerrainSystem.Lighting;
+using UniverseCreator.Editor.Utilities;   // AsyncProgressUI (Generate Vegetation button)
+
+namespace UniverseCreator.Editor.Inspectors
+{
+    // =========================================================================
+    //  LIGHTING
+    // =========================================================================
+
+    [CustomEditor(typeof(UCLightingSystemManager))]
+    [CanEditMultipleObjects]
+    public class UCLightingSystemManagerInspector : UnityEditor.Editor
+    {
+        public override void OnInspectorGUI()
+        {
+            UCInspectorUI.HeaderBar("Lighting System", "d_Light Icon",
+                UCInspectorUI.HeaderAmber, "settings live · tier resolved");
+
+            EditorGUILayout.Space(3);
+            EditorGUILayout.HelpBox(
+                "Time of Day is read from the WeatherSystem child, which owns the world " +
+                "clock. The settings below are authored biases and trims on the atmosphere " +
+                "physics - never replacements for it - and the performance envelope is one " +
+                "resolved product tier, not a second set of dials.",
+                MessageType.Info);
+            EditorGUILayout.Space(3);
+
+            serializedObject.Update();
+            SerializedObject so = serializedObject;
+
+            // UC-T08-15.11: expose the same world binding used by vegetation, without a second graph reference.
+            if (targets.Length == 1)
+                Section("LightingGraph", "Lighting Graph", () => DrawGraphAuthoring((UCLightingSystemManager)target));
+
+            Section("TimeAndSun", "Time and Sun", () =>
+            {
+                EditorGUILayout.PropertyField(so.FindProperty("lightingEnabled"));
+                EditorGUILayout.PropertyField(so.FindProperty("sun"));
+                EditorGUILayout.PropertyField(so.FindProperty("moonEnabled"));
+                if (targets.Length == 1) DrawTimeEditor((UCLightingSystemManager)target);
+                if (targets.Length == 1) DrawSolarReadout((UCLightingSystemManager)target);
+            });
+
+            Section("SkyAndAtmosphere", "Sky and Atmosphere", () =>
+            {
+                Field(so, "settings.turbidity");
+                Field(so, "settings.moonIntensity");
+                Field(so, "settings.moonInclinationDeg");
+                Field(so, "settings.sunDiscSizeDeg");
+                Field(so, "settings.moonDiscSizeDeg");
+                Field(so, "settings.enableStars"); // UC celestial repair: saved controls at their actual sky Inspector location.
+                Field(so, "settings.starBrightness");
+            });
+
+            Section("Clouds", "Clouds", () => {
+                Field(so, "settings.cloudSoftensShadows"); // UC-T08-08: cheaper cover softness; high tiers also use bounded planar shadow cookies.
+                Field(so, "settings.cloudShadowScale");
+            });
+
+            Section("Exposure", "Exposure and Tonemapping",
+                () => {
+                    Field(so, "settings.enableModuleTonemapping"); // UC midday repair: expose the existing opt-in, with serialized Undo handling.
+                    Field(so, "settings.exposureMode");
+                    if (so.FindProperty("settings.exposureMode").hasMultipleDifferentValues ||
+                        so.FindProperty("settings.exposureMode").enumValueIndex == (int)ExposureMode.Manual)
+                        Field(so, "settings.manualExposureEv"); // UC-T08-07: the manual selection now has a working saved EV control.
+                    Field(so, "settings.nightFloorLux");
+                });
+
+            // __UC_LIGHTING_SECTIONS_TAIL__
+            Section("Irradiance", "Irradiance Grid", () =>
+            {
+                Field(so, "settings.enableIrradianceGI"); // UC-T08-12: the saved opt-in must be authorable alongside its budget.
+                Field(so, "settings.probeSpacing");
+                Field(so, "settings.probesPerFrame");
+                Field(so, "settings.bounceStrength");
+                Field(so, "settings.multiBounce");
+                if (targets.Length == 1) DrawIrradianceReadout((UCLightingSystemManager)target);
+            });
+
+            Section("Shadows", "Shadows", () =>
+            {
+                EditorGUILayout.LabelField(
+                    "Owned by the resolved tier, not authored here.", EditorStyles.miniLabel);
+                if (targets.Length == 1) DrawShadowReadout((UCLightingSystemManager)target);
+            });
+
+            Section("ScreenSpace", "Screen-Space", () =>
+            {
+                Field(so, "settings.contactShadowLength");
+                Field(so, "settings.ssgiSampleCount");
+                Field(so, "settings.ssgiTemporalWeight");
+                if (targets.Length == 1) DrawScreenSpaceReadout((UCLightingSystemManager)target);
+            });
+
+            // UC midday repair: Night Floor Lux is authored once under Exposure and Tonemapping above.
+
+            Section("TierAndPerformance", "Tier and Performance", () =>
+            {
+                Field(so, "followAdaptiveQuality");
+                using (new EditorGUI.DisabledScope(
+                    so.FindProperty("followAdaptiveQuality").boolValue))
+                {
+                    Field(so, "lightingTierOverride");
+                }
+                if (targets.Length == 1) DrawTierReadout((UCLightingSystemManager)target);
+            });
+
+            Section("MemoryBudget", "Memory Budget", () =>
+            {
+                EditorGUILayout.LabelField(
+                    "Itemised, priced from the type that owns each allocation.",
+                    EditorStyles.miniLabel);
+                if (targets.Length == 1) DrawMemoryReadout((UCLightingSystemManager)target);
+            });
+
+            Section("DebugViews", "Debug Views", () => Field(so, "debugView"));
+
+            serializedObject.ApplyModifiedProperties();
+        }
+
+        private static void DrawGraphAuthoring(UCLightingSystemManager lighting)
+        {
+            var world = lighting.GetComponentInParent<UniverseCreatorObject>(true);
+            if (world == null)
+            {
+                EditorGUILayout.HelpBox("Place this manager under its UC world to bind lighting authoring.", MessageType.Info);
+                return;
+            }
+            var bindings = world.GetComponent<UCWorldGraphBindings>();
+            if (bindings == null)
+            {
+                EditorGUILayout.HelpBox("Add the world's shared graph binding to author lighting, climate and weather.", MessageType.Info);
+                if (GUILayout.Button("Add lighting graph binding")) bindings = Undo.AddComponent<UCWorldGraphBindings>(world.gameObject);
+            }
+            if (bindings != null) UCWorldGraphBindingsInspector.DrawLighting(bindings);
+        }
+
+        // A live section with the amber accent, its open state remembered under the
+        // same prefs root the grouped inspector uses, so this hand-built inspector
+        // reads and behaves exactly like the two that call UCGroupedInspector.
+        private const string PrefsKey = "UniverseCreator.Inspector.Lighting.";
+
+        private static void Section(string key, string title, System.Action body)
+        {
+            string prefs = PrefsKey + key;
+            bool open = EditorPrefs.GetBool(prefs, true);
+            bool next = UCInspectorUI.Section(open, title, UCInspectorUI.HeaderAmber);
+            if (next != open) EditorPrefs.SetBool(prefs, next);
+            if (!next) return;
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(6f);
+            EditorGUILayout.BeginVertical();
+
+            // Through Panel rather than called directly. A throw inside a group body
+            // would otherwise skip both End calls below as well, so the layout stack
+            // is left unbalanced and the whole component draws blank from then on -
+            // the failure UCGroupedInspector.Panel documents.
+            UCGroupedInspector.Panel(title, body);
+
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.Space(2);
+        }
+
+        // One settings sub-property, loud when its path is stale rather than silently
+        // vanishing - the same guard DrawGroup makes for a renamed field.
+        private static void Field(SerializedObject so, string path)
+        {
+            SerializedProperty p = so.FindProperty(path);
+            if (p == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "No serialized field at \"" + path + "\". The inspector is out of " +
+                    "date with the component.", MessageType.Error);
+                return;
+            }
+            EditorGUILayout.PropertyField(p, true);
+        }
+
+        /// <summary>
+        /// The world's time of day, edited here but stored on the weather manager and
+        /// nowhere else. The lighting system keeps no clock of its own: the slider
+        /// reads the resolved clock, and a change is written straight back through
+        /// <see cref="UCWeatherSystemManager.SetTime"/> so the single owning value on
+        /// the weather manager is the only thing that moves. With no weather system in
+        /// the world there is no owner to write to, so the control is shown disabled at
+        /// the documented default rather than inventing a second place to keep time.
+        /// </summary>
+        private static void DrawTimeEditor(UCLightingSystemManager l)
+        {
+            EditorGUILayout.Space(2);
+            UCWeatherSystemManager weather = UCWeatherSystemManager.FindForWorld(l.transform);
+
+            if (weather == null)
+            {
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    EditorGUILayout.IntSlider("Day of year",
+                        UCWeatherSystemManager.DefaultDayOfYear, 1, 365);
+                    EditorGUILayout.Slider("Time of day (h)",
+                        UCWeatherSystemManager.DefaultHourOfDay, 0f, 24f);
+                }
+                return;
+            }
+
+            var c = weather.ResolveClock();
+
+            EditorGUI.BeginChangeCheck();
+            int day = EditorGUILayout.IntSlider(
+                new GUIContent("Day of year", "Stored on the WeatherSystem clock, not here."),
+                c.dayOfYear, 1, 365);
+            float hour = EditorGUILayout.Slider(
+                new GUIContent("Time of day (h)", "Stored on the WeatherSystem clock, not here."),
+                c.localHour, 0f, 24f);
+            if (EditorGUI.EndChangeCheck())
+            {
+                Undo.RecordObject(weather, "Set world time");
+                weather.SetTime(day, hour);
+                EditorUtility.SetDirty(weather);
+                SceneView.RepaintAll();
+            }
+        }
+
+        /// <summary>
+        /// The solar geometry the world's latitude and tilt produce. Shown at both
+        /// solstices because that pair is what decides whether a world has a
+        /// growing season at all.
+        /// </summary>
+        private static void DrawSolarReadout(UCLightingSystemManager l)
+        {
+            EditorGUILayout.Space(4);
+
+            // W-04. When there is no weather system the numbers below are still
+            // real - they are the documented fallback - but an author reading them
+            // has no way to tell that from a latitude they set themselves, so it is
+            // said out loud rather than left to be discovered.
+            if (!l.HasClockSource)
+            {
+                EditorGUILayout.HelpBox(
+                    "No WeatherSystem in this world, so the clock below is the " +
+                    "documented default: latitude " +
+                    UCWeatherSystemManager.DefaultLatitudeDeg.ToString("0") +
+                    ", longitude " +
+                    UCWeatherSystemManager.DefaultLongitudeDeg.ToString("0") +
+                    ", day " + UCWeatherSystemManager.DefaultDayOfYear +
+                    " at " + UCWeatherSystemManager.DefaultHourOfDay.ToString("0") +
+                    ":00. Add a WeatherSystem to author it.",
+                    MessageType.Info);
+            }
+
+            EditorGUILayout.LabelField("Resolved solar geometry", EditorStyles.boldLabel);
+
+            UCGroupedInspector.Readout("Latitude / axial tilt",
+                l.LatitudeDegrees.ToString("0.0") + " / " +
+                l.AxialTiltDegrees.ToString("0.0") + " deg");
+
+            // Phase 0 is northern midwinter and 0.5 northern midsummer, matching
+            // the weather manager's season convention.
+            const float Midwinter = 0f;
+            const float Midsummer = 0.5f;
+
+            UCGroupedInspector.Readout("Declination, midwinter / midsummer",
+                l.SolarDeclinationDegrees(Midwinter).ToString("0.0") + " / " +
+                l.SolarDeclinationDegrees(Midsummer).ToString("0.0") + " deg");
+
+            UCGroupedInspector.Readout("Day length, midwinter / midsummer",
+                l.DayLengthHours(Midwinter).ToString("0.0") + " / " +
+                l.DayLengthHours(Midsummer).ToString("0.0") + " h");
+
+            UCGroupedInspector.Readout("Solar radiation, midwinter / midsummer",
+                l.ExtraterrestrialRadiationMjPerM2Day(Midwinter).ToString("0") + " / " +
+                l.ExtraterrestrialRadiationMjPerM2Day(Midsummer).ToString("0") +
+                " MJ/m2/day");
+
+            UCGroupedInspector.Readout("Warm slope faces",
+                l.WarmAspectDegrees.ToString("0") + " deg (" +
+                (l.LatitudeDegrees >= 0f ? "south" : "north") + ")");
+
+            if (l.AxialTiltDegrees <= 0f)
+            {
+                EditorGUILayout.HelpBox(
+                    "Axial tilt is zero, so this world has no seasons: every day is the " +
+                    "same length at every latitude and nothing seasonal will vary.",
+                    MessageType.Warning);
+            }
+        }
+
+        /// <summary>
+        /// The bake cost the current world and spacing imply, shown before a bake the
+        /// same way V-29 shows detail memory: a probe count and the megabytes it uploads,
+        /// both exact functions of the world size and the resolved spacing, so the figure
+        /// an author reads is the figure the driver will allocate.
+        /// </summary>
+        private static void DrawIrradianceReadout(UCLightingSystemManager l)
+        {
+            EditorGUILayout.Space(2);
+            if (l.World == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "Loose in a scene with no world to size against, so no grid figure can " +
+                    "be shown. Parent this under a Universe Creator world.",
+                    MessageType.Info);
+                return;
+            }
+
+            UCGroupedInspector.Readout("Probes (grid total)",
+                l.EstimatedProbeCount.ToString("N0"));
+            UCGroupedInspector.Readout("Irradiance memory",
+                (l.EstimatedIrradianceBytes / (1024f * 1024f)).ToString("0.0") + " MB GPU");
+            UCGroupedInspector.Readout("Pending / hard probe limit", l.PendingIrradianceProbes + " / " + l.IrradianceProbeLimit);
+            EditorGUILayout.HelpBox(!l.SupportsIrradianceVolumes ? "This graphics device lacks the required volume/half-float formats: cached sky ambient is used." : l.EstimatedProbeCount > l.IrradianceProbeLimit ?
+                "Grid exceeds the tier's hard limit: cached sky ambient is used. Increase probe spacing or reduce world extent." :
+                "Probe refills are paced at 1800/s and capped per frame. Changed whole-volume uploads run at most 4/s; their cost is indivisible and needs device measurement.", MessageType.Info);
+        }
+
+        /// <summary>The shadow envelope the resolved tier sets. Read-only because the
+        /// tier owns it: cascades, distance and atlas size are not authored here.</summary>
+        private static void DrawShadowReadout(UCLightingSystemManager l)
+        {
+            LightingTierSettings t = l.ResolvedTierSettings;
+            UCGroupedInspector.Readout("Cascades", t.cascadeCount.ToString());
+            UCGroupedInspector.Readout("Shadow distance", t.shadowDistance.ToString("0") + " m");
+            UCGroupedInspector.Readout("Atlas resolution",
+                t.shadowAtlasResolution.ToString() + " px");
+            UCGroupedInspector.Readout("Soft shadows", t.softShadows.ToString());
+            EditorGUILayout.HelpBox("These are requested tier limits. Actual cascades, distance, atlas and soft-shadow support belong to the shared URP pipeline asset; UC does not change that asset per world.", MessageType.Info);
+        }
+
+        /// <summary>Which screen-space passes the resolved tier runs. The dials above set
+        /// their look; the tier decides whether they run at all.</summary>
+        private static void DrawScreenSpaceReadout(UCLightingSystemManager l)
+        {
+            LightingTierSettings t = l.ResolvedTierSettings;
+            UCGroupedInspector.Readout("Screen-space GI",
+                t.screenSpaceGI ? "on, " + t.ssgiSampleCount + " rays" : "off");
+            UCGroupedInspector.Readout("Contact shadows", t.contactShadows ? "on" : "off");
+        }
+
+        /// <summary>The tier lighting resolves to now, and the probe-spacing scale it
+        /// applies to the authored spacing.</summary>
+        private static void DrawTierReadout(UCLightingSystemManager l)
+        {
+            EditorGUILayout.Space(2);
+            UCGroupedInspector.Readout("Resolved tier",
+                l.ResolvedTier.ToString() +
+                (l.followAdaptiveQuality ? " (from AdaptiveQuality)" : " (pinned)"));
+            UCGroupedInspector.Readout("Probe spacing scale",
+                l.ResolvedTierSettings.probeSpacingScale.ToString("0.00") + "x");
+        }
+
+        // The stated reference the two screen-space rows are priced at, so a
+        // resolution-dependent buffer reads as one honest number rather than "it
+        // depends". A device running higher scales these linearly.
+        private const int MemRefWidth = 1920;
+        private const int MemRefHeight = 1080;
+
+        // The stated mid-range ceiling this readout flags against. A lighting system
+        // that quietly costs more than this on a 6 GB phone has failed even inside its
+        // frame budget, so the figure is checked in the inspector, not left to a bake.
+        private const long MidRangeMemoryCeilingBytes = 48L * 1024L * 1024L;
+
+        /// <summary>
+        /// Every lighting allocation, itemised, each priced from the type that owns it
+        /// so the figure matches what the driver reserves rather than a restated guess:
+        /// the sky LUT and cloud tile are fixed constants, the probe rows scale with the
+        /// resolved grid, and the two screen-space targets are shown at a stated
+        /// reference resolution and only when the resolved tier actually runs them. The
+        /// mid-range total is checked against a stated ceiling. (S-65)
+        /// </summary>
+        private static void DrawMemoryReadout(UCLightingSystemManager l)
+        {
+            EditorGUILayout.Space(2);
+            LightingTierSettings t = l.ResolvedTierSettings;
+            const float MB = 1024f * 1024f;
+
+            long probes = l.EstimatedProbeCount;
+            long skyLut = SkyLut.ByteSize;
+            long cloudNoise = CloudNoiseBaker.ByteSize;
+            long probeManaged = probes * IrradianceProbe.ManagedBytes;
+            long probeGpu = l.EstimatedIrradianceBytes;
+
+            long contact = t.contactShadows ? (long)MemRefWidth * MemRefHeight * 1L : 0L;
+            long ssgi = t.screenSpaceGI
+                ? 3L * ((MemRefWidth / 2) * (MemRefHeight / 2)) * 8L   // trace + 2 history, RGBAHalf
+                : 0L;
+
+            UCGroupedInspector.Readout("Sky LUT (32x16 RGBAHalf)",
+                (skyLut / 1024f).ToString("0.#") + " KB");
+            UCGroupedInspector.Readout("Cloud noise (256^2 RGBA32)",
+                (cloudNoise / 1024f).ToString("0.#") + " KB");
+            UCGroupedInspector.Readout("Probe array (managed)",
+                (probeManaged / MB).ToString("0.00") + " MB  (" + probes.ToString("N0") + " x " +
+                IrradianceProbe.ManagedBytes + " B)");
+            UCGroupedInspector.Readout("Probe volumes (2x Texture3D RGBAHalf)",
+                (probeGpu / MB).ToString("0.00") + " MB GPU");
+            UCGroupedInspector.Readout("Contact shadow (R8 @ " + MemRefWidth + "x" + MemRefHeight + ")",
+                t.contactShadows ? (contact / MB).ToString("0.00") + " MB" : "off (tier)");
+            UCGroupedInspector.Readout("SSGI (half-res RGBAHalf @ ref)",
+                t.screenSpaceGI ? (ssgi / MB).ToString("0.00") + " MB" : "off (tier)");
+
+            long total = skyLut + cloudNoise + probeManaged + probeGpu + contact + ssgi;
+            UCGroupedInspector.Readout("Total lighting memory",
+                (total / MB).ToString("0.00") + " MB");
+
+            float ceilingMB = MidRangeMemoryCeilingBytes / MB;
+            if (total > MidRangeMemoryCeilingBytes)
+            {
+                EditorGUILayout.HelpBox(
+                    "Over the stated " + ceilingMB.ToString("0") + " MB mid-range ceiling. " +
+                    "Widen probe spacing or shrink the world to bring the probe rows down - " +
+                    "they are the only part that scales.",
+                    MessageType.Warning);
+            }
+            else
+            {
+                EditorGUILayout.LabelField(
+                    "Within the stated " + ceilingMB.ToString("0") + " MB mid-range ceiling.",
+                    EditorStyles.miniLabel);
+            }
+        }
+    }
+
+    // =========================================================================
+    //  VEGETATION
+    // =========================================================================
+
+    [CustomEditor(typeof(UCVegetationSystemManager))]
+    [CanEditMultipleObjects]
+    public class UCVegetationSystemManagerInspector : UnityEditor.Editor
+    {
+        private readonly UCVegetationManualAuthoring.State manualAuthoring = new UCVegetationManualAuthoring.State(); // UC-T06-18: transient form state belongs to this inspector.
+        // internal, not private: UCSelfTest reads this table to assert that every
+        // author-facing field on the component is accounted for by some group. The
+        // census has to read the REAL table the inspector draws from - a copy in the
+        // test would pass while the inspector swept a field into Unlisted.
+        internal static readonly UCFieldGroup[] Groups =
+        {
+            new UCFieldGroup("Global", true,
+                "Seed and the one dial that thins a whole world for a weaker device.",
+                "vegetationEnabled", "seedOffset", "globalDensityScale"),
+
+            new UCFieldGroup("Ecology", true,
+                "Turns species envelopes on. Off keeps the shipped density-and-slope rules.",
+                "useEcology", "suitabilityThreshold", "suitabilitySharpness",
+                "allowMixedStands", "maxSpeciesPerSite", "ecologyTickSeconds"),
+
+            new UCFieldGroup("Grass and Detail", true, "",
+                "grassPerSquareMetre", "detailResolution",
+                "detailResolutionPerPatch", "detailUsesWorldWind", "detailMemoryCeilingMB"),
+
+            new UCFieldGroup("Trees", true,
+                "Density, spacing, and the age spread that keeps a stand from reading as one "
+                + "planting.",
+                "treesPerHectare",
+                "billboardFadeLengthMetres", "treeSpacingMetres",
+                "ageSizeVariation", "seedlingSizeFraction"),
+
+            new UCFieldGroup("Placement Rules", true,
+                "Altitudes are metres above sea level, not world Y.",
+                "maxSlopeDegrees", "minAltitudeMetres", "maxAltitudeMetres",
+                "clearanceMetres", "avoidWater", "avoidCutRegions", "assertBareGround"),
+
+            new UCFieldGroup("Environment Sampling", true,
+                "How the site's soil, wetness and shore distance are measured.",
+                "waterSearchRadiusMetres", "soilDepthMaxMetres",
+                "soilAngleOfReposeDegrees", "fertilityFromCurvature",
+                "saltSprayDecayMetres"),
+
+            new UCFieldGroup("Competition and Canopy", true,
+                "Taller species shade and exclude shorter layers through the captured canopy grid.",
+                "enableCanopyCompetition", "understoryLightFloor"),
+
+            new UCFieldGroup("Dispersal and Clustering", true,
+                "What makes a stand read as grown rather than sprinkled, and what stops the same "
+                + "plant repeating next to itself.",
+                "enableDispersalClustering", "clusterContrast",
+                "antiRepeatRadiusM", "antiRepeatStrength"),
+
+            new UCFieldGroup("Disturbance", true,
+                "Fire, grazing, snow and avalanche histories.",
+                "enableFire", "fireReturnBaseYears", "enableBrowse", "browsePressureBase",
+                "enableSnowLoad", "snowLoadAtTreelineKgPerM2", "enableAvalanche",
+                "enableKrummholz"),
+
+            new UCFieldGroup("Season", true,
+                "Follows the weather manager's year unless you pin a day.",
+                "enableSeasonalPhenology", "seasonFollowsWeather", "manualDayOfYear",
+                "seasonRefreshDays"),
+
+            // These four carry a [Header] of their own in ShaderGlobals.cs, which a grouped
+            // inspector does not draw - so without this group they were authored under an
+            // amber "Unlisted" heading instead of the one their own source gives them.
+            new UCFieldGroup("Season Shader Globals", true,
+                "The one reference plant whose leaf-out and turn the world's materials follow. "
+                + "Defaults are the temperate deciduous broadleaf figures.",
+                "publishSeasonGlobals", "referenceBudburstGdd", "referenceGddBaseC",
+                "referenceSenescenceDayLengthH"),
+
+            new UCFieldGroup("Biome and Masking", true, "",
+                "useGraphMasks", "maskThreshold", "biomeBlendMetres"),
+
+            // The preset dial sits in the group whose numbers it writes, so pressing
+            // Apply visibly moves the fields directly underneath it rather than
+            // changing values the author has to go hunting for.
+            new UCFieldGroup("Budget", true,
+                "The ceilings that keep a large world inside a frame budget. Pick a device "
+                + "tier and press Apply below to write the whole set at once; every field "
+                + "stays editable afterwards.",
+                "qualityPreset",
+                "maxInstancesPerCell", "shadowCasterDistanceMetres",
+                "candidatesPerSquareMetre"),
+
+            new UCFieldGroup("Hierarchy", true, "",
+                "parentUnderVegetationSystem")
+        };
+
+        // A cached editor over the world object. The "Prototype library" panel
+        // below hosts the world inspector's own vegetation sections through it
+        // rather than drawing a second copy - so trees, shrubs, grass, objects,
+        // their budgets and the foliage settings are authored here while their
+        // code, and the load-bearing slider/focus-out/drag-commit helpers behind
+        // it, stay owned in one place. Rebuilt when the world under us changes,
+        // and destroyed in OnDisable so it never outlives this inspector.
+        private UnityEditor.Editor hostedWorldEditor;
+        private UniverseCreatorObject hostedWorld;
+
+        private void OnDisable()
+        {
+            if (hostedWorldEditor != null)
+            {
+                Object.DestroyImmediate(hostedWorldEditor);
+                hostedWorldEditor = null;
+                hostedWorld = null;
+            }
+        }
+
+        public override void OnInspectorGUI()
+        {
+            UCGroupedInspector.Draw(
+                serializedObject, "Vegetation",
+                "Vegetation System", "d_Terrain Icon", UCInspectorUI.HeaderGreen,
+                "resolve path live",
+                "Placement settings are captured for the ecology/scatter consumers, alongside the latitude, " +
+                "sea level and climate it reads from the lighting, water and weather " +
+                "systems rather than duplicating. The scatter pass reads that snapshot " +
+                "to place trees, shrubs and objects; the Diagnostics panel below reports " +
+                "what the last build placed and where the ecology model planted it.",
+                Groups);
+
+            // UC-T08-15: retained legacy values stay serialized, while unavailable behavior has one explicit diagnostic.
+            EditorGUILayout.HelpBox("Legacy build/concurrency switches, wetness-radius and canopy-pass controls, stand-density/crown-spacing switches, dispersal parent density, avalanche threshold and scene suitability overlays have no runtime consumer and are hidden. Wetness uses the accepted derivative field; spacing uses scatter nodes/species rules; rebuilding uses accepted graph replacement. Current placement and rejection diagnostics remain below.", MessageType.Info);
+
+            if (targets.Length != 1) return;
+
+            UCVegetationSystemManager veg = (UCVegetationSystemManager)target;
+            // UC-T06-15: existing bindings own placement; manager fields remain the captured shared ecology/budget settings.
+            UCGroupedInspector.Panel("Vegetation Graph", () => DrawGraphAuthoring(veg));
+
+            // DEF-5. The Apply the Budget group's `qualityPreset` tooltip promises. It is a
+            // panel rather than a field because a field cannot carry a button, and the dial
+            // without the button was the defect: the tooltip said "choose one and press
+            // Apply" and there was nothing to press.
+            UCGroupedInspector.Panel("Device Budget", () => DrawQualityPreset(veg));
+
+            // Every panel below is a readout over the rest of the world - the world
+            // object, the weather manager, the prototype library, the registry - and
+            // any of them can be absent while an author is still assembling a scene.
+            // Wrapped one panel at a time so a throw in a diagnostic costs that
+            // diagnostic and not the whole inspector; see UCGroupedInspector.Panel.
+            UCGroupedInspector.Panel("Resolved", () => DrawResolvedReadout(veg));
+
+            // Where prototypes are authored (V-53). The four prototype lists, their
+            // scatter budgets and the foliage render settings now draw HERE, hosted
+            // from the world inspector's own editor so there is still exactly one copy
+            // of that code and its slider/focus-out helpers - this panel renders it,
+            // the world object stores it.
+            UCGroupedInspector.Panel("Prototype library", () => DrawHostedLibrary(veg));
+            UCGroupedInspector.Panel("Manual placement and exclusions", () => UCVegetationManualAuthoring.Draw(veg, manualAuthoring)); // UC-T06-18: Undo-backed intent shares the existing application owner.
+
+            // Pre-build validation (V-51). Drawn after the resolved readout, because
+            // a warning reads better once the author has seen what their dials
+            // resolved to - and before any rebuild button, which is the point: catch
+            // the silent-empty-world defects before the build, not after it.
+            UCGroupedInspector.Panel("Validation", () => UCVegetationValidation.Draw(veg));
+
+            // The trigger (Step 31). Vegetation authoring moved onto this manager, but
+            // the only way to run a scatter was to commit a library field with
+            // autoRegenerate on - so a bare Regenerate on the world above, or an author
+            // who simply wanted to re-place with the current settings, spawned nothing
+            // and looked broken. This button is the second, explicit trigger of the one
+            // scatter engine: it re-dresses the live terrain through the SAME
+            // RescatterVegetation path a field edit uses (read-only over the baked
+            // surface, full build only when nothing is baked yet), so what it places is
+            // exactly what a rebuild would place - not a preview and not a stub.
+            UCGroupedInspector.Panel("Generate", () => DrawGenerateVegetation(veg));
+
+            // Post-build census (V-52). Last, because it is the after picture: what
+            // the build the two panels above shaped actually placed, and where the
+            // ecology model planted it.
+            UCGroupedInspector.Panel("Diagnostics", () => UCVegetationDiagnostics.Draw(veg));
+        }
+
+        /// <summary>
+        /// What the authored density and the rest of the world resolve to. Spacing
+        /// is the useful one: it is where an author finds out that their stem count
+        /// and their spacing were asking for different forests.
+        /// </summary>
+        /// <summary>
+        /// DEF-5. The Apply the Budget group's `qualityPreset` tooltip promises, plus a readout of
+        /// exactly what pressing it will write.
+        ///
+        /// WHY THIS PANEL IS THE WHOLE FIX. `DialsFor`, `ApplyQualityPreset`, `PresetDialChecksum`,
+        /// `PresetModified` and `MatchesPreset` were ALL already written, in this class's Resolve
+        /// partial, and a search for callers across the package found NONE of them called from
+        /// anywhere. A complete device-budget mechanism existed with nothing to invoke it, behind a
+        /// field whose own tooltip told the author to "choose one and press Apply". Moving the dial
+        /// did nothing, because nothing read it - which is the author's report. What was missing was
+        /// never the arithmetic. It was this button.
+        ///
+        /// The call order inside it is the load-bearing part, and is the order
+        /// <c>UCWeatherSystemManagerInspector</c> already uses for its own preset: flush pending
+        /// edits FIRST so an edit made in this same GUI pass is not discarded by the preset write,
+        /// record undo, write through the component's own method, then <c>Update()</c> so the
+        /// grouped fields above redraw with the values that were just written.
+        ///
+        /// Undo records the WORLD as well as this component. <c>ApplyQualityPreset</c> also writes
+        /// the prototype library's shrub, collider, object and instancing budgets and the world's
+        /// billboard distances; the library is a [Serializable] class that lives ON
+        /// <c>UniverseCreatorObject</c> rather than as its own asset, so leaving the world out of
+        /// the undo group would let one Ctrl+Z restore half of what Apply changed and leave the
+        /// other half written.
+        /// </summary>
+        private void DrawQualityPreset(UCVegetationSystemManager veg)
+        {
+            EditorGUILayout.HelpBox(
+                "Writes every cost dial for one device class in a single action: this " +
+                "component's detail resolution, billboard fade, density scale, shadow distance " +
+                "and detail memory ceiling, plus the world's shrub, collider, object and " +
+                "instancing budgets. Then it stops interfering - each one stays an ordinary " +
+                "editable field, and this panel reports (modified) as soon as you move one. " +
+                "The mid-range tier is the floor this package is built to hold, not a " +
+                "degraded mode.",
+                MessageType.None);
+
+            // Read from the same DialsFor the button writes through, so this preview cannot
+            // drift from the numbers actually installed.
+            UCVegetationSystemManager.QualityDials d =
+                UCVegetationSystemManager.DialsFor(veg.qualityPreset);
+
+            UCGroupedInspector.Readout("Chosen (in Budget, above)", veg.qualityPreset.ToString());
+            UCGroupedInspector.Readout("  detail resolution", d.detailResolution.ToString());
+            UCGroupedInspector.Readout("  density scale", d.densityScale.ToString("0.00"));
+            UCGroupedInspector.Readout("  shadow distance", d.shadowDistanceM.ToString("0") + " m");
+            UCGroupedInspector.Readout("  billboard fade", d.billboardFadeM.ToString("0") + " m");
+            UCGroupedInspector.Readout("  detail memory ceiling",
+                                       d.detailMemoryCeilingMB.ToString("0") + " MB");
+            UCGroupedInspector.Readout("  library budgets",
+                d.maxShrubsPerChunk + " shrubs, " + d.shrubColliderBudget + " colliders, " +
+                d.maxObjectsPerChunk + " objects, instanced past " + d.gpuInstancingThreshold);
+
+            UCGroupedInspector.Readout("Applied", DescribePresetState(veg));
+
+            EditorGUILayout.Space(3);
+
+            UniverseCreatorObject world = veg.World;
+
+            if (GUILayout.Button("Apply " + veg.qualityPreset + " budget", GUILayout.Height(22)))
+            {
+                serializedObject.ApplyModifiedProperties();
+
+                if (world != null)
+                {
+                    Undo.RecordObjects(new Object[] { veg, world },
+                                       "Apply vegetation quality preset");
+                }
+                else
+                {
+                    Undo.RecordObject(veg, "Apply vegetation quality preset");
+                }
+
+                veg.ApplyQualityPreset(veg.qualityPreset);
+
+                EditorUtility.SetDirty(veg);
+                if (world != null) EditorUtility.SetDirty(world);
+
+                serializedObject.Update();
+            }
+
+            if (world == null)
+            {
+                EditorGUILayout.LabelField(
+                    "No UniverseCreatorObject above this component, so Apply will write this " +
+                    "component's dials only - the library budgets have no library to land on.",
+                    EditorStyles.miniLabel);
+            }
+        }
+
+        private static readonly VegetationQuality[] PresetTiers =
+        {
+            VegetationQuality.MidRangeMobile,
+            VegetationQuality.FlagshipMobile,
+            VegetationQuality.Desktop
+        };
+
+        /// <summary>
+        /// What the "Applied" line says. A world authored before presets existed has never applied
+        /// one, yet its dials may sit exactly on a tier; `MatchesPreset` exists for that case, so
+        /// the readout reports the honest answer rather than a bare "never".
+        /// </summary>
+        private static string DescribePresetState(UCVegetationSystemManager veg)
+        {
+            if (veg.hasAppliedPreset)
+            {
+                return veg.PresetModified
+                    ? veg.qualityPreset + "   (modified)"
+                    : veg.qualityPreset.ToString();
+            }
+
+            for (int i = 0; i < PresetTiers.Length; i++)
+            {
+                if (veg.MatchesPreset(PresetTiers[i]))
+                {
+                    return "never applied, but the dials already match " + PresetTiers[i];
+                }
+            }
+
+            return "never applied - these are hand-authored values";
+        }
+
+        private static void DrawResolvedReadout(UCVegetationSystemManager v)
+        {
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Resolved", EditorStyles.boldLabel);
+
+            UCGroupedInspector.Readout("Seed", v.EffectiveSeed.ToString());
+            UCGroupedInspector.Readout("Latitude", v.LatitudeDegrees.ToString("0.0") + " deg");
+            UCGroupedInspector.Readout("Sea level", v.SeaLevelY.ToString("0.0") + " m world Y");
+            UCGroupedInspector.Readout("Day of year",
+                (v.ResolvedSeasonPhase * EcoConstants.DaysPerTropicalYear).ToString("0"));
+
+            float density = v.TreeDensityPerSquareMetre;
+            UCGroupedInspector.Readout("Tree density",
+                density.ToString("0.####") + " stems/m2");
+
+            float resolved = v.ResolvedTreeSpacingMetres;
+            UCGroupedInspector.Readout("Tree spacing", resolved.ToString("0.00") + " m");
+
+            // The authored spacing losing to the density-derived one is not an
+            // error, but it does mean the field above is not what will be used.
+            if (resolved > v.treeSpacingMetres + Mathf.Epsilon)
+            {
+                EditorGUILayout.HelpBox(
+                    "Spacing is being set by density, not by the Tree Spacing field: " +
+                    v.treesPerHectare.ToString("0") + " stems per hectare cannot sit " +
+                    "closer than " + resolved.ToString("0.00") + " m. Raise the stem " +
+                    "count to tighten the stand.",
+                    MessageType.Info);
+            }
+
+            if (v.Weather == null || v.Lighting == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "No " + (v.Weather == null ? "weather" : "lighting") + " manager " +
+                    "found in this world, so the resolve is using documented fallbacks " +
+                    "rather than authored values.",
+                    MessageType.Warning);
+            }
+
+            DrawDetailMemory(v);
+        }
+
+        /// <summary>
+        /// One place to author prototypes (V-53). The four prototype lists - trees,
+        /// shrubs, grass, objects - are edited on the world object, each with its own
+        /// eco envelope. This inspector does not repeat them: it points at the world
+        /// so an author who opened the manager looking for the lists is one click from
+        /// where they actually live, and there is no second editor to drift out of
+        /// sync with the first.
+        /// </summary>
+        private static void DrawLibraryLink(UCVegetationSystemManager v)
+        {
+            UniverseCreatorObject world = v.World;
+
+            EditorGUILayout.Space(4);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField(
+                    "Prototypes are authored on the world object.",
+                    EditorStyles.miniLabel);
+
+                using (new EditorGUI.DisabledScope(world == null))
+                {
+                    // The null test is repeated on the click rather than left to the
+                    // disabled scope. A disabled button cannot be pressed today, but
+                    // the guard and the dereference belong in the same place: moving
+                    // this row out of the scope would otherwise be a null crash that
+                    // compiles.
+                    if (GUILayout.Button("Select World", GUILayout.Width(96)) && world != null)
+                    {
+                        Selection.activeGameObject = world.gameObject;
+                        EditorGUIUtility.PingObject(world.gameObject);
+                    }
+                }
+            }
+
+            if (world == null)
+            {
+                EditorGUILayout.HelpBox(
+                    "No world object found above this manager, so there is nowhere to " +
+                    "author the scatter library. Put this manager under a Universe " +
+                    "Creator world.",
+                    MessageType.Info);
+            }
+        }
+
+        /// <summary>
+        /// Hosts the world inspector's own vegetation sections inside this panel
+        /// (V-53 revised). The world object still STORES the four prototype lists,
+        /// budgets and foliage settings; this draws the world editor's authoring
+        /// surface for them so an author edits vegetation on the Vegetation manager
+        /// while the code and its load-bearing helpers stay in one editor. When
+        /// there is no world above the manager it falls back to the link panel,
+        /// which explains where the library should live.
+        /// </summary>
+        private void DrawHostedLibrary(UCVegetationSystemManager v)
+        {
+            UniverseCreatorObject world = v.World;
+
+            if (world == null)
+            {
+                DrawLibraryLink(v);
+                return;
+            }
+
+            // Lazily build, or rebuild if the world under us changed, the cached
+            // editor. CreateEditor over a UniverseCreatorObject resolves to its
+            // UniverseCreatorInspector, which owns DrawHostedVegetationLibrary.
+            if (hostedWorldEditor == null || hostedWorld != world)
+            {
+                if (hostedWorldEditor != null) Object.DestroyImmediate(hostedWorldEditor);
+                hostedWorldEditor = UnityEditor.Editor.CreateEditor(world);
+                hostedWorld = world;
+            }
+
+            UniverseCreatorInspector host = hostedWorldEditor as UniverseCreatorInspector;
+            if (host == null)
+            {
+                // CustomEditor resolution failed; show the link rather than nothing.
+                DrawLibraryLink(v);
+                return;
+            }
+
+            EditorGUILayout.Space(2);
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                EditorGUILayout.LabelField(
+                    "Authored here; stored on the world object.", EditorStyles.miniLabel);
+
+                if (GUILayout.Button("Select World", GUILayout.Width(96)))
+                {
+                    Selection.activeGameObject = world.gameObject;
+                    EditorGUIUtility.PingObject(world.gameObject);
+                }
+            }
+
+            host.DrawHostedVegetationLibrary(world);
+        }
+
+        /// <summary>
+        /// The explicit "Generate Vegetation" trigger (Step 31). Runs the same
+        /// RescatterVegetation path a committed library field uses, so a press places
+        /// exactly what a full rebuild would - it is a second trigger of one engine,
+        /// not a second engine. Disabled with a stated reason when there is nothing to
+        /// scatter onto or nothing to scatter, so the button is never a no-op that
+        /// looks like a break.
+        /// </summary>
+        private static void DrawGenerateVegetation(UCVegetationSystemManager v)
+        {
+            UniverseCreatorObject world = v.World;
+            if (world != null && world.TryGetComponent<UCWorldGraphBindings>(out var graphBindings) && graphBindings.VegetationGraph != null) return; // UC-T06-15: the bound graph's explicit Run is the single placement trigger.
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Generate Vegetation", EditorStyles.boldLabel);
+
+            // Every reason the press would do nothing, named before it is pressed.
+            string blocked = null;
+            if (world == null)
+                blocked = "No world object above this manager to scatter onto. Place " +
+                          "this manager under a Universe Creator world.";
+            else if (!v.vegetationEnabled)
+                blocked = "Vegetation is disabled on this manager. Enable it above, then " +
+                          "generate.";
+            else if (world.IsGenerating)
+                blocked = "A generation is already running. The bar at the bottom of the " +
+                          "editor tracks it; this button re-enables when it finishes.";
+
+            EditorGUILayout.LabelField(
+                "Re-places trees, shrubs, grass and objects over the terrain that " +
+                "already exists, using the current library and densities. Falls back " +
+                "to a full rebuild only when nothing has been baked yet.",
+                EditorStyles.wordWrappedMiniLabel);
+
+            if (blocked != null)
+                EditorGUILayout.HelpBox(blocked, MessageType.Info);
+
+            using (new EditorGUI.DisabledScope(blocked != null))
+            {
+                if (GUILayout.Button("Generate Vegetation", GUILayout.Height(26)))
+                {
+                    // The disabled scope stops the press today, but the null test is
+                    // repeated here rather than trusted to it: a future refactor that
+                    // enables the button must still not dereference a null world.
+                    if (world != null && v.vegetationEnabled && !world.IsGenerating)
+                    {
+                        Debug.Log("[Universe Creator] Generate Vegetation - re-scattering.");
+                        if (world.RescatterVegetation() && world.CurrentTask != null)
+                            AsyncProgressUI.Track(world, world.CurrentTask,
+                                                  "Generate Vegetation");
+                    }
+                }
+            }
+        }
+
+        private static void DrawGraphAuthoring(UCVegetationSystemManager vegetation)
+        {
+            var world = vegetation.World;
+            if (world == null) { EditorGUILayout.HelpBox("Place this manager under its UC world to bind vegetation authoring.", MessageType.Info); return; }
+            var bindings = world.GetComponent<UCWorldGraphBindings>();
+            if (bindings == null)
+            {
+                EditorGUILayout.HelpBox("Bind a Vegetation Graph to make its placement rules the authority; current legacy settings remain saved.", MessageType.Info);
+                if (GUILayout.Button("Add vegetation graph binding")) bindings = Undo.AddComponent<UCWorldGraphBindings>(world.gameObject);
+            }
+            if (bindings != null) UCWorldGraphBindingsInspector.DrawVegetation(bindings);
+        }
+
+        /// <summary>
+        /// The detail-layer memory bill, before the build rather than after it.
+        /// This is RAM, not frame time: it is allocated when the layer is written
+        /// and held while the chunk is resident, on screen or not. (V-29)
+        /// </summary>
+        private static void DrawDetailMemory(UCVegetationSystemManager v)
+        {
+            int layers = v.DetailLayerCount;
+            int chunks = v.ResidentChunkCount;
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Detail Memory", EditorStyles.boldLabel);
+
+            if (layers <= 0 || chunks <= 0)
+            {
+                UCGroupedInspector.Readout("Detail layers",
+                    layers <= 0 ? "none authored" : layers.ToString());
+                return;
+            }
+
+            float mb = v.ResolvedDetailMemoryMB;
+            float perLayerKB = v.detailResolution * (float)v.detailResolution *
+                               UCVegetationSystemManager.BytesPerDetailCell / 1024f;
+
+            UCGroupedInspector.Readout("Detail layers", layers.ToString());
+            UCGroupedInspector.Readout("Resident chunks", chunks.ToString());
+            UCGroupedInspector.Readout("Per layer per chunk", perLayerKB.ToString("0") + " KB");
+            UCGroupedInspector.Readout("Total held",
+                mb.ToString(mb < 10f ? "0.00" : "0") + " MB of " +
+                v.detailMemoryCeilingMB.ToString("0") + " MB");
+
+            if (!v.DetailMemoryOverCeiling) return;
+
+            int fits = v.DetailResolutionUnderCeiling;
+
+            // Over the ceiling is a hard warning and not an Info, because the
+            // failure it predicts is an allocation that does not come back rather
+            // than a frame that runs slowly.
+            EditorGUILayout.HelpBox(
+                "Detail layers would hold " + mb.ToString("0") + " MB, over the " +
+                v.detailMemoryCeilingMB.ToString("0") + " MB ceiling. This is RAM held " +
+                "while the chunks are resident, whether or not the grass is on screen.\n\n" +
+                (fits >= 8
+                    ? "A detail resolution of " + fits + " fits " + layers +
+                      " layers across " + chunks + " chunks. " +
+                      (fits <= UCVegetationSystemManager.MobileDetailResolution
+                          ? "That is at or below the mobile default of " +
+                            UCVegetationSystemManager.MobileDetailResolution + "."
+                          : "The mobile default is " +
+                            UCVegetationSystemManager.MobileDetailResolution + ".")
+                    : "No usable resolution fits this many layers across this many " +
+                      "chunks: reduce the detail species count or the world size."),
+                MessageType.Warning);
+        }
+    }
+}

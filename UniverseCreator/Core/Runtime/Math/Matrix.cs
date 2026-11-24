@@ -108,6 +108,11 @@ namespace UniverseCreator
         /// <summary>World height that a stored value of 1.0 corresponds to, in metres.</summary>
         public float worldHeight = 1f;
 
+        // UC-T03-02: immutable ground without river excavation, on this exact lattice.
+        // A river borrows its input; downstream writers transform an owned copy of this
+        // reference too. Blank masks deliberately carry none. Never chain references.
+        [NonSerialized] internal Matrix trenchReference;
+
         /// <summary>Pixel count.</summary>
         public int Count { get { return arr.Length; } }
 
@@ -140,6 +145,8 @@ namespace UniverseCreator
         /// across, so modifiers can work on a copy without disturbing the source
         /// a fan-out connection may still be feeding to other nodes.
         /// </summary>
+        /// <remarks>UC-T03-02: the optional pre-trench ground reference remains shared read-only.
+        /// Writers transforming it must take their own copy, as the standard modifier/combiner paths do.</remarks>
         public Matrix(Matrix source)
         {
             if (source == null) throw new ArgumentNullException("source");
@@ -148,6 +155,7 @@ namespace UniverseCreator
             worldPos = source.worldPos;
             worldSize = source.worldSize;
             worldHeight = source.worldHeight;
+            trenchReference = source.trenchReference; // UC-T03-02: borrowed read-only, like the published source.
 
             arr = new float[source.arr.Length];
             Array.Copy(source.arr, arr, source.arr.Length);
@@ -161,6 +169,24 @@ namespace UniverseCreator
             m.worldSize = worldSize;
             m.worldHeight = worldHeight;
             return m;
+        }
+
+        // UC-T03-02: terminal guards see ground before surviving river cuts. Positive
+        // edits (including inverted/blended-away trenches) never receive an exemption.
+        internal float TrenchCut(int index)
+        {
+            if (trenchReference == null) return 0f;
+            float cut = trenchReference.arr[index] - arr[index];
+            return cut > 0f && !float.IsInfinity(cut) ? cut : 0f;
+        }
+
+        internal Matrix CopyGuardGround()
+        {
+            Matrix ground = new Matrix(this);
+            ground.trenchReference = null;
+            if (trenchReference != null)
+                for (int i = 0; i < arr.Length; i++) ground.arr[i] += TrenchCut(i);
+            return ground;
         }
 
         /// <summary>Deep copy. Equivalent to the copy constructor.</summary>
