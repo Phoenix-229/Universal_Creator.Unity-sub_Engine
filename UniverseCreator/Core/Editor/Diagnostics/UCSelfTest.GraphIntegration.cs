@@ -13,6 +13,8 @@ using UniverseCreator.TerrainSystem;
 using UniverseCreator.Editor.GraphUI;
 using UniverseCreator.Editor.Utilities;
 using UniverseCreator.Editor.Windows;
+using UniverseCreator.Editor.Inspectors;
+using System.Threading.Tasks;
 
 namespace UniverseCreator.Editor.Diagnostics
 {
@@ -68,6 +70,120 @@ namespace UniverseCreator.Editor.Diagnostics
 
         // UC biome repair: replay the owner's add/edit/clear/reload sequence against the production UI.
         private sealed class BiomeRulesTestWindow : EditorWindow { }
+
+        private sealed class InspectorGraphTestWindow : EditorWindow
+        {
+            internal UnityEditor.Editor inspector;
+            internal UnityEngine.Object[] guardedTargets;
+            internal bool guarded;
+            internal int repaints;
+            internal float height;
+            internal Exception error;
+
+            private void OnGUI()
+            {
+                if (error != null) return;
+                try
+                {
+                    if (guardedTargets != null) guarded = UCInspectorUI.DrawMissingTerrainGraph(guardedTargets);
+                    else inspector?.OnInspectorGUI();
+                    Rect end = EditorGUILayout.GetControlRect();
+                    if (Event.current.type == EventType.Repaint) { height = end.y; repaints++; }
+                }
+                catch (Exception failure) { error = failure; } // UC repair 31: surface GUI failures to the bounded acceptance runner.
+            }
+        }
+
+        /// <summary>Exercises the actual parent/child Inspector GUI with missing/empty graphs, mixed selections and standalone managers.</summary>
+        /// <remarks>Isolated batch entry. Awaits bounded Editor repaints, checks assignment Undo/Redo and retained native terrain/settings,
+        /// then closes its window and destroys fixture resources. Reports failures and exits nonzero; host appearance remains a manual check.</remarks>
+        /// <exception cref="InvalidOperationException">Called outside batch mode or a fixture GUI fails to render.</exception>
+        public static async void RunInspectorGraphAssignmentBatch()
+        {
+            if (!Application.isBatchMode) throw new InvalidOperationException("Inspector acceptance requires isolated batch mode.");
+            checks = 0; failures.Clear();
+            GameObject root = null, standalone = null;
+            TerrainData terrainData = null;
+            Graph graph = null;
+            var window = ScriptableObject.CreateInstance<InspectorGraphTestWindow>();
+            UnityEditor.Editor editor = null;
+            UniverseCreatorObject world = null;
+            try
+            {
+                root = new GameObject("UC Inspector graph assignment fixture"); root.SetActive(false);
+                world = root.AddComponent<UniverseCreatorObject>(); world.autoRegenerate = false; world.resolution = 513;
+                graph = ScriptableObject.CreateInstance<Graph>(); graph.SetDomain(UCGraphDomain.TerrainWater);
+                var targets = new List<Component> { world, root.AddComponent<UCLightingSystemManager>(),
+                    root.AddComponent<UCWeatherSystemManager>(), root.AddComponent<UCWaterSystemManager>(),
+                    root.AddComponent<UCVegetationSystemManager>(), root.AddComponent<UCWorldGraphBindings>() };
+                var chunkHost = new GameObject("ChunkManager"); chunkHost.transform.SetParent(root.transform, false);
+                var manager = chunkHost.AddComponent<ChunkManager>(); manager.Initialize(world); targets.Add(manager);
+                terrainData = new TerrainData { heightmapResolution = 33, size = new Vector3(32, 100, 32) };
+                terrainData.SetHeights(0, 0, new float[33, 33]);
+                var ground = Terrain.CreateTerrainGameObject(terrainData); ground.transform.SetParent(root.transform, false);
+                var terrain = ground.GetComponent<Terrain>(); terrain.drawHeightmap = true;
+                var run = world.GenerationScheduler.CurrentRun;
+                window.position = new Rect(20, 20, 600, 800); window.Show();
+                foreach (Component component in targets)
+                {
+                    world.graph = null;
+                    editor = UnityEditor.Editor.CreateEditor(component); window.inspector = editor; window.guardedTargets = null;
+                    await RepaintInspector(); float unassignedHeight = window.height;
+                    Check(unassignedHeight < (component == world ? 600 : 300),
+                        "UC repair 31: actual Inspector stops at missing-graph guidance: " + component.GetType().Name);
+                    world.graph = graph;
+                    await RepaintInspector();
+                    Check(window.height > unassignedHeight,
+                        "UC repair 31: assigned empty graph reveals normal Inspector controls: " + component.GetType().Name);
+                    window.inspector = null; UnityEngine.Object.DestroyImmediate(editor); editor = null;
+                }
+                world.graph = null;
+                Undo.ClearUndo(world); Undo.IncrementCurrentGroup();
+                UniverseCreatorInspector.AssignGraph(world, graph, false); Undo.FlushUndoRecordObjects(); Undo.IncrementCurrentGroup();
+                Check(world.graph == graph && world.GenerationScheduler.CurrentRun.Equals(run) && !world.IsGenerating,
+                    "UC repair 31: shared assignment honors disabled automatic generation.");
+                Undo.PerformUndo(); Check(world.graph == null, "UC repair 31: graph assignment Undo restores missing binding.");
+                Undo.PerformRedo(); Check(world.graph == graph, "UC repair 31: graph assignment Redo restores the same empty asset.");
+                world.graph = null;
+                standalone = new GameObject("UC standalone Inspector fixture"); standalone.SetActive(false);
+                var light = standalone.AddComponent<UCLightingSystemManager>();
+                window.guardedTargets = new UnityEngine.Object[] { light }; await RepaintInspector();
+                Check(!window.guarded, "UC repair 31: standalone lighting retains its normal controls.");
+                // UC repair 31: execute the standalone Inspector too, rather than checking only its shared guard.
+                window.guardedTargets = null; editor = UnityEditor.Editor.CreateEditor(light); window.inspector = editor;
+                await RepaintInspector();
+                Check(window.height > 100, "UC repair 31: actual standalone lighting Inspector renders normal settings.");
+                window.inspector = null; UnityEngine.Object.DestroyImmediate(editor); editor = null;
+                window.guardedTargets = new UnityEngine.Object[] { targets[1], light }; await RepaintInspector();
+                Check(window.guarded && world.graph == null,
+                    "UC repair 31: mixed selection containing an unconfigured world shows guidance without implicit assignment.");
+                Check(world.resolution == 513 && !world.autoRegenerate && terrain.terrainData == terrainData && terrain.drawHeightmap &&
+                    ground.activeSelf && ground.GetComponent<TerrainCollider>().terrainData == terrainData,
+                    "UC repair 31: Inspector transitions preserve saved quality and native terrain/collider identity.");
+            }
+            catch (Exception error) { Check(false, "UC Inspector graph GUI exception: " + error); }
+            finally
+            {
+                window.inspector = null; window.guardedTargets = null; window.Close();
+                if (editor != null) UnityEngine.Object.DestroyImmediate(editor);
+                if (world != null) Undo.ClearUndo(world);
+                if (standalone != null) UnityEngine.Object.DestroyImmediate(standalone);
+                if (root != null) UnityEngine.Object.DestroyImmediate(root);
+                if (terrainData != null) UnityEngine.Object.DestroyImmediate(terrainData);
+                if (graph != null) UnityEngine.Object.DestroyImmediate(graph);
+            }
+            Console.WriteLine(Report(failures.Count == 0)); EditorApplication.Exit(failures.Count == 0 ? 0 : 1);
+
+            async Task RepaintInspector()
+            {
+                window.repaints = 0; window.height = 0; window.error = null;
+                var timer = System.Diagnostics.Stopwatch.StartNew();
+                do { window.Repaint(); await Task.Delay(10); }
+                while (window.repaints < 2 && window.error == null && timer.ElapsedMilliseconds < 5000);
+                if (window.error != null) throw new InvalidOperationException("Inspector GUI failed.", window.error);
+                if (window.repaints < 2) throw new TimeoutException("Inspector GUI did not repaint within five seconds.");
+            }
+        }
 
         private static void TestBiomeRuleControls()
         {

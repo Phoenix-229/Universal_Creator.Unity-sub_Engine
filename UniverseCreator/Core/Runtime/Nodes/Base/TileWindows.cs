@@ -41,6 +41,21 @@ namespace UniverseCreator.Nodes
     /// </summary>
     public static class TileWindows
     {
+        /// <summary>Largest admitted whole-world drainage lattice supported by the bounded solver and accounting paths, in cells per side.</summary>
+        public const int MaximumDrainageResolution = 2048;
+
+        /// <summary>UC repair 30: preserves requested drainage detail within the supported bound instead of silently capping large worlds at 512.</summary>
+        /// <param name="requested">Requested cells per side; values below 16 retain the legacy minimum of 16.</param>
+        /// <returns>The requested resolution, or 16 for a smaller request; storage still requires separate budget admission.</returns>
+        /// <exception cref="System.ArgumentOutOfRangeException">The request exceeds 2048 cells per side.</exception>
+        public static int DrainageResolution(int requested)
+        {
+            if (requested > MaximumDrainageResolution)
+                throw new System.ArgumentOutOfRangeException(nameof(requested),
+                    "Whole-world drainage supports at most 2048 cells per side; larger requests require a separately verified solver and memory budget.");
+            return Mathf.Max(16, requested);
+        }
+
         /// <summary>UC-T02-08: converts a finite world-space neighbourhood to conservative sample margins on an anisotropic grid.</summary>
         /// <param name="tile">Non-null tile with at least two samples and positive finite world size on both horizontal axes.</param>
         /// <param name="radiusMetres">Finite nonnegative reach in metres.</param>
@@ -104,6 +119,10 @@ namespace UniverseCreator.Nodes
         /// per side, bound to its own evaluator. Returns null when there is no graph
         /// to pull through.
         /// </summary>
+        /// <param name="tile">Captured tile with a bound graph; null or an absent graph returns null.</param>
+        /// <param name="resPerSide">Requested cells per side; minimum 16, maximum 2048. Storage requires budget admission.</param>
+        /// <returns>A separately evaluated whole-world view, or null without a graph; retire through the parent after use.</returns>
+        /// <exception cref="System.ArgumentOutOfRangeException">A bound graph requests more than 2048 cells per side.</exception>
         /// <remarks>
         /// Coarse on purpose. This exists for quantities that are global but
         /// smooth - which way water leaves a cell, and how much land is behind it -
@@ -115,7 +134,7 @@ namespace UniverseCreator.Nodes
         {
             if (tile == null || tile.Graph == null) return null;
 
-            int res = Mathf.Clamp(resPerSide, 16, 512);
+            int res = DrainageResolution(resPerSide); // UC repair 30: every view and solver uses the same explicit bound.
 
             Vector3 size = new Vector3(Mathf.Max(1f, tile.fullWorldSize.x),
                                        tile.worldSize.y,

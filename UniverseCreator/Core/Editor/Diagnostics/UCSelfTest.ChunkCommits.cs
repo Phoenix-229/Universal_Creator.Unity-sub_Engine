@@ -59,7 +59,7 @@ namespace UniverseCreator.Editor.Diagnostics
                     .Invoke(manager, new[] { (object)world, chunks[0] });
                 // UC-T02-06: native replacement admission must fail before touching the accepted terrain/collider.
                 bool memoryRefused = false;
-                using (memory.Reserve(memory.LimitBytes))
+                using (memory.Reserve(memory.LimitBytes - memory.ManagedBytes - memory.NativeBytes))
                 using (IEnumerator<ChunkCommitStep> rejected = stages.GetEnumerator())
                 {
                     try { rejected.MoveNext(); } catch (InvalidOperationException) { memoryRefused = true; }
@@ -118,6 +118,16 @@ namespace UniverseCreator.Editor.Diagnostics
                 Check(pumps < 256 && manager.CommitMetrics.Count(ChunkCommitStage.PublishContent) == 3 &&
                       manager.CommitMetrics.Count(ChunkCommitStage.UploadHeights) >= 15 && manager.CommitMetrics.PeakUploadBytes <= 256 * 1024,
                     "UC-T02-04 multiple native chunks drain through measured bounded upload stages.");
+                foreach (object chunk in chunks)
+                {
+                    var retained = (OutputBag)chunkType.GetField("retainedScatter").GetValue(chunk);
+                    var readback = (float[,])chunkType.GetField("appliedHeights").GetValue(chunk);
+                    var lease = (ProductMemoryBudget.Lease)chunkType.GetField("committedOutputMemory").GetValue(chunk);
+                    Check(retained != null && retained.heightmap == null && retained.splatmap == null && retained.channelPublications == null &&
+                        retained.zoneHistogram[0] == 7 && readback != null && lease != null && !(lease.Entry.Product is OutputBag) &&
+                        lease.Entry.Managed == 64L + readback.LongLength * sizeof(float) + ProductMemoryFootprint.Estimate(retained),
+                        "UC repair 30: accepted readback and scatter stay admitted without retaining uploaded output maps.");
+                }
                 root.SetActive(true); Physics.SyncTransforms();
                 foreach (UnityEngine.Terrain terrain in terrains)
                 {
@@ -132,6 +142,19 @@ namespace UniverseCreator.Editor.Diagnostics
                 // The artificial expensive step controls only elapsed work; the real production pump decides when to yield.
                 int probeSteps = 0;
                 QueueCommitFixture(world, chunkType, chunks[0], 0, 0.7f);
+                var acceptedLease = (ProductMemoryBudget.Lease)chunkType.GetField("committedOutputMemory").GetValue(chunks[0]);
+                TerrainData acceptedData = terrains[0].terrainData;
+                stages = (IEnumerable<ChunkCommitStep>)typeof(ChunkManager).GetMethod("StageChunk", flags)
+                    .Invoke(manager, new[] { (object)world, chunks[0] });
+                memoryRefused = false;
+                using (memory.Reserve(memory.LimitBytes - memory.ManagedBytes - memory.NativeBytes))
+                using (IEnumerator<ChunkCommitStep> rejected = stages.GetEnumerator())
+                {
+                    try { rejected.MoveNext(); } catch (InvalidOperationException) { memoryRefused = true; }
+                }
+                Check(memoryRefused && terrains[0].terrainData == acceptedData && acceptedLease.Entry.Pins == 1 &&
+                    ReferenceEquals(acceptedLease, chunkType.GetField("committedOutputMemory").GetValue(chunks[0])),
+                    "UC repair 30: rejected replacement preserves the previous accepted surface and managed lease.");
                 SetCommitField(chunkType, chunks[0], "commit", TimedCommitProbe(() => probeSteps++).GetEnumerator());
                 typeof(ChunkManager).GetField("activeWorkers", flags).SetValue(manager, 1);
                 long before = manager.CommitMetrics.OverBudgetOperations;
@@ -222,11 +245,17 @@ namespace UniverseCreator.Editor.Diagnostics
         {
             var tile = new TileData(new Coord(index, 0), new CoordRect(0, 0, 129, 129), new Vector3(index * 32f, 0f, 0f), new Vector3(32f, 100f, 32f), 100f);
             tile.AssignRun(world.GenerationScheduler.CurrentRun); tile.outputs.heightmap = CommitHeights(129, height);
+            // UC repair 30: exercise real evaluation accounting, including a map used only for native upload.
+            tile.AttachMemory(world.ProductMemory);
+            tile.outputs.splatmap = new float[64, 64, 1];
+            for (int z = 0; z < 64; z++) for (int x = 0; x < 64; x++) tile.outputs.splatmap[z, x, 0] = 1;
+            tile.outputs.zoneHistogram[0] = 7;
             // UC-T02-07: the native fixture now carries the same deferred payload as RiverNetworkNode.
             float width = index + 2;
             tile.AddPublication(new ChannelGraphPublication("staged-channel", new[] { width, width, width, width },
                 new[] { 1f, 1f, 1f, 1f }, 2, 2, index * 32f, 0, 32, 32));
             tile.FinishPublications();
+            tile.TrackProductMemory(tile.outputs);
             SetCommitField(type, chunk, "tile", tile); SetCommitField(type, chunk, "workerDone", true);
             SetCommitField(type, chunk, "inFlight", true); SetCommitField(type, chunk, "applied", false);
             SetCommitField(type, chunk, "stop", world.GenerationScheduler.CreateStopToken(tile.RunId));

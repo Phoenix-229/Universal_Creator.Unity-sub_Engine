@@ -3,8 +3,8 @@
 //  Module 1: Terrain Core
 //
 //  File:    UniverseCreatorInspector.cs
-//  Purpose: World authoring remains available before graph assignment so saved
-//           terrain, streaming and generation settings can always be configured.
+//  Purpose: Graph assignment guides an unconfigured world; an assigned graph
+//           exposes the saved terrain, streaming and generation settings.
 //
 //  INPUT RULE
 //  ----------
@@ -91,7 +91,7 @@ namespace UniverseCreator.Editor.Inspectors
             if (uc.IsGenerating) Repaint();
         }
 
-        /// <summary>Draws world settings with or without a terrain graph; committed edits retain Undo and the existing regeneration policy.</summary>
+        /// <summary>Shows assignment guidance until a terrain graph is assigned, then saved settings with Undo and the existing regeneration policy.</summary>
         public override void OnInspectorGUI()
         {
             UniverseCreatorObject uc = (UniverseCreatorObject)target;
@@ -104,10 +104,11 @@ namespace UniverseCreator.Editor.Inspectors
             DrawMissingManagerWarning(uc);
             DrawGraphSlot(uc);
 
-            // UC-T08-15: graph creation must not hide working world and restoration controls.
+            // UC repair 31: an unassigned world exposes assignment only, without mutating saved terrain or settings.
             if (uc.graph == null)
             {
                 DrawNoGraphState(uc);
+                return;
             }
             else
             {
@@ -284,15 +285,7 @@ namespace UniverseCreator.Editor.Inspectors
 
             if (EditorGUI.EndChangeCheck())
             {
-                Undo.RecordObject(uc, "Assign Graph");
-                uc.graph = picked;
-                EditorUtility.SetDirty(uc);
-
-                if (picked != null)
-                {
-                    GraphAssetUtility.Open(picked);
-                    if (uc.autoRegenerate) Regenerate(uc, "Graph assigned - generating terrain");
-                }
+                AssignGraph(uc, picked);
             }
 
             EditorGUILayout.Space(4);
@@ -330,11 +323,12 @@ namespace UniverseCreator.Editor.Inspectors
         {
             EditorGUILayout.Space(8);
             EditorGUILayout.HelpBox(
-                "No graph assigned. Configure the world settings below or restore saved " +
-                "terrain without a graph.\n\n" +
+                "No terrain graph assigned. Assign a graph to reveal the world and child " +
+                "settings. Saved terrain and settings are retained.\n\n" +
                 "Click the circle on the Graph field to pick an existing graph, or use " +
                 "Create Empty for a fresh one. An empty graph already contains a Height " +
-                "Output node - wire anything into it and terrain appears.",
+                "Output node. Wire a height field into it, then Regenerate; automatic " +
+                "generation follows the saved Auto Regenerate setting.",
                 MessageType.Info);
 
             EditorGUILayout.Space(6);
@@ -370,14 +364,24 @@ namespace UniverseCreator.Editor.Inspectors
                 return;
             }
 
-            Undo.RecordObject(uc, "Create Graph");
-            uc.graph = created;
-            EditorUtility.SetDirty(uc);
-
-            GraphAssetUtility.Open(created);
+            AssignGraph(uc, created);
             EditorGUIUtility.PingObject(created);
+        }
 
-            if (uc.autoRegenerate) Regenerate(uc, "Graph created - generating terrain");
+        /// <summary>UC repair 31: shares graph assignment across parent and attached child Inspectors without a second rebuild policy.</summary>
+        /// <param name="uc">Non-null world whose saved graph is edited.</param>
+        /// <param name="picked">Assigned graph, including an empty asset, or null to clear the binding without destroying terrain.</param>
+        /// <param name="openGraph">Whether to open the assigned asset's editor; false supports noninteractive authoring checks.</param>
+        /// <remarks>Records Undo and marks the world dirty. A non-null assignment regenerates only when Auto Regenerate is enabled.</remarks>
+        /// <exception cref="System.ArgumentNullException">The world is null.</exception>
+        internal static void AssignGraph(UniverseCreatorObject uc, Graph picked, bool openGraph = true)
+        {
+            if (uc == null) throw new System.ArgumentNullException(nameof(uc));
+            if (uc.graph == picked) return;
+            Undo.RecordObject(uc, "Assign Graph"); uc.graph = picked; EditorUtility.SetDirty(uc);
+            if (picked == null) return;
+            if (openGraph) GraphAssetUtility.Open(picked);
+            if (uc.autoRegenerate) Regenerate(uc, "Graph assigned - generating terrain");
         }
 
         // =====================================================================
@@ -1503,7 +1507,7 @@ namespace UniverseCreator.Editor.Inspectors
         // grid into its pooled TerrainData, which is what actually puts terrain in the
         // scene. It falls back to the single-tile RegenerateAsync internally when the
         // hierarchy has no ChunkManager, so a bare root still previews.
-        private void Regenerate(UniverseCreatorObject uc, string label)
+        private static void Regenerate(UniverseCreatorObject uc, string label)
         {
             Debug.Log("[Universe Creator] Starting Generation: " + label);
             if (!uc.RebuildChunks()) return;

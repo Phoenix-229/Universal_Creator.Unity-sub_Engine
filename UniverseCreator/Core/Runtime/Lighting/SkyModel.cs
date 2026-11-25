@@ -167,6 +167,10 @@ namespace UniverseCreator.TerrainSystem.Lighting
         /// band. Returns near-zero when the sun is high (the day model owns the sky) or
         /// the view is well above the horizon.
         /// </summary>
+        /// <param name="viewDir">Finite nonzero world-space view direction; +Y is up, normalized internally.</param>
+        /// <param name="sunDir">Finite nonzero world-space direction toward the sun, normalized internally.</param>
+        /// <param name="turbidity">Nonnegative atmospheric extinction multiplier; changes the transmitted warm hue.</param>
+        /// <returns>Nonnegative linear RGB in cd/m² before exposure; astronomical night returns zero.</returns>
         public static Color TwilightRadiance(Vector3 viewDir, Vector3 sunDir, float turbidity)
         {
             Vector3 v = viewDir.normalized;
@@ -197,17 +201,22 @@ namespace UniverseCreator.TerrainSystem.Lighting
             Color warm = SunColorLinear(
                 Mathf.Max(sunElevDeg, LightingConstants.CivilTwilightDeg),
                 LightingConstants.TwilightGrazingAirMass, turbidity);
+            // UC repair 33: this mix needs transmitted hue; the twilight envelope below already owns radiance.
+            float warmPeak = Mathf.Max(warm.r, Mathf.Max(warm.g, warm.b));
+            if (warmPeak > 0f) warm /= warmPeak;
 
             // The far side: the Earth's shadow top rises with the sun's depression;
             // below it the sky is dusky, above it a cool twilight blue, and a pink
             // belt of Venus straddles the top where it still catches reddened light.
             float shadowTopDeg = Mathf.Max(0f, -sunElevDeg);
             float w = LightingConstants.BeltOfVenusWidthDeg;
-            float inShadow = 1f - Mathf.SmoothStep(shadowTopDeg - w, shadowTopDeg, viewElevDeg);
+            // UC repair 33: Mathf.SmoothStep interpolates endpoints with normalized t, unlike HLSL smoothstep.
+            float aboveShadow = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(shadowTopDeg - w, shadowTopDeg, viewElevDeg));
+            float inShadow = 1f - aboveShadow;
             float belt = Mathf.Clamp01(1f - Mathf.Abs(viewElevDeg - shadowTopDeg) / w);
             Color antisolar = Color.Lerp(LightingConstants.TwilightSkyColor,
                                          LightingConstants.EarthShadowColor, inShadow);
-            antisolar = Color.Lerp(antisolar, warm, belt * 0.7f);
+            antisolar = Color.Lerp(antisolar, warm, belt * aboveShadow * 0.7f);
 
             Color hue = Color.Lerp(antisolar, warm, sunward);
             float amp = glow * lowness * LightingConstants.TwilightGlowScale;

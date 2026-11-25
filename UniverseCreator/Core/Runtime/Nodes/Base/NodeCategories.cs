@@ -126,18 +126,24 @@ namespace UniverseCreator.Nodes
                 return bare;
             }
 
-            object pulled = padded.PullInputForMutation(this, 0, stop, out bool mayMutate);
-            if (pulled == null || !(pulled is Matrix)) return tile.CreateMatrix();
+            try
+            {
+                object pulled = padded.PullInputForMutation(this, 0, stop, out bool mayMutate);
+                if (pulled == null || !(pulled is Matrix)) return tile.CreateMatrix();
 
-            // UC-T01-12: the evaluator's published input is read-only, including aliases behind disabled nodes.
-            // This writer owns one copy; read-only graph pulls and unexecuted branches allocate none.
-            Matrix paddedSrc = mayMutate ? (Matrix)pulled : new Matrix((Matrix)pulled);
-            if (stop != null && stop.StopRequested) return null;
+                // UC-T01-12: the evaluator's published input is read-only, including aliases behind disabled nodes.
+                // This writer owns one copy; read-only graph pulls and unexecuted branches allocate none.
+                Matrix paddedSrc = mayMutate ? (Matrix)pulled : new Matrix((Matrix)pulled);
+                if (stop != null && stop.StopRequested) return null;
 
-            ModifyWithTrenchReference(paddedSrc, padded, stop);
-            if (stop != null && stop.StopRequested) return null;
+                ModifyWithTrenchReference(paddedSrc, padded, stop);
+                if (stop != null && stop.StopRequested) return null;
 
-            return TileWindows.Crop(paddedSrc, tile, margin);
+                Matrix result = TileWindows.Crop(paddedSrc, tile, margin);
+                tile.TrackProductMemory(result); // UC repair 29: retain the crop/reference before retiring upstream halo caches.
+                return result;
+            }
+            finally { tile.RetireMemoryView(padded); }
         }
 
         // UC-T03-02: one additional bounded modifier evaluation only for a river-bearing

@@ -58,8 +58,10 @@ namespace UniverseCreator.Editor.Inspectors
         //  INSPECTOR
         // =====================================================================
 
+        /// <summary>Shows graph assignment for an unconfigured owning world; otherwise exposes the saved water controls without replacing terrain.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: assignment only while the parent is unconfigured.
             UCWaterSystemManager manager = Manager;
             if (manager == null) return;
 

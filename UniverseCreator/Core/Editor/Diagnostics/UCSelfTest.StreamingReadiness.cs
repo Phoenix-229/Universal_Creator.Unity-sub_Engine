@@ -14,7 +14,8 @@ namespace UniverseCreator.Editor.Diagnostics
         {
             if (!Application.isBatchMode) throw new InvalidOperationException("Streaming readiness acceptance requires isolated batch mode.");
             checks = 0; failures.Clear();
-            foreach (Action fixture in new Action[] { TestFramePerformanceContracts, TestStagedChunkCommits,
+            foreach (Action fixture in new Action[] { TestProductMemoryBudget, // UC repair 30: shared river identity, byte admission and cancellation.
+                TestFramePerformanceContracts, TestStagedChunkCommits,
                 TestChunkRestore, TestClimateRestoreContracts, TestRiverMemoryOutputCoexistence,
                 TestChunkReadiness, TestChunkRegionDemand, TestTerrainResidency, TestFarTerrain, TestGenerationDemand, TestGenerationMetrics })
             {

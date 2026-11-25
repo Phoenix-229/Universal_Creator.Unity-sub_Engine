@@ -55,6 +55,9 @@ namespace UniverseCreator.Editor.Diagnostics
                     pending &= (bool)type.GetField("resident").GetValue(chunk) && !((GameObject)type.GetField("go").GetValue(chunk)).activeSelf;
                 Check(pending && manager.TryGetChunkReadiness(new Coord(1, 1), out var initial) && !initial.TerrainAccepted && !initial.Ready,
                     "UC-T09-03 initial authored-graph flat placeholders remain hidden and resident for generation, even with recorded sculpt baselines.");
+                Check(!manager.TryGetAcceptedTerrainAt(Vector3.zero, out var pendingGround, out var pendingGroundState) &&
+                    pendingGround == null && !pendingGroundState.TerrainAccepted,
+                    "UC repair 32: camera ground query rejects native placeholders before acceptance.");
                 Check((int)typeof(ChunkManager).GetField("activeWorkers", flags).GetValue(manager) == 0,
                     "UC-T09-03 window/readiness observations never bake synchronously or claim a worker.");
 
@@ -65,6 +68,17 @@ namespace UniverseCreator.Editor.Diagnostics
                 Check(request > 0 && manager.GetLandingStatus(request) == ChunkLandingStatus.Ready && native.Count == 9,
                     "UC-T09-03 bounded landing observes all nine native cells without changing terrain allocation or starting a synchronous bake.");
                 object centre = cells[new Coord(1, 1)];
+                var acceptedGround = (UnityEngine.Terrain)type.GetField("terrain").GetValue(centre);
+                Check(manager.TryGetAcceptedTerrainAt(new Vector3(0, 150, 0), out var queriedGround, out var queriedState) &&
+                    queriedGround == acceptedGround && queriedGround.terrainData == native[4] && queriedState.Ready && queriedState.Visible,
+                    "UC repair 32: camera height does not change accepted native ground selection or its TerrainData identity.");
+                Check(!manager.TryGetAcceptedTerrainAt(new Vector3(float.NaN, 0, 0), out _, out _) &&
+                    !manager.TryGetAcceptedTerrainAt(new Vector3(0, float.PositiveInfinity, 0), out _, out _) &&
+                    !manager.TryGetAcceptedTerrainAt(new Vector3(0, 0, float.NegativeInfinity), out _, out _) &&
+                    !manager.TryGetAcceptedTerrainAt(new Vector3(1000, 0, 0), out var outsideGround, out var outsideState) &&
+                    outsideGround == null && !outsideState.Resident &&
+                    (int)typeof(ChunkManager).GetField("activeWorkers", flags).GetValue(manager) == 0 && native.Count == 9,
+                    "UC repair 32: invalid/outside camera queries return no ground and never allocate or start a bake.");
                 var collider = ((GameObject)type.GetField("go").GetValue(centre)).GetComponent<TerrainCollider>(); collider.enabled = false;
                 Check(manager.GetLandingStatus(request) == ChunkLandingStatus.Pending,
                     "UC-T09-03 missing active matching collision holds the host landing even when heights and visible terrain exist.");
@@ -98,6 +112,9 @@ namespace UniverseCreator.Editor.Diagnostics
                 Check(waterHeld && hit && collider.enabled && ground.gameObject.activeInHierarchy && !ground.drawHeightmap &&
                     otherRenderer != null && !otherRenderer.forceRenderingOff && manager.GetLandingStatus(request) == ChunkLandingStatus.Pending,
                     "UC-T09-03 changed water/terrain presentation is hidden while accepted native ground/collision remain available, with no foreign-world suppression.");
+                Check(manager.TryGetAcceptedTerrainAt(Vector3.zero, out var hiddenGround, out var hiddenGroundState) &&
+                    hiddenGround == ground && hiddenGroundState.TerrainAccepted && !hiddenGroundState.Visible && !hiddenGroundState.DependentsReady,
+                    "UC repair 32: camera query separates hidden/pending presentation from accepted ground without revealing it.");
                 manager.PumpCompleted();
                 Check(manager.ReadinessDiagnostic.Contains("retained water failure") && !ground.drawHeightmap,
                     "UC-T09-03 idle pumps retain a real dependency failure instead of releasing incoherent presentation.");
@@ -134,6 +151,8 @@ namespace UniverseCreator.Editor.Diagnostics
                 SetCommitField(type, centre, "publicationInProgress", true);
                 Check(manager.TryGetChunkReadiness(new Coord(1, 1), out var publishing) && !publishing.TerrainAccepted && !publishing.Ready,
                     "UC-T09-03 a native upload inside the content-publication transaction cannot be reported as accepted ground.");
+                Check(!manager.TryGetAcceptedTerrainAt(Vector3.zero, out var uploadingGround, out _) && uploadingGround == null,
+                    "UC repair 32: camera queries cannot expose an unaccepted native upload.");
                 SetCommitField(type, centre, "publicationInProgress", false);
                 Check(manager.RequestLanding(Vector3.zero, 2) == 0 && manager.RequestLanding(new Vector3(float.NaN, 0, 0)) == 0 &&
                     manager.RequestLanding(new Vector3(1000, 0, 0)) == 0 && manager.RequestLanding(Vector3.zero, 1, float.PositiveInfinity) == 0,

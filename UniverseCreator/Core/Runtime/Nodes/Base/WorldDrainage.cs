@@ -215,12 +215,12 @@ namespace UniverseCreator.Nodes
         /// <param name="consumer">Input-owning generator; null returns null.</param>
         /// <param name="inputIndex">Zero-based inlet.</param>
         /// <param name="tile">Captured world context; null returns null.</param>
-        /// <param name="resPerSide">Solve cells per side, clamped to 16-512.</param>
+        /// <param name="resPerSide">Solve cells per side, minimum 16 and maximum 2048; larger requests are rejected.</param>
         /// <param name="fillEpsilon">Finite normalized downhill fill gradient.</param>
         /// <param name="needFlow">Whether to compute direction and accumulation.</param>
         /// <param name="stop">Optional requester cancellation.</param>
         /// <returns>Immutable drainage, or null for absent/cancelled input.</returns>
-        /// <exception cref="System.ArgumentOutOfRangeException">Epsilon is nonfinite.</exception>
+        /// <exception cref="System.ArgumentOutOfRangeException">Epsilon is nonfinite or resolution exceeds the supported bound.</exception>
         /// <exception cref="System.InvalidOperationException">A shared cache miss would block the main thread.</exception>
         public static WorldDrainage Solve(Generator consumer, int inputIndex, TileData tile,
                                           int resPerSide, float fillEpsilon, bool needFlow, StopToken stop)
@@ -237,7 +237,7 @@ namespace UniverseCreator.Nodes
         /// <param name="consumer">Node whose input is sampled; null returns null.</param>
         /// <param name="inputIndex">Zero-based inlet; unwired inputs return null.</param>
         /// <param name="tile">Captured field/world context, or null.</param>
-        /// <param name="resPerSide">Solve cells per side. Clamped to 16-512.</param>
+        /// <param name="resPerSide">Solve cells per side, minimum 16 and maximum 2048; larger requests are rejected.</param>
         /// <param name="fillEpsilon">
         /// Downhill gradient left through filled ground. Zero gives a genuinely flat
         /// lake surface; a hair above zero keeps a levelled reach draining instead of
@@ -251,7 +251,7 @@ namespace UniverseCreator.Nodes
         /// <param name="stop">Local requester cancellation; shared cached work belongs to the world's lifetime.</param>
         /// <param name="useTrenchReference">UC-T03-02: true only for terminal terrain guards; classify ground before surviving river cuts. Defaults to false for routing.</param>
         /// <returns>Immutable shared drainage, or null for missing/cancelled input.</returns>
-        /// <exception cref="System.ArgumentOutOfRangeException">Epsilon is nonfinite.</exception>
+        /// <exception cref="System.ArgumentOutOfRangeException">Epsilon is nonfinite or resolution exceeds the supported bound.</exception>
         /// <exception cref="System.InvalidOperationException">A cached miss would block the main thread; schedule and await instead.</exception>
         public static WorldDrainage Solve(Generator consumer, int inputIndex, TileData tile,
                                           int resPerSide, float fillEpsilon, bool needFlow,
@@ -261,7 +261,7 @@ namespace UniverseCreator.Nodes
             if (stop != null && stop.StopRequested) return null;
             if (float.IsNaN(fillEpsilon) || float.IsInfinity(fillEpsilon))
                 throw new System.ArgumentOutOfRangeException(nameof(fillEpsilon), "Drainage epsilon must be finite.");
-            resPerSide = Mathf.Clamp(resPerSide, 16, 512);
+            resPerSide = TileWindows.DrainageResolution(resPerSide); // UC repair 30: preserve admitted larger-grid requests.
 
             // UC-T02-03: identify the captured upstream product, geometry and solve options, not just its consumer.
             WorldDrainageCache cache = tile.drainageCache;
@@ -283,43 +283,49 @@ namespace UniverseCreator.Nodes
         {
             tile.RecordDrainageSolve(); // UC-T02-09: count the shared factory once, not each joining requester.
             TileData worldView = TileWindows.WholeWorld(tile, resPerSide);
-
-            // With no graph to re-pull through there is only this chunk to go on -
-            // which is also the only case where this chunk IS the whole world.
-            TileData pullThrough = worldView != null ? worldView : tile;
-            Matrix source = pullThrough.PullInput(consumer, inputIndex, stop) as Matrix;
-
-            if (source == null) return null;
-            if (stop != null && stop.StopRequested) return null;
-
-            // UC-T03-02: a trench must not change which coarse cells are classified as ocean/lake/dry ground.
-            if (useTrenchReference && source.trenchReference != null) source = source.CopyGuardGround();
-
-            int resX = source.rect.size.x;
-            int resZ = source.rect.size.z;
-            if (resX < 2 || resZ < 2) return null;
-
-            // UC-T02-06: cover fill/flow arrays plus the growable heap's old/new backing arrays before allocation.
-            using (tile.ReserveProductMemory(64 + (long)resX * resZ * 48))
+            try
             {
-                System.Func<bool> cancel = null;
-                if (stop != null) cancel = delegate { return stop.StopRequested; };
+                // With no graph to re-pull through there is only this chunk to go on -
+                // which is also the only case where this chunk IS the whole world.
+                TileData pullThrough = worldView != null ? worldView : tile;
+                Matrix source = pullThrough.PullInput(consumer, inputIndex, stop) as Matrix;
 
-                float[] filled = Hydrology.FillDepressions(source.arr, resX, resZ, fillEpsilon, cancel);
+                if (source == null) return null;
                 if (stop != null && stop.StopRequested) return null;
 
-                int[] dir = null;
-                float[] accum = null;
+                // UC-T03-02: a trench must not change which coarse cells are classified as ocean/lake/dry ground.
+                if (useTrenchReference && source.trenchReference != null) source = source.CopyGuardGround();
 
-                if (needFlow)
+                int resX = source.rect.size.x;
+                int resZ = source.rect.size.z;
+                if (resX < 2 || resZ < 2) return null;
+
+                // UC-T02-06: cover fill/flow arrays plus the growable heap's old/new backing arrays before allocation.
+                using (tile.ReserveProductMemory(64 + (long)resX * resZ * 48))
                 {
-                    dir = Hydrology.FlowDirection(filled, resX, resZ, cancel);
-                    accum = Hydrology.FlowAccumulation(dir, resX, resZ, null, cancel);
-                    if (stop != null && stop.StopRequested) return null;
-                }
+                    System.Func<bool> cancel = null;
+                    if (stop != null) cancel = delegate { return stop.StopRequested; };
 
-                return new WorldDrainage(source, filled, dir, accum);
+                    float[] filled = Hydrology.FillDepressions(source.arr, resX, resZ, fillEpsilon, cancel);
+                    if (stop != null && stop.StopRequested) return null;
+
+                    int[] dir = null;
+                    float[] accum = null;
+
+                    if (needFlow)
+                    {
+                        dir = Hydrology.FlowDirection(filled, resX, resZ, cancel);
+                        accum = Hydrology.FlowAccumulation(dir, resX, resZ, null, cancel);
+                        if (stop != null && stop.StopRequested) return null;
+                    }
+
+                    var result = new WorldDrainage(source, filled, dir, accum);
+                    // UC repair 29: protect retained arrays before solver scratch and the upstream evaluator retire.
+                    tile.TrackProductMemory(result, "drainage");
+                    return result;
+                }
             }
+            finally { tile.RetireMemoryView(worldView); }
         }
 
         /// <summary>

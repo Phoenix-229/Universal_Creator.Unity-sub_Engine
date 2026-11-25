@@ -32,7 +32,7 @@ namespace UniverseCreator.Editor.Diagnostics
             Console.WriteLine(Report(failures.Count == 0)); EditorApplication.Exit(failures.Count == 0 ? 0 : 1);
         }
 
-        /// <summary>Synchronously compiles all 256 authored TerrainLit feature combinations in each material pass on the active graphics backend.</summary>
+        /// <summary>Compiles all 256 authored TerrainLit feature combinations and renders ambient-only forward-pass pixels on the active graphics backend.</summary>
         /// <remarks>Main-thread batch entry point requiring graphics. At most eight passes; exits nonzero on missing graphics or compilation errors.
         /// Records active backend/build target. This is Editor backend evidence; mobile/console Player builds remain separate gates.</remarks>
         public static void RunTextureShaderBatch()
@@ -62,6 +62,8 @@ namespace UniverseCreator.Editor.Diagnostics
                 foreach (var message in ShaderUtil.GetShaderMessages(shader))
                     if (message.severity == UnityEditor.Rendering.ShaderCompilerMessageSeverity.Error)
                         Check(false, "UC-T07-12 shader compiler: " + message.message);
+                // UC repair 29: compilation alone cannot detect missing vertex/mixed ambient at rendered pixels.
+                TestTerrainAmbientRendering();
             }
             catch (Exception error) { Check(false, "UC-T07 graphics compiler gate exception: " + error); }
             finally { if (material != null) UnityEngine.Object.DestroyImmediate(material); }

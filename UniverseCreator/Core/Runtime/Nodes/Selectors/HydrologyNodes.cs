@@ -571,48 +571,58 @@ namespace UniverseCreator.Nodes.Selectors
             TileData view = TileWindows.Expand(tile, margin);
             if (view == null) { view = tile; margin = 0; }
 
-            Matrix src = view.PullInput(this, 0, stop) as Matrix;
-            if (src == null) return tile.CreateMatrix();
-
-            Matrix level = view.PullInput(this, 1, stop) as Matrix;
-            Matrix mask = view.PullInput(this, 2, stop) as Matrix;
-            if (stop != null && stop.StopRequested) return null;
-
-            // No water described means no bank to cut. Passing the terrain through is
-            // the honest answer - a half-wired seat must not deform anything.
-            if (level == null || mask == null)
-                return margin > 0 ? TileWindows.Crop(src, tile, margin) : new Matrix(src);
-
-            System.Func<bool> cancel = null;
-            if (stop != null) cancel = delegate { return stop.StopRequested; };
-
-            int resX = src.rect.size.x;
-            int resZ = src.rect.size.z;
-
-            float[] seated = WaterBankSeat.Apply(src.arr, level.arr, mask.arr,
-                                                 resX, resZ, src.PixelSize.x,
-                                                 benchWidth, skirt,
-                                                 minDepth, strength,
-                                                 src.worldHeight > 1e-3f ? src.worldHeight : 600f,
-                                                 bankSlope, maxRaiseMetres, cancel);
-
-            if (stop != null && stop.StopRequested) return null;
-
-            Matrix dst = src.Blank();
-            System.Array.Copy(seated, dst.arr, dst.arr.Length);
-            // UC-T03-03: seat the same declared water on reference ground before cropping;
-            // otherwise this specialized writer discards river relief downstream of a seat.
-            if (src.trenchReference != null)
+            try
             {
-                float[] referenceSeated = WaterBankSeat.Apply(src.trenchReference.arr, level.arr, mask.arr,
-                    resX, resZ, src.PixelSize.x, benchWidth, skirt, minDepth, strength,
-                    src.worldHeight > 1e-3f ? src.worldHeight : 600f, bankSlope, maxRaiseMetres, cancel);
-                if (stop != null && stop.StopRequested) return null;
-                dst.trenchReference = new Matrix(src.rect, referenceSeated) {
-                    worldPos = src.worldPos, worldSize = src.worldSize, worldHeight = src.worldHeight };
-            }
+                Matrix src = view.PullInput(this, 0, stop) as Matrix;
+                if (src == null) return tile.CreateMatrix();
 
-            return margin > 0 ? TileWindows.Crop(dst, tile, margin) : dst;
+                Matrix level = view.PullInput(this, 1, stop) as Matrix;
+                Matrix mask = view.PullInput(this, 2, stop) as Matrix;
+                if (stop != null && stop.StopRequested) return null;
+
+                // No water described means no bank to cut. Passing the terrain through is
+                // the honest answer - a half-wired seat must not deform anything.
+                if (level == null || mask == null)
+                {
+                    Matrix passthrough = margin > 0 ? TileWindows.Crop(src, tile, margin) : new Matrix(src);
+                    tile.TrackProductMemory(passthrough);
+                    return passthrough;
+                }
+
+                System.Func<bool> cancel = null;
+                if (stop != null) cancel = delegate { return stop.StopRequested; };
+
+                int resX = src.rect.size.x;
+                int resZ = src.rect.size.z;
+
+                float[] seated = WaterBankSeat.Apply(src.arr, level.arr, mask.arr,
+                                                     resX, resZ, src.PixelSize.x,
+                                                     benchWidth, skirt,
+                                                     minDepth, strength,
+                                                     src.worldHeight > 1e-3f ? src.worldHeight : 600f,
+                                                     bankSlope, maxRaiseMetres, cancel);
+
+                if (stop != null && stop.StopRequested) return null;
+
+                Matrix dst = src.Blank();
+                System.Array.Copy(seated, dst.arr, dst.arr.Length);
+                // UC-T03-03: seat the same declared water on reference ground before cropping;
+                // otherwise this specialized writer discards river relief downstream of a seat.
+                if (src.trenchReference != null)
+                {
+                    float[] referenceSeated = WaterBankSeat.Apply(src.trenchReference.arr, level.arr, mask.arr,
+                        resX, resZ, src.PixelSize.x, benchWidth, skirt, minDepth, strength,
+                        src.worldHeight > 1e-3f ? src.worldHeight : 600f, bankSlope, maxRaiseMetres, cancel);
+                    if (stop != null && stop.StopRequested) return null;
+                    dst.trenchReference = new Matrix(src.rect, referenceSeated) {
+                        worldPos = src.worldPos, worldSize = src.worldSize, worldHeight = src.worldHeight };
+                }
+
+                Matrix result = margin > 0 ? TileWindows.Crop(dst, tile, margin) : dst;
+                tile.TrackProductMemory(result); // UC repair 29: keep seated ground/reference, release completed halo caches.
+                return result;
+            }
+            finally { if (!ReferenceEquals(view, tile)) tile.RetireMemoryView(view); }
         }
 
         /// <summary>Metres one heightmap pixel of this chunk covers.</summary>

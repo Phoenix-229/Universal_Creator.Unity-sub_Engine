@@ -30,10 +30,29 @@ namespace UniverseCreator.Nodes
         public sealed class Lease : IDisposable
         {
             private ProductMemoryBudget owner;
+            private List<Lease> dependencies;
             internal readonly Entry Entry;
             internal Lease(ProductMemoryBudget owner, Entry entry) { this.owner = owner; Entry = entry; }
-            /// <summary>Releases this pin exactly once; retained payloads become eligible for eviction.</summary>
-            public void Dispose() => Interlocked.Exchange(ref owner, null)?.Release(Entry);
+            /// <summary>UC repair 30: transfers a shared-product pin to this unpublished, exclusively owned reservation.</summary>
+            /// <param name="dependency">Non-null pin; its caller relinquishes ownership after this call succeeds.</param>
+            /// <exception cref="ObjectDisposedException">This reservation has already retired.</exception>
+            /// <remarks>Attach on the constructing thread before publishing the reservation to another owner.</remarks>
+            internal void Own(Lease dependency)
+            {
+                if (dependency == null) throw new ArgumentNullException(nameof(dependency));
+                if (owner == null) throw new ObjectDisposedException(nameof(Lease));
+                if (dependencies == null) dependencies = new List<Lease>();
+                dependencies.Add(dependency);
+            }
+            /// <summary>Releases this pin and its transferred shared-product pins exactly once; retained payloads become eligible for eviction.</summary>
+            public void Dispose()
+            {
+                ProductMemoryBudget current = Interlocked.Exchange(ref owner, null);
+                if (current == null) return;
+                if (dependencies != null) foreach (Lease dependency in dependencies) dependency.Dispose();
+                dependencies = null;
+                current.Release(Entry);
+            }
         }
 
         private readonly object gate = new object();
@@ -55,10 +74,32 @@ namespace UniverseCreator.Nodes
             get { lock (gate) { long bytes = 0; foreach (Entry entry in entries.Values) if (entry.Pins > 0) bytes += entry.Managed + entry.Native; return bytes; } }
         }
 
-        /// <summary>Milliseconds a request may wait for pinned work to finish before failing; 0 (default) fails immediately.</summary>
-        /// <remarks>Parallel chunk workers each pin large solver scratch. Waiting lets earlier workers finish and release it
-        /// instead of every later chunk failing at once. The wait is bounded, so a genuine over-budget live set still reports.</remarks>
-        public int WaitForRoomMilliseconds { get; set; }
+        // UC repair 30: inspect admission owners without traversing payloads or allocating in the generation/render loop.
+        internal string DescribeLiveSet()
+        {
+            lock (gate)
+            {
+                var largest = new List<Entry>();
+                long pinned = 0;
+                foreach (Entry entry in entries.Values)
+                {
+                    if (entry.Pins > 0) pinned += entry.Managed + entry.Native;
+                    int slot = 0;
+                    while (slot < largest.Count && largest[slot].Managed + largest[slot].Native >= entry.Managed + entry.Native) slot++;
+                    if (slot >= 8) continue;
+                    largest.Insert(slot, entry);
+                    if (largest.Count > 8) largest.RemoveAt(8);
+                }
+                var report = new System.Text.StringBuilder();
+                report.Append("entries=").Append(entries.Count).Append(" pinned=").Append(pinned)
+                    .Append(" eligible=").Append(managed + native - pinned);
+                foreach (Entry entry in largest)
+                    report.Append("\n  ").Append(entry.Product.GetType().Name).Append(" key=").Append(entry.Key)
+                        .Append(" managed=").Append(entry.Managed).Append(" native=").Append(entry.Native)
+                        .Append(" pins=").Append(entry.Pins).Append(" retained=").Append(entry.Retained);
+                return report.ToString();
+            }
+        }
 
         /// <summary>Creates an empty budget with a positive byte limit.</summary>
         /// <param name="limitBytes">Total admitted payload limit in bytes, greater than zero.</param>
@@ -163,7 +204,6 @@ namespace UniverseCreator.Nodes
             if (bytes > LimitBytes)
                 throw new InvalidOperationException("UC-T02-06: one payload requests " + bytes + " bytes above the " + LimitBytes + " byte budget.");
             // Eviction order is LRU, then ordinal producer key; dictionary enumeration never decides a victim.
-            int waitedMs = 0;
             while (bytes > LimitBytes - managed - native)
             {
                 Entry oldest = null;
@@ -172,15 +212,7 @@ namespace UniverseCreator.Nodes
                         (entry.Used == oldest.Used && string.CompareOrdinal(entry.Key, oldest.Key) < 0))) oldest = entry;
                 if (oldest == null)
                 {
-                    // Wait (releasing the gate) for a running consumer to dispose its pin, then re-evaluate.
-                    int budgetMs = WaitForRoomMilliseconds;
-                    if (budgetMs > 0 && waitedMs < budgetMs)
-                    {
-                        int slice = Math.Min(250, budgetMs - waitedMs);
-                        Monitor.Wait(gate, slice);
-                        waitedMs += slice;
-                        continue;
-                    }
+                    // UC repair 30: admission never sleeps; queue work through the existing scheduler instead.
                     throw new InvalidOperationException("UC-T02-06: product memory budget exhausted; requested " + bytes +
                         " bytes, resident " + (managed + native) + ", limit " + LimitBytes + ". Active consumers remain protected.");
                 }
@@ -192,7 +224,6 @@ namespace UniverseCreator.Nodes
         {
             entries.Remove(entry.Product);
             managed -= entry.Managed; native -= entry.Native;
-            Monitor.PulseAll(gate); // wake any request waiting for room (caller holds the gate)
             // Retained dictionaries hold only this token; clearing it really releases the budget's product reference.
             entry.Product = null;
         }

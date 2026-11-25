@@ -116,6 +116,20 @@ namespace UniverseCreator.TerrainSystem.Lighting
         [Range(0.1f, 2f)]
         public float moonDiscSizeDeg = LightingConstants.MoonDiscDiameterDeg;
 
+        [Tooltip("Display ceiling for the sun disc after exposure (0 = uncapped, the old pure-white glare). A real sun is millions of times brighter than the sky, " +
+                 "which clips every colour channel to white and blooms into a huge blob; a soft ceiling keeps the disc small, bright and tinted. Hue and angular size are unchanged.")]
+        [Range(0f, 100f)]
+        public float sunDiscDisplayPeak = 4f;
+
+        [Tooltip("Display ceiling for the moon disc after exposure (0 = uncapped). Keeps the moon a crisp bright disc instead of a white bloom.")]
+        [Range(0f, 100f)]
+        public float moonDiscDisplayPeak = 2f;
+
+        [Tooltip("How much a low sun reddens beyond the base atmosphere: 0 = previous behaviour, 1 = golden morning/evening and orange-red at the horizon, 2 = stronger. " +
+                 "Noon stays white. Affects sun light and disc colour only.")]
+        [Range(0f, 2f)]
+        public float sunHorizonWarmth = 1f;
+
         // UC celestial repair: visible, saved controls consumed by the existing sky owner.
         [Tooltip("Draw the retained Bright Star Catalog at night using game latitude/date/time. No per-star scene objects.")]
         public bool enableStars = true;

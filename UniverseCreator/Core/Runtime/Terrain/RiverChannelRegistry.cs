@@ -360,7 +360,7 @@ namespace UniverseCreator.TerrainSystem
             ProductMemoryBudget.Lease memory = null; bool accepted = false;
             try
             {
-                memory = world.ProductMemory.Reserve(4096L + ProductMemoryFootprint.Estimate(previous.Snapshot));
+                memory = previous.Snapshot.ReserveGroundMemory(world, heights); // UC repair 30: shared channels are pinned once by identity, not recharged per cell refresh.
                 var snapshot = previous.Snapshot.WithGround(heights, native.GetHoles(0, 0, native.holesResolution, native.holesResolution));
                 lock (Gate)
                 {

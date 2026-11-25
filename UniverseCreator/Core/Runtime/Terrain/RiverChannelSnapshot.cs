@@ -102,6 +102,10 @@ namespace UniverseCreator.TerrainSystem
             Topologies = topology.AsReadOnly();
         }
 
+        // UC repair 30: refreshing a cell copies its fields, while its immutable channels keep independent shared pins.
+        internal ProductMemoryBudget.Lease ReserveGroundMemory(UniverseCreatorObject world, float[,] finalHeights)
+            => GraphPublicationCommit.PrepareGround(world, Channels, finalHeights.LongLength, trenchRelief, biomeClassification);
+
         internal RiverChannelSnapshot WithGround(float[,] finalHeights, bool[,] finalSurface)
             => new RiverChannelSnapshot(Run, OwnerId, Bounds, Channels, finalHeights, baseY, heightScale, finalSurface, trenchRelief,
                 biomeClassification); // UC-T07-03: native ground edits preserve the accepted categorical provenance.

@@ -83,13 +83,22 @@ namespace UniverseCreator.TerrainSystem
             if (chunk.terrain == null || tile == null || !owner.GenerationScheduler.IsCurrent(tile.RunId)) yield break;
             TerrainData prepared = null;
             // UC-T02-06: reserve before native allocation and retain both old/new ownership until successful publication.
-            ProductMemoryBudget.Lease nativeMemory = null, uploadMemory = null, pristineMemory = null;
+            ProductMemoryBudget.Lease nativeMemory = null, uploadMemory = null, pristineMemory = null, outputMemory = null;
             ProductMemoryBudget.Lease publicationMemory = null; // UC-T02-07: a rejected commit cannot leak or reveal scene metadata.
             try
             {
                 ReapTerrainMemory();
                 nativeMemory = owner.ProductMemory.Reserve(0, EstimateCommitNativeBytes(chunk, tile.outputs, owner.terrainLayers?.Length ?? 1));
                 uploadMemory = owner.ProductMemory.Reserve(256 * 1024);
+                // UC repair 30: only accepted readback/scatter survive; uploaded maps belong to the retiring tile.
+                var retainedScatter = new OutputBag
+                {
+                    scatter = tile.outputs.scatter,
+                    detailLayers = tile.outputs.detailLayers,
+                    zoneHistogram = tile.outputs.zoneHistogram
+                };
+                outputMemory = owner.ProductMemory.Reserve(64L + (long)chunk.resolution * chunk.resolution * sizeof(float) +
+                    ProductMemoryFootprint.Estimate(retainedScatter));
                 // Keep the accepted native surface/collider together until every replacement upload has finished.
                 // Clone preserves authored terrain/detail settings and holes absent from the new OutputBag.
                 Vector3 size = new Vector3(owner.GetChunkSize(), owner.maxHeightMeters, owner.GetChunkSize());
@@ -129,7 +138,7 @@ namespace UniverseCreator.TerrainSystem
                 chunk.publicationInProgress = true; // UC-T09-03: ApplyChunk writes native candidates before their content transaction accepts.
                 try
                 {
-                    ApplyChunk(owner, chunk, prepared, pristine);
+                    ApplyChunk(owner, chunk, prepared, pristine, retainedScatter);
                     chunk.pendingScatterCommit?.PrepareCommit(); // UC-T06-12: native uploads/capacity checks finish before immutable channel publication.
                     if (!GraphPublicationCommit.Commit(owner, tile.outputs, publicationMemory, prepared)) // UC-T03-10: committed ground includes the native holes retained by staging.
                         throw new System.OperationCanceledException("Channel publication belongs to a superseded terrain commit.");
@@ -160,7 +169,8 @@ namespace UniverseCreator.TerrainSystem
                 chunk.presentationPending = true; waterPresentationPending = true; // UC-T09-03: accepted new ground waits for its water/vegetation; rollback above retains previous presentation.
                 chunk.ownsCommittedData = true;
                 chunk.committedOutputMemory?.Dispose();
-                chunk.committedOutputMemory = tile.DetachProductMemory(tile.outputs);
+                chunk.committedOutputMemory = outputMemory;
+                outputMemory = null; // UC repair 30: transfer only after acceptance; rollback keeps the previous lease.
                 chunk.flatHeightsMemory?.Dispose(); chunk.flatHeightsMemory = null;
                 chunk.committedPristineMemory?.Dispose();
                 chunk.committedPristineMemory = pristineMemory;
@@ -179,7 +189,7 @@ namespace UniverseCreator.TerrainSystem
                 chunk.pendingScatterCommit?.Dispose(); chunk.pendingScatterCommit = null; // UC-T06-12: abandoned terrain enumerators own no orphan scatter staging.
                 chunk.stagedData = null;
                 if (prepared != null) { DestroyCommitData(prepared, nativeMemory); nativeMemory = null; }
-                nativeMemory?.Dispose(); uploadMemory?.Dispose(); pristineMemory?.Dispose();
+                nativeMemory?.Dispose(); uploadMemory?.Dispose(); pristineMemory?.Dispose(); outputMemory?.Dispose();
                 publicationMemory?.Dispose();
             }
         }

@@ -48,8 +48,10 @@ namespace UniverseCreator.Editor.Inspectors
     [CanEditMultipleObjects]
     public class UCLightingSystemManagerInspector : UnityEditor.Editor
     {
+        /// <summary>Shows graph assignment for an unconfigured owning world; otherwise exposes the saved lighting controls.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: share the parent assignment gate.
             UCInspectorUI.HeaderBar("Lighting System", "d_Light Icon",
                 UCInspectorUI.HeaderAmber, "settings live · tier resolved");
 
@@ -87,6 +89,7 @@ namespace UniverseCreator.Editor.Inspectors
                 Field(so, "settings.moonDiscSizeDeg");
                 Field(so, "settings.enableStars"); // UC celestial repair: saved controls at their actual sky Inspector location.
                 Field(so, "settings.starBrightness");
+                // UC repair 34: glare and horizon warmth are automatic; legacy saved fields have no runtime consumers.
             });
 
             Section("Clouds", "Clouds", () => {
@@ -573,8 +576,10 @@ namespace UniverseCreator.Editor.Inspectors
             }
         }
 
+        /// <summary>Shows graph assignment for an unconfigured owning world; otherwise exposes the saved vegetation controls.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: preserve standalone and assigned-empty authoring.
             UCGroupedInspector.Draw(
                 serializedObject, "Vegetation",
                 "Vegetation System", "d_Terrain Icon", UCInspectorUI.HeaderGreen,

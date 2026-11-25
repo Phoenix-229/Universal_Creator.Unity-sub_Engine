@@ -106,7 +106,8 @@ namespace UniverseCreator.Nodes.Selectors
         /// <summary>
         /// Whole-world solve cells per side. A course is a world-scale question, so it is
         /// solved once at this resolution and read onto each chunk - which is also what
-        /// makes it seam-free. Matches River Network's default.
+        /// makes it seam-free. Matches River Network's default. Minimum 16, maximum 2048;
+        /// larger values are rejected during generation and storage requires budget admission.
         /// </summary>
         public int solveResolution = 256;
 
@@ -205,7 +206,7 @@ namespace UniverseCreator.Nodes.Selectors
             if (localSources == null) return Passthrough(outputIndex, src);
             if (stop != null && stop.StopRequested) return null;
 
-            int res = Mathf.Clamp(solveResolution, 16, 512);
+            int res = TileWindows.DrainageResolution(solveResolution); // UC repair 30: seeded and automatic courses share the same supported grid.
 
             // needFlow: false - this node routes with the cost search, not with flow
             // directions, and `filled` (which is what it traces on) is solved either way.

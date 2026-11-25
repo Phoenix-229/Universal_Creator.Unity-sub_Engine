@@ -152,6 +152,23 @@ namespace UniverseCreator.TerrainSystem
             return true;
         }
 
+        /// <summary>Observes accepted native ground under a world position without generating, moving or revealing it. Main thread only.</summary>
+        /// <param name="positionMetres">Finite world-space XYZ in metres; X/Z must lie inside this world's finite cell lattice. Y does not select ground.</param>
+        /// <param name="terrain">Borrowed accepted Terrain, or null when absent, nonresident or still publishing; do not destroy or retain it across a rebuild.</param>
+        /// <param name="state">Independent readiness/presentation flags for a known cell, otherwise default. Hidden accepted ground can still be returned.</param>
+        /// <returns>True for resident accepted native ground, even when collision or dependent presentation is pending; false never supplies a placeholder.</returns>
+        public bool TryGetAcceptedTerrainAt(Vector3 positionMetres, out Terrain terrain, out ChunkReadinessState state)
+        {
+            // UC repair 32: a zero-valued height sample cannot distinguish valid flat ground from an unavailable surface.
+            terrain = null; state = default;
+            if (!RiverChannelSnapshot.Finite(positionMetres.x) || !RiverChannelSnapshot.Finite(positionMetres.y) ||
+                !RiverChannelSnapshot.Finite(positionMetres.z)) return false;
+            var chunk = ChunkAtWorld(positionMetres.x, positionMetres.z);
+            if (chunk == null || !TryGetChunkReadiness(chunk.cell, out state) || !state.Resident || !state.TerrainAccepted) return false;
+            terrain = chunk.terrain;
+            return true;
+        }
+
         private void RevealAcceptedChunk(UniverseCreatorObject world, Chunk chunk)
         {
             if (chunk == null || chunk.go == null) return;

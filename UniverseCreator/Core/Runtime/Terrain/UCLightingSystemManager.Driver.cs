@@ -41,8 +41,6 @@ namespace UniverseCreator.TerrainSystem
         private static readonly int s_ShaftIntensityId = Shader.PropertyToID("_UCShaftIntensity");
         private static readonly int s_ShaftColorId     = Shader.PropertyToID("_UCShaftColor");
         private static readonly int s_MoonDirId = Shader.PropertyToID("_UCMoonDir");
-        // The true 0.52 deg moon reads as a tiny dot on a normal-FOV screen (the moon illusion makes the eye expect ~1.5x).
-        private const float MoonPerceptualScale = 1.5f;
         private static readonly int s_SunColorId = Shader.PropertyToID("_UCSunColor");
         private static readonly int s_MoonColorId = Shader.PropertyToID("_UCMoonColor");
         private static readonly int s_DiscParamsId = Shader.PropertyToID("_UCSkyDiscParams");
@@ -222,7 +220,7 @@ namespace UniverseCreator.TerrainSystem
             Shader.SetGlobalVector(s_SunColorId, new Vector4(sunDisc.r, sunDisc.g, sunDisc.b, 1));
             // UC celestial repair: alpha carries the authoritative lit fraction; orbital latitude must not create a visible new moon.
             Shader.SetGlobalVector(s_MoonColorId, new Vector4(moonDisc.r, moonDisc.g, moonDisc.b, clock.lunarIlluminatedFraction));
-            float sunRadius = settings.sunDiscSizeDeg * 0.5f * Mathf.Deg2Rad, moonRadius = settings.moonDiscSizeDeg * MoonPerceptualScale * 0.5f * Mathf.Deg2Rad;
+            float sunRadius = settings.sunDiscSizeDeg * 0.5f * Mathf.Deg2Rad, moonRadius = settings.moonDiscSizeDeg * 0.5f * Mathf.Deg2Rad;
             Shader.SetGlobalVector(s_DiscParamsId, new Vector4(sunRadius, sunRadius * 0.1f, moonRadius, moonRadius * 0.1f));
             Shader.SetGlobalFloat(s_SkyExposureId, exposureMul);
             Shader.SetGlobalVector(s_BeamExtinctionId, LightingConstants.BeamExtinction);

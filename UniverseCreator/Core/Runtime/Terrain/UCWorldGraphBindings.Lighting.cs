@@ -215,7 +215,9 @@ namespace UniverseCreator.TerrainSystem
             GraphExecutionGuard.RequireMainThread("Early climate baseline capture");
             if (baselineFields != null && baselineRun.WorldId == Owner.GenerationScheduler.CurrentRun.WorldId)
                 foreach (var field in baselineFields) if (field.Outputs.climateBaseline != null) return field.Outputs.climateBaseline;
-            if (savedClimate == null) return null;
+            // UC climate restore fix: Unity never leaves a [Serializable] field null - an unsaved scene holds an EMPTY record
+            // (no regions). That means "nothing accepted yet", not corruption, so report absence instead of throwing.
+            if (savedClimate == null || savedClimate.bands == null || savedClimate.bands.Length == 0) return null;
             if (restoredClimate == null)
             {
                 restoredClimate = Weather.ClimateBaselineProduct.RestoreAccepted(savedClimate);

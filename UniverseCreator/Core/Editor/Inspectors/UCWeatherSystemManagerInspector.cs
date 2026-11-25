@@ -85,8 +85,10 @@ namespace UniverseCreator.Editor.Inspectors
             windEditor = null;
         }
 
+        /// <summary>Shows graph assignment for an unconfigured owning world; otherwise exposes the saved weather and clock controls.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: attached worlds require a terrain graph.
             UCWeatherSystemManager manager = Manager;
             if (manager == null) return;
 

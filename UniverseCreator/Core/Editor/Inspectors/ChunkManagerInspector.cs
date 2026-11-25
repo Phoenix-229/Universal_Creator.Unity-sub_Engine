@@ -43,10 +43,12 @@ namespace UniverseCreator.Editor.Inspectors
         // on Resident Window / Height Offset triggering RebuildAll/RefreshSliceMap (R2-10/§19).
         private bool sliderDragged;
 
+        /// <summary>Shows graph assignment for an unconfigured owning world; otherwise edits saved chunk settings through the existing rebuild policy.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: keep saved native chunks while guidance is shown.
             manager = (ChunkManager)target;
-            owner = manager.GetComponentInParent<UniverseCreatorObject>();
+            owner = manager.GetComponentInParent<UniverseCreatorObject>(true); // UC repair 31: inactive worlds still own their saved Inspector settings.
             ownerChanged = false;
             layoutChanged = false;
             mapChanged = false;
@@ -395,7 +397,7 @@ namespace UniverseCreator.Editor.Inspectors
             }
         }
 
-        /// <summary>Displays the active focus camera and authored clip distances without modifying host transforms, layers or lenses.</summary>
+        /// <summary>Displays the focus camera, accepted-ground clearance and presentation/layer diagnostics without modifying host transforms, terrain or lenses.</summary>
         /// <remarks>Editor only; environment ownership is explicit for cameras outside the world hierarchy.</remarks>
         private void DrawCameraDiagnostics()
         {
@@ -412,6 +414,23 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.LabelField("Camera Near / Far (m)", $"{camera.nearClipPlane:F2} / {camera.farClipPlane:F0}");
             if (!camera.isActiveAndEnabled)
                 EditorGUILayout.HelpBox("This camera is disabled. Game view cannot use its image until the camera and its GameObject are enabled.", MessageType.Warning);
+            // UC repair 32: diagnose native readiness independently from light intensity and camera placement.
+            if (manager.TryGetAcceptedTerrainAt(camera.transform.position, out var ground, out var readiness))
+            {
+                float groundHeight = ground.SampleHeight(camera.transform.position) + ground.transform.position.y;
+                float clearance = camera.transform.position.y - groundHeight;
+                EditorGUILayout.LabelField("Ground Height / Camera Clearance (m)", $"{groundHeight:F2} / {clearance:F2}");
+                if (clearance <= 0)
+                    EditorGUILayout.HelpBox("This camera is on or below accepted ground. Move it above the surface and aim it toward the landscape.", MessageType.Warning);
+                if ((camera.cullingMask & (1 << ground.gameObject.layer)) == 0)
+                    EditorGUILayout.HelpBox("This camera's Culling Mask excludes the ground layer: " + LayerMask.LayerToName(ground.gameObject.layer) + ". Include that layer in the Camera Inspector.", MessageType.Warning);
+                if (!readiness.Visible)
+                    EditorGUILayout.HelpBox("Accepted ground exists, but its terrain presentation is hidden. Check Draw Heightmap, world activation and pending graph dependencies; changing light intensity will not reveal it.", MessageType.Warning);
+                if (!readiness.DependentsReady)
+                    EditorGUILayout.HelpBox("Terrain is accepted; dependent graph work is still pending or failed. Readiness: " + manager.ReadinessDiagnostic, MessageType.Info);
+            }
+            else
+                EditorGUILayout.HelpBox("No resident accepted ground is available under this camera. Check its world position and generation status; a flat placeholder is not a completed surface.", MessageType.Info);
             var bindings = owner != null ? owner.GetComponent<UCWorldGraphBindings>() : null;
             if (owner != null && !camera.transform.IsChildOf(owner.transform) &&
                 (bindings == null || bindings.EnvironmentSampleTarget != camera.transform))

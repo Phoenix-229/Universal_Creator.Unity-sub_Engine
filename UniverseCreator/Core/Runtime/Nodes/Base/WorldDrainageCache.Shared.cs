@@ -27,6 +27,14 @@ namespace UniverseCreator.Nodes
         }
         private readonly Dictionary<object, long> identities = new Dictionary<object, long>(new ReferenceIdentity());
         private readonly Dictionary<string, SolveEntry> inFlight = new Dictionary<string, SolveEntry>();
+        // UC repair 30: derived immutable coarse fields use the same revision and admission owner as drainage.
+        private sealed class ProductEntry
+        {
+            internal readonly TaskCompletionSource<object> completion = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+            internal int computingThread;
+        }
+        private readonly Dictionary<string, object> products = new Dictionary<string, object>();
+        private readonly Dictionary<string, ProductEntry> productFlights = new Dictionary<string, ProductEntry>();
         private readonly StopToken lifetimeStop;
         private long nextIdentity, solveCount, waitTicks, retainedBytes, peakRetainedBytes;
         private int waitingRequesters;
@@ -47,7 +55,7 @@ namespace UniverseCreator.Nodes
             lifetimeStop.RequestStop();
             lock (gate)
             {
-                map.Clear(); identities.Clear(); retainedBytes = 0;
+                map.Clear(); products.Clear(); identities.Clear(); retainedBytes = 0;
                 foreach (ProductMemoryBudget.Lease pin in memoryPins.Values) pin.Dispose();
                 memoryPins.Clear();
             }
@@ -58,7 +66,7 @@ namespace UniverseCreator.Nodes
         /// <summary>Total seconds spent by synchronous worker followers waiting for another owner; excludes solve CPU time.</summary>
         public double WaitSeconds => Interlocked.Read(ref waitTicks) / (double)Stopwatch.Frequency;
         /// <summary>Current number of owned in-flight computations, independent of how many requesters share them.</summary>
-        public int InFlightCount { get { lock (gate) return inFlight.Count; } }
+        public int InFlightCount { get { lock (gate) return inFlight.Count + productFlights.Count; } }
         /// <summary>Current synchronous worker followers; the single computing owner is excluded.</summary>
         public int WaitingRequesters => Volatile.Read(ref waitingRequesters);
         /// <summary>Peak retained coarse-grid payload estimate in bytes; counts shared aliases conservatively and excludes solver scratch/object overhead.</summary>
@@ -174,6 +182,101 @@ namespace UniverseCreator.Nodes
                 if (lifetimeStop.StopRequested || (requester != null && requester.StopRequested)) return null;
                 consumer?.TrackProductMemory(value, "drainage");
                 return value;
+            }
+        }
+
+        /// <summary>UC repair 30: shares a derived immutable world field between admitted workers without retaining chunk evaluators.</summary>
+        /// <typeparam name="T">Managed immutable payload type; no captured TileData or native owner may be retained in the result.</typeparam>
+        /// <param name="key">Full captured input/node hash, world geometry and options key; non-null and disjoint from drainage keys.</param>
+        /// <param name="compute">Factory using the world-lifetime token; null is rejected. Executed outside the cache lock.</param>
+        /// <param name="requester">Optional local cancellation, which never cancels sibling requesters.</param>
+        /// <param name="consumer">Optional tile receiving an independent payload pin before cache retirement can race it.</param>
+        /// <returns>Shared immutable payload, or null for cancellation/absent input. Failed factories are removed for retry.</returns>
+        /// <exception cref="ArgumentNullException">The key or factory is null.</exception>
+        /// <exception cref="InvalidOperationException">A miss would block the UI, a factory recursively requests itself, or payload admission fails.</exception>
+        internal T GetOrComputeProduct<T>(string key, Func<StopToken, T> compute, StopToken requester = null, TileData consumer = null) where T : class
+        {
+            if (key == null) throw new ArgumentNullException(nameof(key));
+            if (compute == null) throw new ArgumentNullException(nameof(compute));
+            ProductEntry entry;
+            bool owner;
+            lock (gate)
+            {
+                if (lifetimeStop.StopRequested || requester != null && requester.StopRequested) return null;
+                if (products.TryGetValue(key, out object ready))
+                {
+                    consumer?.TrackProductMemory(ready, key);
+                    return (T)ready;
+                }
+                if (SynchronizationContext.Current != null)
+                    throw new InvalidOperationException("A shared world-field cache miss cannot block the main thread; dispatch it on an admitted worker.");
+                owner = !productFlights.TryGetValue(key, out entry);
+                if (owner)
+                {
+                    entry = new ProductEntry { computingThread = Thread.CurrentThread.ManagedThreadId };
+                    productFlights.Add(key, entry);
+                }
+                else if (entry.computingThread == Thread.CurrentThread.ManagedThreadId)
+                    throw new InvalidOperationException("A world-field factory recursively requested its own input key.");
+            }
+            if (owner)
+            {
+                T value = null;
+                Exception failure = null;
+                try
+                {
+                    value = lifetimeStop.StopRequested ? null : compute(lifetimeStop);
+                    lock (gate)
+                    {
+                        if (lifetimeStop.StopRequested) value = null;
+                        if (value != null)
+                        {
+                            long bytes = ProductMemoryFootprint.Estimate(value);
+                            if (memory != null) memoryPins.Add(key, memory.Acquire(value, bytes, 0, key));
+                            products.Add(key, value);
+                            retainedBytes += bytes;
+                            peakRetainedBytes = Math.Max(peakRetainedBytes, retainedBytes);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) when (lifetimeStop.StopRequested) { value = null; }
+                catch (Exception error) { failure = error; value = null; }
+                finally
+                {
+                    lock (gate)
+                    {
+                        // Complete before removing the flight, so concurrent retries cannot leave an orphaned follower.
+                        if (failure == null) entry.completion.TrySetResult(value);
+                        else entry.completion.TrySetException(failure);
+                        productFlights.Remove(key);
+                    }
+                }
+            }
+            long started = Stopwatch.GetTimestamp();
+            if (!owner) Interlocked.Increment(ref waitingRequesters);
+            try
+            {
+                while (!entry.completion.Task.IsCompleted)
+                {
+                    if (lifetimeStop.StopRequested || requester != null && requester.StopRequested) return null;
+                    try { entry.completion.Task.Wait(25); }
+                    catch (AggregateException) { break; } // Preserve the original error below, as for shared drainage.
+                }
+                T value = (T)entry.completion.Task.GetAwaiter().GetResult();
+                lock (gate)
+                {
+                    if (lifetimeStop.StopRequested || requester != null && requester.StopRequested) return null;
+                    consumer?.TrackProductMemory(value, key);
+                    return value;
+                }
+            }
+            finally
+            {
+                if (!owner)
+                {
+                    Interlocked.Decrement(ref waitingRequesters);
+                    Interlocked.Add(ref waitTicks, Stopwatch.GetTimestamp() - started);
+                }
             }
         }
 

@@ -431,9 +431,16 @@ namespace UniverseCreator.Nodes.Outputs
                 TileData halo = TileWindows.Expand(tile, margin);
                 if (halo != null)
                 {
-                    filterLabels = halo.PullInput(this, 1, stop) as Matrix;
-                    blendField = halo.PullInput(this, 4, stop) as Matrix;
-                    if (filterLabels == null || (stop != null && stop.StopRequested)) return;
+                    try
+                    {
+                        filterLabels = halo.PullInput(this, 1, stop) as Matrix;
+                        blendField = halo.PullInput(this, 4, stop) as Matrix;
+                        if (filterLabels == null || (stop != null && stop.StopRequested)) return;
+                        // UC repair 29: filtering keeps these fields, not the halo's completed terrain evaluator.
+                        tile.TrackProductMemory(filterLabels);
+                        tile.TrackProductMemory(blendField);
+                    }
+                    finally { tile.RetireMemoryView(halo); }
                 }
             }
             // UC-T07-04: filter membership of actual labels. Averaging enum IDs invents intervening biomes at a border.

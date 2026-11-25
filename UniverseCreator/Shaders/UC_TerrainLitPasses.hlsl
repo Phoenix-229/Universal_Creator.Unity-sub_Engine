@@ -60,6 +60,7 @@ struct Varyings
     half3  normalWS                 : TEXCOORD4;
     half4  tangentWS                : TEXCOORD5;   // w = sign
     half4  fogFactorAndVertexLight  : TEXCOORD6;
+    half3  vertexSH                 : TEXCOORD8;   // UC repair 29: vertex/mixed SH must reach SAMPLE_GI intact.
 
 #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
     float4 shadowCoord              : TEXCOORD7;
@@ -234,6 +235,7 @@ Varyings UCTerrainVert(Attributes input)
     half3 tangentWS = cross(GetObjectToWorldMatrix()._13_23_33, normalWS);
 
     output.normalWS  = normalWS;
+    output.vertexSH  = SampleSHVertex(normalWS);
     output.tangentWS = half4(tangentWS, 1.0h);
     output.positionWS = vertexInput.positionWS;
     output.positionCS = vertexInput.positionCS;
@@ -712,7 +714,7 @@ half4 UCTerrainFrag(Varyings input) : SV_Target
 
     inputData.fogCoord = InitializeInputDataFog(float4(input.positionWS, 1.0), input.fogFactorAndVertexLight.x);
     inputData.vertexLighting = input.fogFactorAndVertexLight.yzw;
-    inputData.bakedGI = SAMPLE_GI(input.uvControlAndLM.zw, SampleSHPixel(half3(0,0,0), normalWS), normalWS);
+    inputData.bakedGI = SAMPLE_GI(input.uvControlAndLM.zw, input.vertexSH, normalWS);
     // The ground is the reference every scattered thing is matched against: read the shared
     // grid here so terrain, vegetation and water all draw their ambient from one source and
     // agree at any shared point. No grid bound yet, and the engine ambient stands unchanged.

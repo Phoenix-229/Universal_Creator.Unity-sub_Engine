@@ -107,19 +107,25 @@ namespace UniverseCreator.Nodes.Selectors
             // still correct in the interior; it only loses accuracy at the seam.
             if (padded == null) return base.Generate(outputIndex, tile, stop);
 
-            object pulled = padded.PullInput(this, 0, stop);
-            if (pulled == null || !(pulled is Matrix)) return tile.CreateMatrix();
-            if (stop != null && stop.StopRequested) return null;
+            try
+            {
+                object pulled = padded.PullInput(this, 0, stop);
+                if (pulled == null || !(pulled is Matrix)) return tile.CreateMatrix();
+                if (stop != null && stop.StopRequested) return null;
 
-            Matrix paddedSrc = (Matrix)pulled;
-            Matrix paddedMask = paddedSrc.Blank();
+                Matrix paddedSrc = (Matrix)pulled;
+                Matrix paddedMask = paddedSrc.Blank();
 
-            Select(paddedSrc, paddedMask, padded, stop);
-            if (stop != null && stop.StopRequested) return null;
+                Select(paddedSrc, paddedMask, padded, stop);
+                if (stop != null && stop.StopRequested) return null;
 
-            // Everything inside the returned rect saw its true surroundings out to
-            // `margin` pixels; the ghost ring itself is thrown away.
-            return TileWindows.Crop(paddedMask, tile, margin);
+                // Everything inside the returned rect saw its true surroundings out to
+                // `margin` pixels; the ghost ring itself is thrown away.
+                Matrix result = TileWindows.Crop(paddedMask, tile, margin);
+                tile.TrackProductMemory(result); // UC repair 29: only the completed crop survives this evaluator.
+                return result;
+            }
+            finally { tile.RetireMemoryView(padded); }
         }
 
         // ------------------------------------------------------------------

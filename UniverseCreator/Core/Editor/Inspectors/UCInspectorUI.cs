@@ -13,6 +13,8 @@
 using UnityEngine;
 using UnityEditor;
 using UniverseCreator.Editor.Utilities;
+using UniverseCreator.Nodes;
+using UniverseCreator.TerrainSystem;
 
 namespace UniverseCreator.Editor.Inspectors
 {
@@ -35,6 +37,33 @@ namespace UniverseCreator.Editor.Inspectors
         public static readonly Color ButtonRed   = new Color(1.00f, 0.62f, 0.58f);
 
         private static Texture2D pixel;
+
+        /// <summary>UC repair 31: shows assignment guidance when any selected component belongs to an unconfigured world.</summary>
+        /// <param name="selection">Inspector targets; standalone managers and worlds with an assigned empty graph remain available.</param>
+        /// <returns>True when normal settings must be withheld for this GUI event; false when no attached world is missing its graph.</returns>
+        /// <remarks>A single selection shares parent assignment/Undo/dirty/auto-generation. Mixed selections never assign multiple worlds implicitly.</remarks>
+        internal static bool DrawMissingTerrainGraph(Object[] selection)
+        {
+            UniverseCreatorObject missing = null;
+            foreach (Object selected in selection)
+            {
+                if (!(selected is Component component)) continue;
+                var world = component.GetComponentInParent<UniverseCreatorObject>(true);
+                if (world != null && world.graph == null) { missing = world; break; }
+            }
+            if (missing == null) return false;
+            HeaderBar("Universe Creator", "d_Terrain Icon", HeaderTeal, "terrain graph required");
+            if (selection.Length != 1)
+            {
+                EditorGUILayout.HelpBox("This selection includes a world with no terrain graph. Select one world to assign its graph before editing these settings.", MessageType.Info);
+                return true;
+            }
+            EditorGUILayout.HelpBox("Assign the parent world's terrain graph to reveal these settings. Saved settings and terrain are retained.", MessageType.Info);
+            Graph picked = (Graph)EditorGUILayout.ObjectField(new GUIContent("Terrain Graph", "Shared parent graph. An assigned empty graph reveals controls; generation follows Auto Regenerate."),
+                missing.graph, typeof(Graph), false);
+            if (picked != missing.graph) UniverseCreatorInspector.AssignGraph(missing, picked);
+            return true;
+        }
 
         /// <summary>Title strip for the top of an inspector.</summary>
         public static void HeaderBar(string title, string builtinIcon, Color accent, string status)

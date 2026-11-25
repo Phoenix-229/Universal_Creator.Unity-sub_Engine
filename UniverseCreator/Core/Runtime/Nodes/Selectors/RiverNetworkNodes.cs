@@ -105,6 +105,7 @@ namespace UniverseCreator.Nodes.Selectors
         /// Whole-world solve cells per side. The network is a world-scale question
         /// (a river's catchment is not inside one chunk), so it is solved once at this
         /// resolution and read onto each chunk - which is also what makes it seam-free.
+        /// Minimum 16, maximum 2048; larger values are rejected during generation and storage requires budget admission.
         /// </summary>
         public int solveResolution = 256;
 
@@ -356,30 +357,66 @@ namespace UniverseCreator.Nodes.Selectors
             return lake;
         }
 
+        // UC repair 30: only immutable coarse fields are shared; chunk carving keeps its original lattice and math.
+        private sealed class WorldFields
+        {
+            internal WorldDrainage drainage;
+            internal float[] cut, plain, strength, water;
+            internal GraphPublication[] publications;
+        }
+
+        /// <summary>Builds or borrows revision-owned coarse channels, then samples and carves this chunk without changing authored detail.</summary>
+        /// <param name="outputIndex">Zero for carved heights, one for the river mask.</param>
+        /// <param name="tile">Captured chunk geometry, inputs and world memory owner.</param>
+        /// <param name="stop">Optional requester cancellation; shared factories observe the world lifetime.</param>
+        /// <returns>Independent chunk matrix, or null on cancellation; absent drainage passes through height or an empty mask.</returns>
+        /// <exception cref="System.InvalidOperationException">Required live storage exceeds the budget, or a shared cache miss would block the UI thread.</exception>
         public override object Generate(int outputIndex, TileData tile, StopToken stop)
         {
             Matrix src = GetInputMatrix(tile, 0, stop);
             if (src == null) return tile.CreateMatrix();
             if (stop != null && stop.StopRequested) return null;
 
+            WorldFields fields;
+            if (tile.drainageCache != null && tile.Graph != null && contentHash != 0)
+            {
+                string key = tile.drainageCache.BuildInputKey(this, 0, tile, TileWindows.DrainageResolution(solveResolution),
+                    Mathf.Max(0f, flatRoutingEpsilon), true) + "|river:" + id + "|h" + contentHash;
+                fields = tile.drainageCache.GetOrComputeProduct(key, sharedStop => BuildWorldFields(tile, sharedStop), stop, tile);
+            }
+            else
+            {
+                // Unhashed authoring/test nodes may change in place; never cache them under an incomplete key.
+                fields = BuildWorldFields(tile, stop);
+                tile.TrackProductMemory(fields, id + ":world-river");
+            }
+            if (fields == null || stop != null && stop.StopRequested) return null;
+            tile.ReplayPublications(fields.publications);
+            if (fields.cut == null) return outputIndex == 1 ? src.Blank() : new Matrix(src);
+            return ReadWorldFields(outputIndex, src, fields, stop);
+        }
+
+        private WorldFields BuildWorldFields(TileData tile, StopToken stop)
+        {
+
             // needFlow: true - this node is the reason the flow pass exists. Without it
             // `dir` and `accum` are null and there is no network to trace.
             WorldDrainage wd = WorldDrainage.Solve(this, 0, tile,
-                                                   Mathf.Clamp(solveResolution, 16, 512),
+                                                   TileWindows.DrainageResolution(solveResolution),
                                                    Mathf.Max(0f, flatRoutingEpsilon), true, stop);
             if (stop != null && stop.StopRequested) return null;
 
             // No solve (single tile, nothing connected) means no network. Pass the height
             // through untouched rather than inventing rivers from a world we cannot see.
             if (wd == null || wd.dir == null || wd.accum == null)
-                return outputIndex == 1 ? src.Blank() : new Matrix(src);
+                return new WorldFields();
 
             int resX = wd.resX, resZ = wd.resZ;
             int count = resX * resZ;
             if (count <= 0 || wd.height == null || wd.height.arr == null || wd.filled == null)
-                return outputIndex == 1 ? src.Blank() : new Matrix(src);
+                return new WorldFields();
             if (wd.height.arr.Length < count || wd.filled.Length < count)
-                return outputIndex == 1 ? src.Blank() : new Matrix(src);
+                return new WorldFields();
 
             using var outletMemory = tile.ReserveProductMemory(4096L + count * 384L); // UC-T03-06: classification/record scratch remains admitted through publication.
 
@@ -406,9 +443,9 @@ namespace UniverseCreator.Nodes.Selectors
             // whose depression-fill depth is at least lakeBasinDepth and whose area is at least
             // MinLakeAreaCells solve cells. Nothing else is water but the sea.
             // UC-T03-07: epsilon is only for routing, never an artificial standing-water depth.
-            WorldDrainage flat = WorldDrainage.Solve(this, 0, tile, Mathf.Clamp(solveResolution, 16, 512), 0f, false, stop);
+            WorldDrainage flat = WorldDrainage.Solve(this, 0, tile, TileWindows.DrainageResolution(solveResolution), 0f, false, stop);
             if (stop != null && stop.StopRequested) return null;
-            if (flat == null) return outputIndex == 1 ? src.Blank() : new Matrix(src);
+            if (flat == null) return new WorldFields();
             bool[] isLake = ClassifyLakes(flat, ocean, Mathf.Max(0f, lakeBasinDepth), resX, resZ, count, stop);
             if (stop != null && stop.StopRequested) return null;
 
@@ -526,6 +563,7 @@ namespace UniverseCreator.Nodes.Selectors
             if (stop != null && stop.StopRequested) return null;
             RiverNetwork net = RiverNetworkExtractor.Extract(wd, opt, water, lakeSources, stop);
             if (stop != null && stop.StopRequested) return null;
+            var publications = new System.Collections.Generic.List<GraphPublication>(2);
             // UC-T03-05: select once from the solved tree; a cached product replays the same immutable report.
             if (net != null && hierarchyTargets != null && hierarchyTargets.enabled)
             {
@@ -534,7 +572,7 @@ namespace UniverseCreator.Nodes.Selectors
                 using var hierarchyMemory = tile.ReserveProductMemory(4096L + net.reaches.Count * 512L);
                 net = RiverNetworkExtractor.SelectHierarchy(wd, net, hierarchyTargets, scaleToWorld, minOrderToCarve, stop);
                 if (stop != null && stop.StopRequested) return null;
-                if (net != null) tile.AddPublication(new RiverHierarchyGraphPublication(id + ":hierarchy", net.hierarchy));
+                if (net != null) publications.Add(new RiverHierarchyGraphPublication(id + ":hierarchy", net.hierarchy));
             }
             LakeOutletSnapshot lakeOutlets = RiverNetworkExtractor.BindLakeOutlets(wd, net, lakeSources,
                 tile.RunId.WorldId, id, Mathf.Max(1, minOrderToCarve), stop);
@@ -543,9 +581,9 @@ namespace UniverseCreator.Nodes.Selectors
             {
                 // UC-T03-07: closed/disabled lakes retain diagnostics even when no channel exists.
                 if (lakeOutlets.Lakes.Count > 0)
-                    tile.AddPublication(new ChannelGraphPublication(id + ":channels", new float[count], new float[count], resX, resZ,
+                    publications.Add(new ChannelGraphPublication(id + ":channels", new float[count], new float[count], resX, resZ,
                         wd.height.worldPos.x, wd.height.worldPos.z, wd.height.PixelSize.x, wd.height.PixelSize.y, null, lakeOutlets));
-                return outputIndex == 1 ? src.Blank() : new Matrix(src);
+                return new WorldFields { publications = publications.ToArray() };
             }
 
             // -----------------------------------------------------------------
@@ -675,18 +713,22 @@ namespace UniverseCreator.Nodes.Selectors
             RiverOutletTopology outlets = RiverNetworkExtractor.BuildOutlets(wd, net, outletWater, tile.RunId.WorldId, id,
                 pubHalfW, pubDepth, minOrder, stop);
             if (stop != null && stop.StopRequested) return null;
-            tile.AddPublication(new ChannelGraphPublication(id + ":channels", pubHalfW, pubDepth, resX, resZ,
+            publications.Add(new ChannelGraphPublication(id + ":channels", pubHalfW, pubDepth, resX, resZ,
                 wd.height.worldPos.x, wd.height.worldPos.z, mppX, mppZ, outlets, lakeOutlets,
                 pubDownstream, pubReachIds, wd.height.arr, wd.height.worldPos.y, wd.height.worldHeight, pubSurface)); // UC-T03-09.
 
-            // -----------------------------------------------------------------
-            // Read the coarse fields onto this chunk and cut. Bilinear so the trench
-            // walls are smooth rather than stepping cell to cell - the facet source
-            // called out in the water-smoothness report.
-            // -----------------------------------------------------------------
+            float[] waterCoarse = new float[count];
+            for (int i = 0; i < count; i++) waterCoarse[i] = water[i] ? 1f : 0f;
+            return new WorldFields { drainage = wd, cut = cutNorm, plain = plainNorm, strength = strength,
+                water = waterCoarse, publications = publications.ToArray() };
+        }
+
+        private Matrix ReadWorldFields(int outputIndex, Matrix src, WorldFields fields, StopToken stop)
+        {
+            WorldDrainage wd = fields.drainage;
             if (outputIndex == 1)
             {
-                float[] chunkMask = wd.ReadAtChunk(strength, src, WorldRead.Bilinear, stop); // UC-T03-04: cancel during chunk reads.
+                float[] chunkMask = wd.ReadAtChunk(fields.strength, src, WorldRead.Bilinear, stop); // UC-T03-04: cancel during chunk reads.
                 if (stop != null && stop.StopRequested) return null;
 
                 Matrix mask = src.Blank();
@@ -696,16 +738,14 @@ namespace UniverseCreator.Nodes.Selectors
                 return mask;
             }
 
-            float[] chunkCut   = wd.ReadAtChunk(cutNorm,   src, WorldRead.Bilinear, stop);
-            float[] chunkPlain = wd.ReadAtChunk(plainNorm, src, WorldRead.Bilinear, stop);
+            float[] chunkCut   = wd.ReadAtChunk(fields.cut,   src, WorldRead.Bilinear, stop);
+            float[] chunkPlain = wd.ReadAtChunk(fields.plain, src, WorldRead.Bilinear, stop);
             if (stop != null && stop.StopRequested) return null;
 
             // Where the coarse grid says WATER (sea, a basin lake, a placed lake), read it onto the chunk and
             // switch the cut off there: a trench runs DOWN TO a shore and stops, never through the water. The
             // bilinear read is what makes the stop line smooth rather than cell-stepped.
-            float[] waterCoarse = new float[count];
-            for (int i = 0; i < count; i++) waterCoarse[i] = water[i] ? 1f : 0f;
-            float[] chunkWater = wd.ReadAtChunk(waterCoarse, src, WorldRead.Bilinear, stop);
+            float[] chunkWater = wd.ReadAtChunk(fields.water, src, WorldRead.Bilinear, stop);
             if (stop != null && stop.StopRequested) return null;
 
             Matrix dst = new Matrix(src);

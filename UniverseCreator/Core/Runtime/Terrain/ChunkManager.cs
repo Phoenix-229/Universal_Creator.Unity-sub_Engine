@@ -2626,7 +2626,7 @@ namespace UniverseCreator.TerrainSystem
                 if (!bakeClimatePreparation.IsCompleted || !bakeClimatePreparation.GetAwaiter().GetResult()) return;
             }
             RefreshQueuedChunkDemand(o); // UC-T02-08: shared-pool waiters track the current camera and collision demand too.
-            int limit = UniverseCreatorObject.ChunkConcurrency;
+            int limit = Mathf.Max(1, o.maxConcurrentChunks);
 
             if (o.frustumFirstBuildOrder)
             {
@@ -2946,7 +2946,7 @@ namespace UniverseCreator.TerrainSystem
             System.Collections.Generic.Dictionary<string, RetainedProduct> retainedSeed = c.retained;
 
             GenerationSnapshot.Lease workerLease = snapshot.Acquire();
-            c.task = scheduler.RunWorkerAsync(worldRun, UniverseCreatorObject.ChunkConcurrency, stop, () =>
+            c.task = scheduler.RunWorkerAsync(worldRun, Mathf.Max(1, o.maxConcurrentChunks), stop, () =>
             {
                 TileData tile = null;
                 bool published = false;
@@ -3512,7 +3512,7 @@ namespace UniverseCreator.TerrainSystem
         }
 
         // UC-T02-04: this indivisible publication runs only after detached uploads and height synchronization finish.
-        private void ApplyChunk(UniverseCreatorObject o, Chunk c, TerrainData prepared, float[,] pristineHeights)
+        private void ApplyChunk(UniverseCreatorObject o, Chunk c, TerrainData prepared, float[,] pristineHeights, OutputBag retainedScatter)
         {
             if (c.terrain == null) return;
             if (c.tile == null || !o.GenerationScheduler.IsCurrent(c.tile.RunId)) return; // UC-T02-01: final publication boundary.
@@ -3597,18 +3597,9 @@ namespace UniverseCreator.TerrainSystem
                 veg.ReportBuildMilliseconds(
                     (float)((Time.realtimeSinceStartupAsDouble - scatterT0) * 1000.0));
 
-            // T-VEGLAW. Keep the scatter-only slice of this bake so an inspector
-            // vegetation-library edit can re-apply it over this exact terrain without a
-            // rebuild. Reference copies of the three fields ScatterApplier.Apply reads;
-            // the pump nulls c.tile on the next line, which frees the heightmap, splatmap
-            // and mask arrays but leaves these small collections reachable. Rebuilt every
-            // bake, so it always mirrors the graph as last evaluated for this cell.
-            c.retainedScatter = new OutputBag
-            {
-                scatter = c.tile.outputs.scatter,
-                detailLayers = c.tile.outputs.detailLayers,
-                zoneHistogram = c.tile.outputs.zoneHistogram
-            };
+            // UC repair 30 / T-VEGLAW: retain the admitted scatter slice for library edits.
+            // StageChunk keeps its readback/slice reservation on success; upload-only maps retire with c.tile.
+            c.retainedScatter = retainedScatter;
 
             // Reconcile the registry's live flag against what the cell actually is.
             // A cell can be parked by the streaming pass between the moment its heights

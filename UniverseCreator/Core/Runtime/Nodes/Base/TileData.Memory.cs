@@ -23,6 +23,20 @@ namespace UniverseCreator.Nodes
             memoryViews.Add(view);
         }
 
+        /// <summary>UC repair 29: retires a completed temporary evaluator while preserving its propagated channel metadata.</summary>
+        /// <param name="view">An attached view owned by this tile; null or an already retired view is ignored.</param>
+        /// <remarks>Owner-thread only, after evaluation has unwound. The caller must pin any returned product on this tile first.
+        /// Channel publications are admitted before releasing view pins. An admission failure keeps the view attached for final retirement.</remarks>
+        /// <exception cref="InvalidOperationException">Surviving channel metadata cannot fit the world's hard budget.</exception>
+        internal void RetireMemoryView(TileData view)
+        {
+            if (view == null || memoryViews == null || !memoryViews.Contains(view)) return;
+            foreach (ChannelGraphPublication publication in view.ChannelPublications())
+                TrackProductMemory(publication, publication.Key);
+            view.ReleaseProductMemory();
+            memoryViews.Remove(view);
+        }
+
         internal void TrackProductMemory(object product, string key = "outputs")
         {
             if (memoryBudget == null || product == null || memoryPins.ContainsKey(product)) return;

@@ -31,6 +31,7 @@ namespace UniverseCreator.Editor.Diagnostics
 #endif
                 ("clock math", TestClockIsDeterministic), ("solar geography", TestSolarTimeCorrection),
                 ("weather field", TestWeatherCellField), ("exposure", TestExposureModel), ("sun/moon handover", TestSunMoonHandover),
+                ("twilight bands", TestTwilightBands), // UC repair 33: the focused gate must cover the full suite's horizon-colour contract.
                 ("sky/ambient", TestSkyAmbientProbe), ("irradiance consumer", TestIrradianceGIWire),
                 ("probe scheduler", TestProbeRefreshScheduler), ("probe cadence", TestRefreshCadence),
                 ("probe uploads", TestIrradianceUpload), ("temporal math", TestTemporalReprojection),

@@ -1,0 +1,3442 @@
+{
+  "worlds": [
+    {
+      "version": "V5.5",
+      "alpine": false,
+      "title": "Green Coast: continental lowlands and branching river plains",
+      "objective": "A warm island-continent surrounded by ocean, with eroded inland uplands, branching river plains, seasonal forests, inland lakes and an irregular mix of sandy bays, low shores and rocky headlands.",
+      "graphs": [
+        {
+          "domain": "LightingClimateWeather",
+          "nodes": [
+            {
+              "id": "normal",
+              "name": "Climate Baseline",
+              "settings": [
+                {
+                  "name": "temperatureC",
+                  "value": "32"
+                },
+                {
+                  "name": "moisture01",
+                  "value": "0.4"
+                },
+                {
+                  "name": "windBearingDeg",
+                  "value": "270"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "region",
+              "name": "Climate Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "-3000,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "250"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "30"
+                },
+                {
+                  "name": "moisture01",
+                  "value": "0.72"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "4"
+                }
+              ]
+            },
+            {
+              "id": "weatherA",
+              "name": "Weather Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "-3000,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "300"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "30"
+                },
+                {
+                  "name": "humidity01",
+                  "value": "0.8"
+                },
+                {
+                  "name": "cloudCover01",
+                  "value": "0.7"
+                },
+                {
+                  "name": "precipitationMmPerHour",
+                  "value": "4"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "5"
+                },
+                {
+                  "name": "wetness01",
+                  "value": "0.45"
+                },
+                {
+                  "name": "visibilityMetres",
+                  "value": "7000"
+                }
+              ]
+            },
+            {
+              "id": "weatherB",
+              "name": "Weather Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "0,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "300"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "32"
+                },
+                {
+                  "name": "humidity01",
+                  "value": "0.5"
+                },
+                {
+                  "name": "cloudCover01",
+                  "value": "0.3"
+                },
+                {
+                  "name": "precipitationMmPerHour",
+                  "value": "0"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "3"
+                },
+                {
+                  "name": "wetness01",
+                  "value": "0.1"
+                },
+                {
+                  "name": "visibilityMetres",
+                  "value": "15000"
+                }
+              ]
+            },
+            {
+              "id": "weatherOut",
+              "name": "Weather Output",
+              "settings": []
+            },
+            {
+              "id": "lightOut",
+              "name": "Lighting Output",
+              "settings": []
+            }
+          ],
+          "wires": [
+            {
+              "source": "normal",
+              "output": "Climate",
+              "target": "region",
+              "input": "Baseline"
+            },
+            {
+              "source": "region",
+              "output": "Climate",
+              "target": "weatherOut",
+              "input": "Climate Baseline"
+            },
+            {
+              "source": "weatherA",
+              "output": "Weather Regions",
+              "target": "weatherB",
+              "input": "Previous Regions"
+            },
+            {
+              "source": "weatherB",
+              "output": "Weather Regions",
+              "target": "weatherOut",
+              "input": "Weather Regions"
+            }
+          ]
+        },
+        {
+          "domain": "TerrainWater",
+          "nodes": [
+            {
+              "id": "continent",
+              "name": "Continental Shape Mask",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "55117"
+                },
+                {
+                  "name": "size",
+                  "value": "2200"
+                },
+                {
+                  "name": "landRadius",
+                  "value": "0.62"
+                },
+                {
+                  "name": "falloff",
+                  "value": "2.5"
+                },
+                {
+                  "name": "coastNoise",
+                  "value": "0.4"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "hills",
+              "name": "Hybrid Multifractal",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "55229"
+                },
+                {
+                  "name": "size",
+                  "value": "1500"
+                },
+                {
+                  "name": "bands",
+                  "value": "6"
+                },
+                {
+                  "name": "roughness",
+                  "value": "0.38"
+                },
+                {
+                  "name": "amplitude",
+                  "value": "0.85"
+                }
+              ]
+            },
+            {
+              "id": "relief",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "rainErosion",
+              "name": "Droplet Erosion",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "55331"
+                },
+                {
+                  "name": "raindrops",
+                  "value": "30000"
+                },
+                {
+                  "name": "erosionRadius",
+                  "value": "2"
+                },
+                {
+                  "name": "maxLifetime",
+                  "value": "48"
+                }
+              ]
+            },
+            {
+              "id": "talus",
+              "name": "Thermal Erosion",
+              "settings": [
+                {
+                  "name": "iterations",
+                  "value": "8"
+                },
+                {
+                  "name": "talusAngle",
+                  "value": "34"
+                },
+                {
+                  "name": "amount",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "gentleShore",
+              "name": "Slope",
+              "settings": [
+                {
+                  "name": "minAngle",
+                  "value": "0"
+                },
+                {
+                  "name": "maxAngle",
+                  "value": "18"
+                },
+                {
+                  "name": "falloff",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "waves",
+              "name": "Coastal Erosion",
+              "settings": [
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                },
+                {
+                  "name": "waveHeight",
+                  "value": "0.004"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "shoreBlend",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "CopyOther"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "spawner",
+              "name": "Hydrology Spawner",
+              "settings": [
+                {
+                  "name": "targetLakeCount",
+                  "value": "3"
+                },
+                {
+                  "name": "generateOcean",
+                  "value": "true"
+                },
+                {
+                  "name": "drainageResolution",
+                  "value": "256"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "lakeFill",
+              "name": "Lake Fill",
+              "settings": [
+                {
+                  "name": "drainageResolution",
+                  "value": "256"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                },
+                {
+                  "name": "minDepth",
+                  "value": "0.002"
+                }
+              ]
+            },
+            {
+              "id": "lakeBasin",
+              "name": "Lake Basin",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "55443"
+                },
+                {
+                  "name": "maxDepth",
+                  "value": "0.015"
+                },
+                {
+                  "name": "shoreRunMetres",
+                  "value": "120"
+                },
+                {
+                  "name": "ruggedness",
+                  "value": "0.0007"
+                }
+              ]
+            },
+            {
+              "id": "network",
+              "name": "River Network",
+              "settings": [
+                {
+                  "name": "solveResolution",
+                  "value": "512"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                },
+                {
+                  "name": "channelInitiationFraction",
+                  "value": "0.003"
+                },
+                {
+                  "name": "generateLakeOutlets",
+                  "value": "true"
+                },
+                {
+                  "name": "minReachCells",
+                  "value": "3"
+                },
+                {
+                  "name": "minOrderToCarve",
+                  "value": "1"
+                },
+                {
+                  "name": "autoTrunkWidth",
+                  "value": "true"
+                },
+                {
+                  "name": "minTrenchDepthMetres",
+                  "value": "1.5"
+                },
+                {
+                  "name": "naturalSeed",
+                  "value": "55559"
+                }
+              ]
+            },
+            {
+              "id": "banks",
+              "name": "River Banks",
+              "settings": [
+                {
+                  "name": "bankBandMetres",
+                  "value": "12"
+                },
+                {
+                  "name": "floodplainMetres",
+                  "value": "60"
+                },
+                {
+                  "name": "bankEase",
+                  "value": "0.001"
+                }
+              ]
+            },
+            {
+              "id": "riverFill",
+              "name": "River Fill",
+              "settings": [
+                {
+                  "name": "drainageResolution",
+                  "value": "512"
+                },
+                {
+                  "name": "bankFreeboard",
+                  "value": "0.0015"
+                },
+                {
+                  "name": "minDepth",
+                  "value": "0.0015"
+                }
+              ]
+            },
+            {
+              "id": "lakeSeat",
+              "name": "Water Bank Seat",
+              "settings": [
+                {
+                  "name": "benchWidth",
+                  "value": "2"
+                },
+                {
+                  "name": "maxRaiseMetres",
+                  "value": "0.5"
+                },
+                {
+                  "name": "skirtWidth",
+                  "value": "40"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.6"
+                }
+              ]
+            },
+            {
+              "id": "riverSeat",
+              "name": "Water Bank Seat",
+              "settings": [
+                {
+                  "name": "benchWidth",
+                  "value": "2"
+                },
+                {
+                  "name": "maxRaiseMetres",
+                  "value": "0.5"
+                },
+                {
+                  "name": "skirtWidth",
+                  "value": "30"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.6"
+                }
+              ]
+            },
+            {
+              "id": "heightOut",
+              "name": "Height Output",
+              "settings": [
+                {
+                  "name": "heightScale",
+                  "value": "900"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                },
+                {
+                  "name": "seaFreeboardMetres",
+                  "value": "2"
+                },
+                {
+                  "name": "continentalRiseMetres",
+                  "value": "45"
+                },
+                {
+                  "name": "continentalRiseDistanceMetres",
+                  "value": "3000"
+                },
+                {
+                  "name": "continentalRiseStrength",
+                  "value": "0.25"
+                },
+                {
+                  "name": "shoreGuardDeadzoneMetres",
+                  "value": "80"
+                }
+              ]
+            },
+            {
+              "id": "oceanMask",
+              "name": "Ocean Level",
+              "settings": [
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "allWater",
+              "name": "Water Mask",
+              "settings": []
+            },
+            {
+              "id": "climate",
+              "name": "Climate Baseline Input",
+              "settings": [
+                {
+                  "name": "yearFraction",
+                  "value": "0.25"
+                },
+                {
+                  "name": "allowMissingBaseline",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "altitudeTemp",
+              "name": "Temperature Map",
+              "settings": [
+                {
+                  "name": "equatorTemperature",
+                  "value": "1"
+                },
+                {
+                  "name": "poleTemperature",
+                  "value": "0.8"
+                },
+                {
+                  "name": "poleDistance",
+                  "value": "200000"
+                },
+                {
+                  "name": "lapseRate",
+                  "value": "0.2"
+                },
+                {
+                  "name": "noiseStrength",
+                  "value": "0.025"
+                }
+              ]
+            },
+            {
+              "id": "temperature",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "terrainMoisture",
+              "name": "Moisture Map",
+              "settings": [
+                {
+                  "name": "baseMoisture",
+                  "value": "0.65"
+                },
+                {
+                  "name": "drainageInfluence",
+                  "value": "0.25"
+                },
+                {
+                  "name": "rainShadowStrength",
+                  "value": "0.25"
+                },
+                {
+                  "name": "windDirection",
+                  "value": "270"
+                },
+                {
+                  "name": "noiseStrength",
+                  "value": "0.06"
+                },
+                {
+                  "name": "seed",
+                  "value": "55661"
+                }
+              ]
+            },
+            {
+              "id": "moisture",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "biomes",
+              "name": "Biome Classifier",
+              "settings": []
+            },
+            {
+              "id": "splatOut",
+              "name": "Biome Splat Output",
+              "settings": [
+                {
+                  "name": "layerCount",
+                  "value": "8"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.35"
+                },
+                {
+                  "name": "snowLine",
+                  "value": "0.85"
+                },
+                {
+                  "name": "snowEnabled",
+                  "value": "false"
+                },
+                {
+                  "name": "beachHeight",
+                  "value": "0.004"
+                },
+                {
+                  "name": "beachMaxSlope",
+                  "value": "12"
+                },
+                {
+                  "name": "bareLayer",
+                  "value": "2"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "continent",
+              "output": "Height",
+              "target": "relief",
+              "input": "A"
+            },
+            {
+              "source": "hills",
+              "output": "Height",
+              "target": "relief",
+              "input": "B"
+            },
+            {
+              "source": "relief",
+              "output": "Height",
+              "target": "rainErosion",
+              "input": "Height"
+            },
+            {
+              "source": "rainErosion",
+              "output": "Height",
+              "target": "talus",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "gentleShore",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "waves",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "shoreBlend",
+              "input": "A"
+            },
+            {
+              "source": "waves",
+              "output": "Height",
+              "target": "shoreBlend",
+              "input": "B"
+            },
+            {
+              "source": "gentleShore",
+              "output": "Mask",
+              "target": "shoreBlend",
+              "input": "Mask"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "spawner",
+              "input": "Height"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "lakeFill",
+              "input": "Height"
+            },
+            {
+              "source": "spawner",
+              "output": "Lake Mask",
+              "target": "lakeFill",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "lakeBasin",
+              "input": "Height"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "lakeBasin",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Level",
+              "target": "lakeBasin",
+              "input": "Water Level"
+            },
+            {
+              "source": "lakeBasin",
+              "output": "Height",
+              "target": "network",
+              "input": "Height"
+            },
+            {
+              "source": "network",
+              "output": "Height",
+              "target": "banks",
+              "input": "Height"
+            },
+            {
+              "source": "network",
+              "output": "River Mask",
+              "target": "banks",
+              "input": "River Mask"
+            },
+            {
+              "source": "banks",
+              "output": "Height",
+              "target": "riverFill",
+              "input": "Height"
+            },
+            {
+              "source": "network",
+              "output": "River Mask",
+              "target": "riverFill",
+              "input": "River Mask"
+            },
+            {
+              "source": "banks",
+              "output": "Height",
+              "target": "lakeSeat",
+              "input": "Height"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Level",
+              "target": "lakeSeat",
+              "input": "Water Level"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "lakeSeat",
+              "input": "Water Mask"
+            },
+            {
+              "source": "lakeSeat",
+              "output": "Height",
+              "target": "riverSeat",
+              "input": "Height"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Level",
+              "target": "riverSeat",
+              "input": "Water Level"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Mask",
+              "target": "riverSeat",
+              "input": "Water Mask"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "heightOut",
+              "input": "Height"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "oceanMask",
+              "input": "Height"
+            },
+            {
+              "source": "oceanMask",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "Ocean Mask"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "River Mask"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "altitudeTemp",
+              "input": "Height"
+            },
+            {
+              "source": "climate",
+              "output": "Temperature (-20..40 C normalized)",
+              "target": "temperature",
+              "input": "A"
+            },
+            {
+              "source": "altitudeTemp",
+              "output": "Height",
+              "target": "temperature",
+              "input": "B"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "terrainMoisture",
+              "input": "Height"
+            },
+            {
+              "source": "climate",
+              "output": "Moisture",
+              "target": "moisture",
+              "input": "A"
+            },
+            {
+              "source": "terrainMoisture",
+              "output": "Height",
+              "target": "moisture",
+              "input": "B"
+            },
+            {
+              "source": "temperature",
+              "output": "Height",
+              "target": "biomes",
+              "input": "Temperature"
+            },
+            {
+              "source": "moisture",
+              "output": "Height",
+              "target": "biomes",
+              "input": "Moisture"
+            },
+            {
+              "source": "allWater",
+              "output": "Water Mask",
+              "target": "biomes",
+              "input": "Wetness"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "splatOut",
+              "input": "Height"
+            },
+            {
+              "source": "biomes",
+              "output": "Biome",
+              "target": "splatOut",
+              "input": "Biome"
+            },
+            {
+              "source": "biomes",
+              "output": "Blend",
+              "target": "splatOut",
+              "input": "Blend"
+            },
+            {
+              "source": "allWater",
+              "output": "Water Mask",
+              "target": "splatOut",
+              "input": "Wetness"
+            }
+          ]
+        },
+        {
+          "domain": "Vegetation",
+          "nodes": [
+            {
+              "id": "forest",
+              "name": "World Graph Input",
+              "settings": [
+                {
+                  "name": "selectedBiome",
+                  "value": "TropicalSeasonalForest"
+                }
+              ]
+            },
+            {
+              "id": "grassland",
+              "name": "World Graph Input",
+              "settings": [
+                {
+                  "name": "selectedBiome",
+                  "value": "Savanna"
+                }
+              ]
+            },
+            {
+              "id": "trees",
+              "name": "Tree Scatter",
+              "settings": [
+                {
+                  "name": "prototypeIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "16000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "6"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "28"
+                },
+                {
+                  "name": "shoreClearanceMetres",
+                  "value": "4"
+                },
+                {
+                  "name": "seed",
+                  "value": "55773"
+                }
+              ]
+            },
+            {
+              "id": "shrubs",
+              "name": "Shrub Scatter",
+              "settings": [
+                {
+                  "name": "prototypeIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "22000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "3"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "35"
+                },
+                {
+                  "name": "shoreClearanceMetres",
+                  "value": "2"
+                },
+                {
+                  "name": "seed",
+                  "value": "55881"
+                }
+              ]
+            },
+            {
+              "id": "grass",
+              "name": "Grass Detail",
+              "settings": [
+                {
+                  "name": "detailLayerIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "180000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "0.7"
+                },
+                {
+                  "name": "maxDensityPerCell",
+                  "value": "8"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "35"
+                },
+                {
+                  "name": "seed",
+                  "value": "55991"
+                }
+              ]
+            },
+            {
+              "id": "rocks",
+              "name": "Rock Scatter",
+              "settings": [
+                {
+                  "name": "density",
+                  "value": "600"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "4"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "55"
+                },
+                {
+                  "name": "embedDepth",
+                  "value": "0.2"
+                },
+                {
+                  "name": "seed",
+                  "value": "56003"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "trees",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "shrubs",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "grass",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "rocks",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "trees",
+              "input": "Mask"
+            },
+            {
+              "source": "forest",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "shrubs",
+              "input": "Mask"
+            },
+            {
+              "source": "grassland",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "grass",
+              "input": "Mask"
+            }
+          ]
+        },
+        {
+          "domain": "TextureMaterialShader",
+          "nodes": [
+            {
+              "id": "layer0",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Rock"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "6,6"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.2"
+                }
+              ]
+            },
+            {
+              "id": "normal0",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer1",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Cliff Rock"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "9,9"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.18"
+                }
+              ]
+            },
+            {
+              "id": "normal1",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer2",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Mud/Silt"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "4,4"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.25"
+                }
+              ]
+            },
+            {
+              "id": "normal2",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer3",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Sand"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "7,7"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "normal3",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "splat",
+              "name": "Texture Splat",
+              "settings": [
+                {
+                  "name": "heightBlend",
+                  "value": "true"
+                },
+                {
+                  "name": "heightTransition",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "cliff",
+              "name": "Cliff Surface",
+              "settings": [
+                {
+                  "name": "angleStartDegrees",
+                  "value": "35"
+                },
+                {
+                  "name": "angleEndDegrees",
+                  "value": "60"
+                },
+                {
+                  "name": "triplanarScaleMetres",
+                  "value": "6"
+                }
+              ]
+            },
+            {
+              "id": "macro",
+              "name": "Macro Variation",
+              "settings": [
+                {
+                  "name": "scaleMetres",
+                  "value": "220"
+                },
+                {
+                  "name": "amount",
+                  "value": "0.12"
+                }
+              ]
+            },
+            {
+              "id": "snow",
+              "name": "Snow Cover",
+              "settings": [
+                {
+                  "name": "snowLineAltitude",
+                  "value": "2000"
+                },
+                {
+                  "name": "falloffMetres",
+                  "value": "150"
+                },
+                {
+                  "name": "coverage",
+                  "value": "0"
+                },
+                {
+                  "name": "slopeLimitDegrees",
+                  "value": "52"
+                }
+              ]
+            },
+            {
+              "id": "wet",
+              "name": "Wetness",
+              "settings": [
+                {
+                  "name": "wetnessAmount",
+                  "value": "0.25"
+                }
+              ]
+            },
+            {
+              "id": "wetAmount",
+              "name": "Scalar Parameter",
+              "settings": [
+                {
+                  "name": "value",
+                  "value": "0.25"
+                }
+              ]
+            },
+            {
+              "id": "fade",
+              "name": "Distance Fade",
+              "settings": [
+                {
+                  "name": "fadeStartMetres",
+                  "value": "180"
+                },
+                {
+                  "name": "fadeEndMetres",
+                  "value": "600"
+                }
+              ]
+            },
+            {
+              "id": "grade",
+              "name": "Colour Grade",
+              "settings": [
+                {
+                  "name": "brightness",
+                  "value": "1"
+                },
+                {
+                  "name": "contrast",
+                  "value": "1"
+                },
+                {
+                  "name": "saturation",
+                  "value": "0.95"
+                }
+              ]
+            },
+            {
+              "id": "water",
+              "name": "Water Surface",
+              "settings": [
+                {
+                  "name": "depthFadeMetres",
+                  "value": "6"
+                },
+                {
+                  "name": "flowMetresPerSecond",
+                  "value": "0.06,0.03"
+                }
+              ]
+            },
+            {
+              "id": "foam",
+              "name": "Water Foam",
+              "settings": [
+                {
+                  "name": "intensity",
+                  "value": "0.6"
+                },
+                {
+                  "name": "edgeWidthMetres",
+                  "value": "1.2"
+                }
+              ]
+            },
+            {
+              "id": "caustic",
+              "name": "Caustics",
+              "settings": [
+                {
+                  "name": "intensity",
+                  "value": "0.35"
+                },
+                {
+                  "name": "depthFadeMetres",
+                  "value": "8"
+                }
+              ]
+            },
+            {
+              "id": "final",
+              "name": "Terrain Blend Final",
+              "settings": [
+                {
+                  "name": "maxLayers",
+                  "value": "4"
+                },
+                {
+                  "name": "qualityLevel",
+                  "value": "High"
+                }
+              ]
+            },
+            {
+              "id": "shader",
+              "name": "Shader Output",
+              "settings": [
+                {
+                  "name": "target",
+                  "value": "UniverseCreatorTerrainLit"
+                },
+                {
+                  "name": "stage",
+                  "value": "SurfaceFragment"
+                },
+                {
+                  "name": "materialName",
+                  "value": "UC_ContinentalTerrain"
+                },
+                {
+                  "name": "outputFolder",
+                  "value": "Assets/UniverseCreator/Generated"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "layer0",
+              "output": "Layer",
+              "target": "normal0",
+              "input": "Layer"
+            },
+            {
+              "source": "normal0",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer R"
+            },
+            {
+              "source": "layer1",
+              "output": "Layer",
+              "target": "normal1",
+              "input": "Layer"
+            },
+            {
+              "source": "normal1",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer G"
+            },
+            {
+              "source": "layer2",
+              "output": "Layer",
+              "target": "normal2",
+              "input": "Layer"
+            },
+            {
+              "source": "normal2",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer B"
+            },
+            {
+              "source": "layer3",
+              "output": "Layer",
+              "target": "normal3",
+              "input": "Layer"
+            },
+            {
+              "source": "normal3",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer A"
+            },
+            {
+              "source": "cliff",
+              "output": "Surface",
+              "target": "macro",
+              "input": "Surface"
+            },
+            {
+              "source": "macro",
+              "output": "Surface",
+              "target": "snow",
+              "input": "Surface"
+            },
+            {
+              "source": "snow",
+              "output": "Surface",
+              "target": "wet",
+              "input": "Surface"
+            },
+            {
+              "source": "wetAmount",
+              "output": "Value",
+              "target": "wet",
+              "input": "Wetness (0..1)"
+            },
+            {
+              "source": "wet",
+              "output": "Surface",
+              "target": "fade",
+              "input": "Surface"
+            },
+            {
+              "source": "fade",
+              "output": "Surface",
+              "target": "grade",
+              "input": "Surface"
+            },
+            {
+              "source": "grade",
+              "output": "Surface",
+              "target": "final",
+              "input": "Surface"
+            },
+            {
+              "source": "splat",
+              "output": "Splat",
+              "target": "final",
+              "input": "Splat"
+            },
+            {
+              "source": "water",
+              "output": "Water",
+              "target": "foam",
+              "input": "Water"
+            },
+            {
+              "source": "foam",
+              "output": "Water",
+              "target": "caustic",
+              "input": "Water"
+            },
+            {
+              "source": "caustic",
+              "output": "Water",
+              "target": "final",
+              "input": "Water"
+            },
+            {
+              "source": "final",
+              "output": "Surface",
+              "target": "shader",
+              "input": "Surface"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "version": "V6.5",
+      "alpine": true,
+      "title": "Rift Highlands: alpine catchments and authored river journeys",
+      "objective": "A cold tectonic island-continent surrounded by ocean, with highland interiors, glacial valleys, lower coastal plains, cliff headlands, sheltered beaches, inland lakes and manually directed river journeys.",
+      "graphs": [
+        {
+          "domain": "LightingClimateWeather",
+          "nodes": [
+            {
+              "id": "normal",
+              "name": "Climate Baseline",
+              "settings": [
+                {
+                  "name": "temperatureC",
+                  "value": "9"
+                },
+                {
+                  "name": "moisture01",
+                  "value": "0.22"
+                },
+                {
+                  "name": "windBearingDeg",
+                  "value": "270"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "5"
+                }
+              ]
+            },
+            {
+              "id": "region",
+              "name": "Climate Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "-3000,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "250"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "4"
+                },
+                {
+                  "name": "moisture01",
+                  "value": "0.75"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "4"
+                }
+              ]
+            },
+            {
+              "id": "weatherA",
+              "name": "Weather Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "-3000,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "300"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "8"
+                },
+                {
+                  "name": "humidity01",
+                  "value": "0.8"
+                },
+                {
+                  "name": "cloudCover01",
+                  "value": "0.7"
+                },
+                {
+                  "name": "precipitationMmPerHour",
+                  "value": "2"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "5"
+                },
+                {
+                  "name": "wetness01",
+                  "value": "0.45"
+                },
+                {
+                  "name": "visibilityMetres",
+                  "value": "5000"
+                }
+              ]
+            },
+            {
+              "id": "weatherB",
+              "name": "Weather Region",
+              "settings": [
+                {
+                  "name": "boundsMetres",
+                  "value": "0,-3000,3000,6000"
+                },
+                {
+                  "name": "blendDistanceMetres",
+                  "value": "300"
+                },
+                {
+                  "name": "priority",
+                  "value": "1"
+                },
+                {
+                  "name": "temperatureC",
+                  "value": "5"
+                },
+                {
+                  "name": "humidity01",
+                  "value": "0.5"
+                },
+                {
+                  "name": "cloudCover01",
+                  "value": "0.3"
+                },
+                {
+                  "name": "precipitationMmPerHour",
+                  "value": "0"
+                },
+                {
+                  "name": "windSpeedMetresPerSecond",
+                  "value": "8"
+                },
+                {
+                  "name": "wetness01",
+                  "value": "0.1"
+                },
+                {
+                  "name": "visibilityMetres",
+                  "value": "15000"
+                }
+              ]
+            },
+            {
+              "id": "weatherOut",
+              "name": "Weather Output",
+              "settings": []
+            },
+            {
+              "id": "lightOut",
+              "name": "Lighting Output",
+              "settings": []
+            }
+          ],
+          "wires": [
+            {
+              "source": "normal",
+              "output": "Climate",
+              "target": "region",
+              "input": "Baseline"
+            },
+            {
+              "source": "region",
+              "output": "Climate",
+              "target": "weatherOut",
+              "input": "Climate Baseline"
+            },
+            {
+              "source": "weatherA",
+              "output": "Weather Regions",
+              "target": "weatherB",
+              "input": "Previous Regions"
+            },
+            {
+              "source": "weatherB",
+              "output": "Weather Regions",
+              "target": "weatherOut",
+              "input": "Weather Regions"
+            }
+          ]
+        },
+        {
+          "domain": "TerrainWater",
+          "nodes": [
+            {
+              "id": "plates",
+              "name": "Tectonic Plate Seed",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "64117"
+                },
+                {
+                  "name": "plateSize",
+                  "value": "3600"
+                },
+                {
+                  "name": "oceanFraction",
+                  "value": "0.25"
+                },
+                {
+                  "name": "plateRelief",
+                  "value": "0.35"
+                },
+                {
+                  "name": "convergentUplift",
+                  "value": "0.32"
+                },
+                {
+                  "name": "divergentRift",
+                  "value": "0.16"
+                },
+                {
+                  "name": "marginWidth",
+                  "value": "0.16"
+                }
+              ]
+            },
+            {
+              "id": "ridges",
+              "name": "Ridged Multifractal",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "64229"
+                },
+                {
+                  "name": "size",
+                  "value": "900"
+                },
+                {
+                  "name": "octaves",
+                  "value": "6"
+                },
+                {
+                  "name": "amplitude",
+                  "value": "0.22"
+                },
+                {
+                  "name": "roughness",
+                  "value": "0.45"
+                }
+              ]
+            },
+            {
+              "id": "relief",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Add"
+                },
+                {
+                  "name": "opacity",
+                  "value": "0.45"
+                }
+              ]
+            },
+            {
+              "id": "continent",
+              "name": "Continental Shape Mask",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "64139"
+                },
+                {
+                  "name": "size",
+                  "value": "2100"
+                },
+                {
+                  "name": "landRadius",
+                  "value": "0.68"
+                },
+                {
+                  "name": "falloff",
+                  "value": "2.8"
+                },
+                {
+                  "name": "coastNoise",
+                  "value": "0.4"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                }
+              ]
+            },
+            {
+              "id": "landRelief",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "ice",
+              "name": "Glacial Carve",
+              "settings": [
+                {
+                  "name": "snowline",
+                  "value": "0.68"
+                },
+                {
+                  "name": "snowlineFalloff",
+                  "value": "0.1"
+                },
+                {
+                  "name": "carveDepth",
+                  "value": "0.025"
+                },
+                {
+                  "name": "valleyWidth",
+                  "value": "10"
+                },
+                {
+                  "name": "iterations",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "rainErosion",
+              "name": "Droplet Erosion",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "64331"
+                },
+                {
+                  "name": "raindrops",
+                  "value": "30000"
+                },
+                {
+                  "name": "erosionRadius",
+                  "value": "2"
+                },
+                {
+                  "name": "maxLifetime",
+                  "value": "48"
+                }
+              ]
+            },
+            {
+              "id": "talus",
+              "name": "Thermal Erosion",
+              "settings": [
+                {
+                  "name": "iterations",
+                  "value": "8"
+                },
+                {
+                  "name": "talusAngle",
+                  "value": "38"
+                },
+                {
+                  "name": "amount",
+                  "value": "0.35"
+                }
+              ]
+            },
+            {
+              "id": "gentleShore",
+              "name": "Slope",
+              "settings": [
+                {
+                  "name": "minAngle",
+                  "value": "0"
+                },
+                {
+                  "name": "maxAngle",
+                  "value": "14"
+                },
+                {
+                  "name": "falloff",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "waves",
+              "name": "Coastal Erosion",
+              "settings": [
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                },
+                {
+                  "name": "waveHeight",
+                  "value": "0.002"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.22"
+                }
+              ]
+            },
+            {
+              "id": "shoreBlend",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "CopyOther"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "spawner",
+              "name": "Hydrology Spawner",
+              "settings": [
+                {
+                  "name": "targetLakeCount",
+                  "value": "3"
+                },
+                {
+                  "name": "generateOcean",
+                  "value": "true"
+                },
+                {
+                  "name": "drainageResolution",
+                  "value": "256"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                }
+              ]
+            },
+            {
+              "id": "lakeFill",
+              "name": "Lake Fill",
+              "settings": [
+                {
+                  "name": "drainageResolution",
+                  "value": "256"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                },
+                {
+                  "name": "minDepth",
+                  "value": "0.002"
+                }
+              ]
+            },
+            {
+              "id": "lakeBasin",
+              "name": "Lake Basin",
+              "settings": [
+                {
+                  "name": "seed",
+                  "value": "64443"
+                },
+                {
+                  "name": "maxDepth",
+                  "value": "0.02"
+                },
+                {
+                  "name": "shoreRunMetres",
+                  "value": "70"
+                },
+                {
+                  "name": "ruggedness",
+                  "value": "0.001"
+                }
+              ]
+            },
+            {
+              "id": "network",
+              "name": "River Network",
+              "settings": [
+                {
+                  "name": "solveResolution",
+                  "value": "512"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                },
+                {
+                  "name": "channelInitiationFraction",
+                  "value": "0.002"
+                },
+                {
+                  "name": "generateLakeOutlets",
+                  "value": "true"
+                },
+                {
+                  "name": "minReachCells",
+                  "value": "3"
+                },
+                {
+                  "name": "minOrderToCarve",
+                  "value": "1"
+                },
+                {
+                  "name": "autoTrunkWidth",
+                  "value": "true"
+                },
+                {
+                  "name": "minTrenchDepthMetres",
+                  "value": "2"
+                },
+                {
+                  "name": "naturalSeed",
+                  "value": "64559"
+                }
+              ]
+            },
+            {
+              "id": "manualCourse",
+              "name": "River Course Input",
+              "settings": [
+                {
+                  "name": "carveTrench",
+                  "value": "true"
+                },
+                {
+                  "name": "edgeFeatherMetres",
+                  "value": "1.5"
+                },
+                {
+                  "name": "fallbackHalfWidthMetres",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "id": "allRivers",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Max"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "banks",
+              "name": "River Banks",
+              "settings": [
+                {
+                  "name": "bankBandMetres",
+                  "value": "8"
+                },
+                {
+                  "name": "floodplainMetres",
+                  "value": "30"
+                },
+                {
+                  "name": "bankEase",
+                  "value": "0.001"
+                }
+              ]
+            },
+            {
+              "id": "riverFill",
+              "name": "River Fill",
+              "settings": [
+                {
+                  "name": "drainageResolution",
+                  "value": "512"
+                },
+                {
+                  "name": "bankFreeboard",
+                  "value": "0.0015"
+                },
+                {
+                  "name": "minDepth",
+                  "value": "0.0015"
+                }
+              ]
+            },
+            {
+              "id": "lakeSeat",
+              "name": "Water Bank Seat",
+              "settings": [
+                {
+                  "name": "benchWidth",
+                  "value": "2"
+                },
+                {
+                  "name": "maxRaiseMetres",
+                  "value": "0.5"
+                },
+                {
+                  "name": "skirtWidth",
+                  "value": "40"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.6"
+                }
+              ]
+            },
+            {
+              "id": "riverSeat",
+              "name": "Water Bank Seat",
+              "settings": [
+                {
+                  "name": "benchWidth",
+                  "value": "2"
+                },
+                {
+                  "name": "maxRaiseMetres",
+                  "value": "0.5"
+                },
+                {
+                  "name": "skirtWidth",
+                  "value": "30"
+                },
+                {
+                  "name": "strength",
+                  "value": "0.6"
+                }
+              ]
+            },
+            {
+              "id": "heightOut",
+              "name": "Height Output",
+              "settings": [
+                {
+                  "name": "heightScale",
+                  "value": "1800"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                },
+                {
+                  "name": "seaFreeboardMetres",
+                  "value": "2"
+                },
+                {
+                  "name": "continentalRiseMetres",
+                  "value": "30"
+                },
+                {
+                  "name": "continentalRiseDistanceMetres",
+                  "value": "3000"
+                },
+                {
+                  "name": "continentalRiseStrength",
+                  "value": "0.25"
+                },
+                {
+                  "name": "shoreGuardDeadzoneMetres",
+                  "value": "80"
+                }
+              ]
+            },
+            {
+              "id": "oceanMask",
+              "name": "Ocean Level",
+              "settings": [
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                }
+              ]
+            },
+            {
+              "id": "allWater",
+              "name": "Water Mask",
+              "settings": []
+            },
+            {
+              "id": "climate",
+              "name": "Climate Baseline Input",
+              "settings": [
+                {
+                  "name": "yearFraction",
+                  "value": "0.47"
+                },
+                {
+                  "name": "allowMissingBaseline",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "altitudeTemp",
+              "name": "Temperature Map",
+              "settings": [
+                {
+                  "name": "equatorTemperature",
+                  "value": "1"
+                },
+                {
+                  "name": "poleTemperature",
+                  "value": "0.8"
+                },
+                {
+                  "name": "poleDistance",
+                  "value": "200000"
+                },
+                {
+                  "name": "lapseRate",
+                  "value": "0.75"
+                },
+                {
+                  "name": "noiseStrength",
+                  "value": "0.025"
+                }
+              ]
+            },
+            {
+              "id": "temperature",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "terrainMoisture",
+              "name": "Moisture Map",
+              "settings": [
+                {
+                  "name": "baseMoisture",
+                  "value": "0.6"
+                },
+                {
+                  "name": "drainageInfluence",
+                  "value": "0.25"
+                },
+                {
+                  "name": "rainShadowStrength",
+                  "value": "0.25"
+                },
+                {
+                  "name": "windDirection",
+                  "value": "270"
+                },
+                {
+                  "name": "noiseStrength",
+                  "value": "0.06"
+                },
+                {
+                  "name": "seed",
+                  "value": "64661"
+                }
+              ]
+            },
+            {
+              "id": "moisture",
+              "name": "Blend",
+              "settings": [
+                {
+                  "name": "mode",
+                  "value": "Multiply"
+                },
+                {
+                  "name": "opacity",
+                  "value": "1"
+                }
+              ]
+            },
+            {
+              "id": "biomes",
+              "name": "Biome Classifier",
+              "settings": []
+            },
+            {
+              "id": "splatOut",
+              "name": "Biome Splat Output",
+              "settings": [
+                {
+                  "name": "layerCount",
+                  "value": "8"
+                },
+                {
+                  "name": "seaLevel",
+                  "value": "0.28"
+                },
+                {
+                  "name": "snowLine",
+                  "value": "0.72"
+                },
+                {
+                  "name": "snowEnabled",
+                  "value": "true"
+                },
+                {
+                  "name": "beachHeight",
+                  "value": "0.0025"
+                },
+                {
+                  "name": "beachMaxSlope",
+                  "value": "10"
+                },
+                {
+                  "name": "bareLayer",
+                  "value": "2"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "plates",
+              "output": "Height",
+              "target": "relief",
+              "input": "A"
+            },
+            {
+              "source": "ridges",
+              "output": "Height",
+              "target": "relief",
+              "input": "B"
+            },
+            {
+              "source": "relief",
+              "output": "Height",
+              "target": "landRelief",
+              "input": "A"
+            },
+            {
+              "source": "continent",
+              "output": "Height",
+              "target": "landRelief",
+              "input": "B"
+            },
+            {
+              "source": "landRelief",
+              "output": "Height",
+              "target": "ice",
+              "input": "Height"
+            },
+            {
+              "source": "ice",
+              "output": "Height",
+              "target": "rainErosion",
+              "input": "Height"
+            },
+            {
+              "source": "rainErosion",
+              "output": "Height",
+              "target": "talus",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "gentleShore",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "waves",
+              "input": "Height"
+            },
+            {
+              "source": "talus",
+              "output": "Height",
+              "target": "shoreBlend",
+              "input": "A"
+            },
+            {
+              "source": "waves",
+              "output": "Height",
+              "target": "shoreBlend",
+              "input": "B"
+            },
+            {
+              "source": "gentleShore",
+              "output": "Mask",
+              "target": "shoreBlend",
+              "input": "Mask"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "spawner",
+              "input": "Height"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "lakeFill",
+              "input": "Height"
+            },
+            {
+              "source": "spawner",
+              "output": "Lake Mask",
+              "target": "lakeFill",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "shoreBlend",
+              "output": "Height",
+              "target": "lakeBasin",
+              "input": "Height"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "lakeBasin",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Level",
+              "target": "lakeBasin",
+              "input": "Water Level"
+            },
+            {
+              "source": "lakeBasin",
+              "output": "Height",
+              "target": "network",
+              "input": "Height"
+            },
+            {
+              "source": "network",
+              "output": "Height",
+              "target": "manualCourse",
+              "input": "Height"
+            },
+            {
+              "source": "network",
+              "output": "River Mask",
+              "target": "allRivers",
+              "input": "A"
+            },
+            {
+              "source": "manualCourse",
+              "output": "River Mask",
+              "target": "allRivers",
+              "input": "B"
+            },
+            {
+              "source": "manualCourse",
+              "output": "Height",
+              "target": "banks",
+              "input": "Height"
+            },
+            {
+              "source": "allRivers",
+              "output": "Height",
+              "target": "banks",
+              "input": "River Mask"
+            },
+            {
+              "source": "banks",
+              "output": "Height",
+              "target": "riverFill",
+              "input": "Height"
+            },
+            {
+              "source": "allRivers",
+              "output": "Height",
+              "target": "riverFill",
+              "input": "River Mask"
+            },
+            {
+              "source": "banks",
+              "output": "Height",
+              "target": "lakeSeat",
+              "input": "Height"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Level",
+              "target": "lakeSeat",
+              "input": "Water Level"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "lakeSeat",
+              "input": "Water Mask"
+            },
+            {
+              "source": "lakeSeat",
+              "output": "Height",
+              "target": "riverSeat",
+              "input": "Height"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Level",
+              "target": "riverSeat",
+              "input": "Water Level"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Mask",
+              "target": "riverSeat",
+              "input": "Water Mask"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "heightOut",
+              "input": "Height"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "oceanMask",
+              "input": "Height"
+            },
+            {
+              "source": "oceanMask",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "Ocean Mask"
+            },
+            {
+              "source": "riverFill",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "River Mask"
+            },
+            {
+              "source": "lakeFill",
+              "output": "Water Mask",
+              "target": "allWater",
+              "input": "Lake Mask"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "altitudeTemp",
+              "input": "Height"
+            },
+            {
+              "source": "climate",
+              "output": "Temperature (-20..40 C normalized)",
+              "target": "temperature",
+              "input": "A"
+            },
+            {
+              "source": "altitudeTemp",
+              "output": "Height",
+              "target": "temperature",
+              "input": "B"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "terrainMoisture",
+              "input": "Height"
+            },
+            {
+              "source": "climate",
+              "output": "Moisture",
+              "target": "moisture",
+              "input": "A"
+            },
+            {
+              "source": "terrainMoisture",
+              "output": "Height",
+              "target": "moisture",
+              "input": "B"
+            },
+            {
+              "source": "temperature",
+              "output": "Height",
+              "target": "biomes",
+              "input": "Temperature"
+            },
+            {
+              "source": "moisture",
+              "output": "Height",
+              "target": "biomes",
+              "input": "Moisture"
+            },
+            {
+              "source": "allWater",
+              "output": "Water Mask",
+              "target": "biomes",
+              "input": "Wetness"
+            },
+            {
+              "source": "riverSeat",
+              "output": "Height",
+              "target": "splatOut",
+              "input": "Height"
+            },
+            {
+              "source": "biomes",
+              "output": "Biome",
+              "target": "splatOut",
+              "input": "Biome"
+            },
+            {
+              "source": "biomes",
+              "output": "Blend",
+              "target": "splatOut",
+              "input": "Blend"
+            },
+            {
+              "source": "allWater",
+              "output": "Water Mask",
+              "target": "splatOut",
+              "input": "Wetness"
+            }
+          ]
+        },
+        {
+          "domain": "Vegetation",
+          "nodes": [
+            {
+              "id": "forest",
+              "name": "World Graph Input",
+              "settings": [
+                {
+                  "name": "selectedBiome",
+                  "value": "BorealForest"
+                }
+              ]
+            },
+            {
+              "id": "grassland",
+              "name": "World Graph Input",
+              "settings": [
+                {
+                  "name": "selectedBiome",
+                  "value": "TemperateGrassland"
+                }
+              ]
+            },
+            {
+              "id": "trees",
+              "name": "Tree Scatter",
+              "settings": [
+                {
+                  "name": "prototypeIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "12000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "6"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "32"
+                },
+                {
+                  "name": "shoreClearanceMetres",
+                  "value": "4"
+                },
+                {
+                  "name": "seed",
+                  "value": "64773"
+                }
+              ]
+            },
+            {
+              "id": "shrubs",
+              "name": "Shrub Scatter",
+              "settings": [
+                {
+                  "name": "prototypeIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "18000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "3"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "35"
+                },
+                {
+                  "name": "shoreClearanceMetres",
+                  "value": "2"
+                },
+                {
+                  "name": "seed",
+                  "value": "64881"
+                }
+              ]
+            },
+            {
+              "id": "grass",
+              "name": "Grass Detail",
+              "settings": [
+                {
+                  "name": "detailLayerIndex",
+                  "value": "0"
+                },
+                {
+                  "name": "density",
+                  "value": "120000"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "0.7"
+                },
+                {
+                  "name": "maxDensityPerCell",
+                  "value": "8"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "35"
+                },
+                {
+                  "name": "seed",
+                  "value": "64991"
+                }
+              ]
+            },
+            {
+              "id": "rocks",
+              "name": "Rock Scatter",
+              "settings": [
+                {
+                  "name": "density",
+                  "value": "1200"
+                },
+                {
+                  "name": "minSpacing",
+                  "value": "4"
+                },
+                {
+                  "name": "maxSlope",
+                  "value": "55"
+                },
+                {
+                  "name": "embedDepth",
+                  "value": "0.2"
+                },
+                {
+                  "name": "seed",
+                  "value": "65003"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "trees",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "shrubs",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "grass",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Final Ground (normalized height)",
+              "target": "rocks",
+              "input": "Height"
+            },
+            {
+              "source": "forest",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "trees",
+              "input": "Mask"
+            },
+            {
+              "source": "forest",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "shrubs",
+              "input": "Mask"
+            },
+            {
+              "source": "grassland",
+              "output": "Accepted Biome Membership (0..1)",
+              "target": "grass",
+              "input": "Mask"
+            }
+          ]
+        },
+        {
+          "domain": "TextureMaterialShader",
+          "nodes": [
+            {
+              "id": "layer0",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Rock"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "6,6"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.2"
+                }
+              ]
+            },
+            {
+              "id": "normal0",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer1",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Cliff Rock"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "9,9"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.18"
+                }
+              ]
+            },
+            {
+              "id": "normal1",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer2",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Mud/Silt"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "4,4"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.25"
+                }
+              ]
+            },
+            {
+              "id": "normal2",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "layer3",
+              "name": "Albedo Layer",
+              "settings": [
+                {
+                  "name": "layerName",
+                  "value": "Sand"
+                },
+                {
+                  "name": "tileSizeMetres",
+                  "value": "7,7"
+                },
+                {
+                  "name": "metallic",
+                  "value": "0"
+                },
+                {
+                  "name": "smoothness",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "normal3",
+              "name": "Normal Map Layer",
+              "settings": [
+                {
+                  "name": "strength",
+                  "value": "0.8"
+                },
+                {
+                  "name": "roughnessIsSmoothness",
+                  "value": "false"
+                }
+              ]
+            },
+            {
+              "id": "splat",
+              "name": "Texture Splat",
+              "settings": [
+                {
+                  "name": "heightBlend",
+                  "value": "true"
+                },
+                {
+                  "name": "heightTransition",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "cliff",
+              "name": "Cliff Surface",
+              "settings": [
+                {
+                  "name": "angleStartDegrees",
+                  "value": "35"
+                },
+                {
+                  "name": "angleEndDegrees",
+                  "value": "60"
+                },
+                {
+                  "name": "triplanarScaleMetres",
+                  "value": "6"
+                }
+              ]
+            },
+            {
+              "id": "macro",
+              "name": "Macro Variation",
+              "settings": [
+                {
+                  "name": "scaleMetres",
+                  "value": "300"
+                },
+                {
+                  "name": "amount",
+                  "value": "0.12"
+                }
+              ]
+            },
+            {
+              "id": "snow",
+              "name": "Snow Cover",
+              "settings": [
+                {
+                  "name": "snowLineAltitude",
+                  "value": "1296"
+                },
+                {
+                  "name": "falloffMetres",
+                  "value": "180"
+                },
+                {
+                  "name": "coverage",
+                  "value": "1"
+                },
+                {
+                  "name": "slopeLimitDegrees",
+                  "value": "52"
+                }
+              ]
+            },
+            {
+              "id": "wet",
+              "name": "Wetness",
+              "settings": [
+                {
+                  "name": "wetnessAmount",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "wetAmount",
+              "name": "Scalar Parameter",
+              "settings": [
+                {
+                  "name": "value",
+                  "value": "0.15"
+                }
+              ]
+            },
+            {
+              "id": "fade",
+              "name": "Distance Fade",
+              "settings": [
+                {
+                  "name": "fadeStartMetres",
+                  "value": "180"
+                },
+                {
+                  "name": "fadeEndMetres",
+                  "value": "600"
+                }
+              ]
+            },
+            {
+              "id": "grade",
+              "name": "Colour Grade",
+              "settings": [
+                {
+                  "name": "brightness",
+                  "value": "1"
+                },
+                {
+                  "name": "contrast",
+                  "value": "1"
+                },
+                {
+                  "name": "saturation",
+                  "value": "0.95"
+                }
+              ]
+            },
+            {
+              "id": "water",
+              "name": "Water Surface",
+              "settings": [
+                {
+                  "name": "depthFadeMetres",
+                  "value": "8"
+                },
+                {
+                  "name": "flowMetresPerSecond",
+                  "value": "0.08,0.04"
+                }
+              ]
+            },
+            {
+              "id": "foam",
+              "name": "Water Foam",
+              "settings": [
+                {
+                  "name": "intensity",
+                  "value": "0.6"
+                },
+                {
+                  "name": "edgeWidthMetres",
+                  "value": "1.2"
+                }
+              ]
+            },
+            {
+              "id": "caustic",
+              "name": "Caustics",
+              "settings": [
+                {
+                  "name": "intensity",
+                  "value": "0.35"
+                },
+                {
+                  "name": "depthFadeMetres",
+                  "value": "8"
+                }
+              ]
+            },
+            {
+              "id": "final",
+              "name": "Terrain Blend Final",
+              "settings": [
+                {
+                  "name": "maxLayers",
+                  "value": "4"
+                },
+                {
+                  "name": "qualityLevel",
+                  "value": "High"
+                }
+              ]
+            },
+            {
+              "id": "shader",
+              "name": "Shader Output",
+              "settings": [
+                {
+                  "name": "target",
+                  "value": "UniverseCreatorTerrainLit"
+                },
+                {
+                  "name": "stage",
+                  "value": "SurfaceFragment"
+                },
+                {
+                  "name": "materialName",
+                  "value": "UC_AlpineTerrain"
+                },
+                {
+                  "name": "outputFolder",
+                  "value": "Assets/UniverseCreator/Generated"
+                }
+              ]
+            }
+          ],
+          "wires": [
+            {
+              "source": "layer0",
+              "output": "Layer",
+              "target": "normal0",
+              "input": "Layer"
+            },
+            {
+              "source": "normal0",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer R"
+            },
+            {
+              "source": "layer1",
+              "output": "Layer",
+              "target": "normal1",
+              "input": "Layer"
+            },
+            {
+              "source": "normal1",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer G"
+            },
+            {
+              "source": "layer2",
+              "output": "Layer",
+              "target": "normal2",
+              "input": "Layer"
+            },
+            {
+              "source": "normal2",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer B"
+            },
+            {
+              "source": "layer3",
+              "output": "Layer",
+              "target": "normal3",
+              "input": "Layer"
+            },
+            {
+              "source": "normal3",
+              "output": "Layer",
+              "target": "splat",
+              "input": "Layer A"
+            },
+            {
+              "source": "cliff",
+              "output": "Surface",
+              "target": "macro",
+              "input": "Surface"
+            },
+            {
+              "source": "macro",
+              "output": "Surface",
+              "target": "snow",
+              "input": "Surface"
+            },
+            {
+              "source": "snow",
+              "output": "Surface",
+              "target": "wet",
+              "input": "Surface"
+            },
+            {
+              "source": "wetAmount",
+              "output": "Value",
+              "target": "wet",
+              "input": "Wetness (0..1)"
+            },
+            {
+              "source": "wet",
+              "output": "Surface",
+              "target": "fade",
+              "input": "Surface"
+            },
+            {
+              "source": "fade",
+              "output": "Surface",
+              "target": "grade",
+              "input": "Surface"
+            },
+            {
+              "source": "grade",
+              "output": "Surface",
+              "target": "final",
+              "input": "Surface"
+            },
+            {
+              "source": "splat",
+              "output": "Splat",
+              "target": "final",
+              "input": "Splat"
+            },
+            {
+              "source": "water",
+              "output": "Water",
+              "target": "foam",
+              "input": "Water"
+            },
+            {
+              "source": "foam",
+              "output": "Water",
+              "target": "caustic",
+              "input": "Water"
+            },
+            {
+              "source": "caustic",
+              "output": "Water",
+              "target": "final",
+              "input": "Water"
+            },
+            {
+              "source": "final",
+              "output": "Surface",
+              "target": "shader",
+              "input": "Surface"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -11,9 +11,34 @@ namespace UniverseCreator.TerrainSystem
             // UC-T03-06: retained topology must belong to the world accepting the candidate terrain.
             if (!OwnsOutletRecords(outputs)) throw new System.InvalidOperationException("River outlet metadata belongs to another world.");
             // UC-T03-09: reserve the immutable final-ground copy before the native commit; retained candidates stay pinned too.
-            return outputs.channelPublications.Length == 0 && outputs.heightmap == null ? null : world.ProductMemory.Reserve(
-                4096L + ProductMemoryFootprint.Estimate(outputs.channelPublications) + (outputs.heightmap?.LongLength ?? 0) * (sizeof(float) + sizeof(bool)) +
-                (outputs.trenchRelief?.LongLength ?? 0) * sizeof(float) + ProductMemoryFootprint.Estimate(outputs.biomeClassification)); // UC-T07-03: reserve the accepted classifier field with the native-ground snapshot.
+            return outputs.channelPublications.Length == 0 && outputs.heightmap == null ? null : PrepareGround(world,
+                outputs.channelPublications, outputs.heightmap?.LongLength ?? 0, outputs.trenchRelief, outputs.biomeClassification);
+        }
+
+        /// <summary>UC repair 30: admits copied cell ground and identity-shared immutable channels before native publication or refresh.</summary>
+        /// <param name="world">Owning world and its unchanged hard payload budget.</param>
+        /// <param name="channels">Borrowed immutable channel records; never copied or mutated here.</param>
+        /// <param name="samples">Nonnegative number of float ground samples; includes a conservative one-byte hole allowance per sample.</param>
+        /// <param name="relief">Optional normalized trench field copied by the snapshot.</param>
+        /// <param name="biomes">Optional categorical field copied by the snapshot.</param>
+        /// <returns>Cell reservation owning independent channel pins, released together on rollback or retirement.</returns>
+        /// <exception cref="System.InvalidOperationException">Private or shared storage cannot fit; all provisional pins retire.</exception>
+        internal static ProductMemoryBudget.Lease PrepareGround(UniverseCreatorObject world, ChannelGraphPublication[] channels,
+            long samples, float[,] relief, Matrix biomes)
+        {
+            var memory = world.ProductMemory.Reserve(4096L + (channels?.LongLength ?? 0) * System.IntPtr.Size +
+                samples * (sizeof(float) + sizeof(bool)) + (relief?.LongLength ?? 0) * sizeof(float) + ProductMemoryFootprint.Estimate(biomes));
+            try
+            {
+                if (channels != null) foreach (ChannelGraphPublication channel in channels)
+                {
+                    var pin = world.ProductMemory.Acquire(channel, ProductMemoryFootprint.Estimate(channel), 0, channel.Key);
+                    try { memory.Own(pin); }
+                    catch { pin.Dispose(); throw; }
+                }
+                return memory;
+            }
+            catch { memory.Dispose(); throw; }
         }
 
         internal static bool Commit(UniverseCreatorObject world, OutputBag outputs, ProductMemoryBudget.Lease memory, UnityEngine.TerrainData native = null)

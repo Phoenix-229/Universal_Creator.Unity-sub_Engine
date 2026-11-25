@@ -613,6 +613,19 @@ namespace UniverseCreator.Editor.Diagnostics
             Check(belt.r > belt.b && belt.r > shadow.r,
                 "Twilight: the belt of Venus is pink above the Earth's shadow");
 
+            // UC repair 33: attenuated sunlight supplies hue without darkening the independent twilight envelope twice.
+            foreach (float haze in new[] { 1f, 2.5f, 4f, 8f })
+            {
+                Color upper = SkyModel.TwilightRadiance(ViewAt(6f, -1f), sun, haze);
+                Color lower = SkyModel.TwilightRadiance(ViewAt(1f, -1f), sun, haze);
+                Check(upper.r > upper.b && upper.r > lower.r && lower.b > lower.r,
+                    "Twilight: warm backscatter remains above a cool shadow across atmospheric turbidity " + haze);
+            }
+            Color beforeTop = SkyModel.TwilightRadiance(ViewAt(5.999f, -1f), sun, 2.5f);
+            Color afterTop = SkyModel.TwilightRadiance(ViewAt(6.001f, -1f), sun, 2.5f);
+            Check(Mathf.Abs(beforeTop.r - afterTop.r) < 0.001f && Mathf.Abs(beforeTop.b - afterTop.b) < 0.001f,
+                "Twilight: the rising shadow and warm belt meet continuously without a horizon-colour jump.");
+
             // The glow darkens continuously as the sun sinks, out by astronomical twilight.
             float g3 = Lum(SkyModel.TwilightRadiance(ViewAt(1f, 1f), SunAt(-3f), 2.5f));
             float g9 = Lum(SkyModel.TwilightRadiance(ViewAt(1f, 1f), SunAt(-9f), 2.5f));

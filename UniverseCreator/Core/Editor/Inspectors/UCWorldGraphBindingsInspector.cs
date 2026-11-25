@@ -10,9 +10,10 @@ namespace UniverseCreator.Editor.Inspectors
     [CustomEditor(typeof(UCWorldGraphBindings))]
     public sealed class UCWorldGraphBindingsInspector : UnityEditor.Editor
     {
-        /// <summary>Shows the authoritative main graph, vegetation binding, accepted revision and pending/error state.</summary>
+        /// <summary>Shows assignment for an unconfigured world; otherwise shows its main graph, vegetation binding, accepted revision and pending/error state.</summary>
         public override void OnInspectorGUI()
         {
+            if (UCInspectorUI.DrawMissingTerrainGraph(targets)) return; // UC repair 31: no binding refresh or apply before graph assignment.
             var bindings = (UCWorldGraphBindings)target;
             bindings.RefreshVegetationDependencies(); // UC-T05-03: expose stale terrain before another Run is attempted.
             EditorGUILayout.LabelField("Bindings Schema", bindings.SchemaVersion.ToString());
