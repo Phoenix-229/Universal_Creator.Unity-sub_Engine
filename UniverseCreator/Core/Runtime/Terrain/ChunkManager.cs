@@ -884,6 +884,7 @@ namespace UniverseCreator.TerrainSystem
         /// enable and whenever a world setting that changes the grid is committed.
         /// UC-T01-09: invalid graph topology/domains are logged and return before terrain allocation or bake-state changes.
         /// UC-T02-01: starts a shared world revision; superseded setup continuations and products are rejected.
+        /// UC repair 35: logs Generation complete once the current resident scope and dependent work have accepted this revision; failed/cancelled runs never log success.
         /// </summary>
         public void RebuildAll() { RebuildAll(default); }
 
@@ -900,6 +901,7 @@ namespace UniverseCreator.TerrainSystem
             if (!bakeScheduler.IsCurrent(run)) return;
             bakeRun = run;
 
+            generationCompletionPending = true; // UC repair 35: streaming, layout-only and sculpt refreshes do not arm full-build completion.
             IsRebuildingAll = true;
             settleStitchPending = true;
             settlePhase = 0;   // a fresh build must settle from the top, not resume a stale phase
@@ -5069,6 +5071,7 @@ namespace UniverseCreator.TerrainSystem
         /// <summary>UC-T02-01: cancels this bake's world revision and local workers, without cancelling a newer revision.</summary>
         public void CancelAll()
         {
+            generationCompletionPending = false; // UC repair 35: cancellation/replacement cannot announce a retired build as complete.
             DisposeResidencyCommit(); // UC-T09-04: retire detached uploads before cancelling their holder's generation.
             DisposeFarCommit();
             CancelLanding(landingId); // UC-T09-03: a rebuild/rebind cannot silently reuse a previous landing contract.

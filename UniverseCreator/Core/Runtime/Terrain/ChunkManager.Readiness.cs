@@ -44,6 +44,7 @@ namespace UniverseCreator.TerrainSystem
         private bool readinessBindingResolved;
         private bool readinessRefreshPending, waterPresentationPending;
         private string readinessFailure;
+        private bool generationCompletionPending; // UC repair 35: only an explicit full rebuild arms a success message.
         private readonly System.Collections.Generic.List<UCWaterBody> readinessWater = new System.Collections.Generic.List<UCWaterBody>();
 
         /// <summary>Main-thread dependency failure diagnostic, or empty when no failure is held. A new terrain build can retry settlement; this observation never clears a failure or starts work.</summary>
@@ -119,7 +120,34 @@ namespace UniverseCreator.TerrainSystem
                     if (present) HideWireframe(chunk); // UC-T09-03: retire the preview on transition, not on every idle pump.
                 }
             }
+            ReportGenerationCompletion(world); // UC repair 35: observe acceptance after this pump restores coherent presentation.
             return changed;
+        }
+
+        // UC repair 35: main-thread observation only; old accepted ground and drained failed queues are not success.
+        private void ReportGenerationCompletion(UniverseCreatorObject world)
+        {
+            if (!generationCompletionPending || world == null || bakeScheduler == null || !bakeScheduler.IsCurrent(bakeRun) ||
+                IsRebuildingAll || bakeInputFailure != null || !DependenciesSettled(world)) return;
+            int owned = 0, resident = 0;
+            for (int i = 0; i < pool.Count; i++)
+            {
+                var chunk = pool[i];
+                if (!IsLiveCell(world, chunk)) continue;
+                owned++;
+                if (!chunk.resident && !IsCellInLoadedWindow(world, chunk)) continue;
+                if (!chunk.resident || chunk.go == null || !HasAcceptedTerrain(world, chunk) ||
+                    !chunk.publicationRun.Equals(bakeRun) || chunk.inFlight || chunk.presentationPending ||
+                    chunk.pendingScatterCommit != null || chunk.pendingGraphScatter != null ||
+                    chunk.residencyFailure != null || !HasAcceptedCollision(world, chunk, false)) return;
+                resident++;
+            }
+            // An absent dictionary entry must not turn 35 accepted cells into a complete 36-cell edit-mode world.
+            if (resident == 0 || owned != (long)world.chunkCountPerSide * world.chunkCountPerSide) return;
+            generationCompletionPending = false;
+            string scope = world.ShouldRenderWholeWorld() ? "world" : "resident window";
+            Debug.Log("[Universe Creator] Generation complete: " + resident + "/" + resident + " " + scope +
+                " chunks created and accepted successfully; terrain, seams and dependent work settled.", world);
         }
 
         private static bool HasAcceptedTerrain(UniverseCreatorObject world, Chunk chunk) =>

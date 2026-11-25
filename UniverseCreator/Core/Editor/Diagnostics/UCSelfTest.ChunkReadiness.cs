@@ -154,6 +154,59 @@ namespace UniverseCreator.Editor.Diagnostics
                 Check(!manager.TryGetAcceptedTerrainAt(Vector3.zero, out var uploadingGround, out _) && uploadingGround == null,
                     "UC repair 32: camera queries cannot expose an unaccepted native upload.");
                 SetCommitField(type, centre, "publicationInProgress", false);
+                // UC repair 35: completion observes native acceptance, rather than an empty worker queue or old ground.
+                int completionMessages = 0;
+                string completionMessage = null;
+                Application.LogCallback completionLog = (message, stack, kind) =>
+                {
+                    if (kind == LogType.Log && message.StartsWith("[Universe Creator] Generation complete:"))
+                    { completionMessages++; completionMessage = message; }
+                };
+                Application.logMessageReceived += completionLog;
+                try
+                {
+                    var completionRun = world.GenerationScheduler.CurrentRun;
+                    var completionPending = typeof(ChunkManager).GetField("generationCompletionPending", flags);
+                    var reportCompletion = typeof(ChunkManager).GetMethod("ReportGenerationCompletion", flags);
+                    typeof(ChunkManager).GetField("bakeScheduler", flags).SetValue(manager, world.GenerationScheduler);
+                    typeof(ChunkManager).GetField("bakeRun", flags).SetValue(manager, completionRun);
+                    foreach (object chunk in pool) SetCommitField(type, chunk, "publicationRun", completionRun);
+                    completionPending.SetValue(manager, true);
+                    cells.Remove(new Coord(1, 1)); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: a missing canonical cell cannot report a complete world.");
+                    cells.Add(new Coord(1, 1), centre);
+                    var savedGroundObject = type.GetField("go").GetValue(centre);
+                    SetCommitField(type, centre, "go", null);
+                    reportCompletion.Invoke(manager, new object[] { world });
+                    Check(completionMessages == 0, "UC repair 35: a missing native terrain object cannot report completion.");
+                    SetCommitField(type, centre, "go", savedGroundObject);
+                    SetCommitField(type, centre, "publicationRun", default(GenerationRunId)); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: old accepted ground cannot complete the requested revision.");
+                    SetCommitField(type, centre, "publicationRun", completionRun);
+                    SetCommitField(type, centre, "generationFailure", "Completion fixture generation failure"); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: a drained failed generation cannot report success.");
+                    SetCommitField(type, centre, "generationFailure", null);
+                    typeof(ChunkManager).GetField("readinessFailure", flags).SetValue(manager, "Completion fixture dependency failure"); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: dependent failure cannot report successful completion.");
+                    typeof(ChunkManager).GetField("readinessFailure", flags).SetValue(manager, null);
+                    var waiting = new TaskCompletionSource<bool>();
+                    typeof(UCWorldGraphBindings).GetField("pendingTask", flags).SetValue(bindings, waiting.Task); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: pending companion evaluation keeps completion waiting.");
+                    waiting.SetResult(true);
+                    world.GenerationScheduler.BeginRun(); manager.PumpCompleted();
+                    Check(completionMessages == 0, "UC repair 35: superseded builds cannot announce completion.");
+                    completionRun = world.GenerationScheduler.CurrentRun;
+                    typeof(ChunkManager).GetField("bakeRun", flags).SetValue(manager, completionRun);
+                    foreach (object chunk in pool) SetCommitField(type, chunk, "publicationRun", completionRun);
+                    manager.PumpCompleted(); manager.PumpCompleted();
+                    Check(completionMessages == 1 && completionMessage.Contains("9/9 world chunks created and accepted successfully") && !manager.HasWork,
+                        "UC repair 35: successful current native world logs its count exactly once and leaves the pump idle.");
+                    completionPending.SetValue(manager, true); manager.CancelAll();
+                    reportCompletion.Invoke(manager, new object[] { world });
+                    Check(completionMessages == 1 && !(bool)completionPending.GetValue(manager),
+                        "UC repair 35: cancellation disarms completion without another success message.");
+                }
+                finally { Application.logMessageReceived -= completionLog; }
                 Check(manager.RequestLanding(Vector3.zero, 2) == 0 && manager.RequestLanding(new Vector3(float.NaN, 0, 0)) == 0 &&
                     manager.RequestLanding(new Vector3(1000, 0, 0)) == 0 && manager.RequestLanding(Vector3.zero, 1, float.PositiveInfinity) == 0,
                     "UC-T09-03 landing rejects over-budget footprints, nonfinite inputs and out-of-world positions without replacing valid demand.");
