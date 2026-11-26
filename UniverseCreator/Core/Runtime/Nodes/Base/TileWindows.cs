@@ -31,7 +31,12 @@
 //  pixel index. That property is what makes this file legal.
 // -----------------------------------------------------------------------------
 
+using System;
+using System.Collections.Generic;
 using UnityEngine;
+using UniverseCreator.Nodes.Combiners;
+using UniverseCreator.Nodes.Creators;
+using UniverseCreator.Nodes.Modifiers;
 
 namespace UniverseCreator.Nodes
 {
@@ -154,15 +159,76 @@ namespace UniverseCreator.Nodes
 
         // One construction path for both views: a fresh TileData carrying the parent's
         // world bounds and height range, bound to a fresh evaluator over the same
-        // graph. The evaluator is per-view because its visiting set and the tile's
-        // product cache are both per-rect - sharing either would hand a node the
-        // chunk's answer when it asked for the wider one.
+        // graph. Each evaluator keeps its own visiting set and local products.
         private static TileData Bind(TileData tile, CoordRect rect, Vector3 pos, Vector3 size)
         {
             TileData view = new TileData(tile.chunkCoord, rect, pos, size, tile.worldHeight);
             tile.CopyViewContext(view); // UC-T07-08: halo functions retain arguments on the requested lattice and the shared input/lifetime owners.
-            view.Bind(new GraphEvaluator(tile.Graph));
+            view.Bind(tile.CreateWindowEvaluator());
             return view;
+        }
+
+        // UC repair 37: one worker retains completed pure fields for its captured graph evaluation.
+        // Other views must ask for the same sample rect, position and extent before borrowing an answer.
+        internal sealed class ProductCache : IDisposable
+        {
+            private const int MaximumEntries = 128;
+            private readonly ProductMemoryBudget budget;
+            private readonly Dictionary<(string Node, Coord Offset, Coord Size, Vector3 Position, Vector3 Extent), ProductMemoryBudget.Entry>
+                entries = new();
+            private readonly Dictionary<string, bool> shareable = new();
+
+            internal ProductCache(ProductMemoryBudget budget) => this.budget = budget;
+
+            internal bool TryGet(TileData tile, Generator node, out object product)
+            {
+                product = null;
+                var key = (node.id, tile.rect.offset, tile.rect.size, tile.worldPos, tile.worldSize);
+                return entries.TryGetValue(key, out var entry) &&
+                    tile.TryRetainedProduct(new RetainedProduct { memoryOwner = budget, memoryEntry = entry }, out product);
+            }
+
+            internal void Remember(Graph graph, TileData tile, Generator node, Matrix matrix)
+            {
+                if (!IsPureTerrainBranch(graph, node)) return;
+                var key = (node.id, tile.rect.offset, tile.rect.size, tile.worldPos, tile.worldSize);
+                if (entries.TryGetValue(key, out var previous)) budget.ForgetTransient(previous);
+                else if (entries.Count >= MaximumEntries) return;
+                entries[key] = tile.RetainWindowProduct(matrix);
+            }
+
+            // Only these audited types and their complete input chains can bypass evaluation.
+            // Unknown nodes may depend on local state or emit publications even when returning a Matrix.
+            private bool IsPureTerrainBranch(Graph graph, Generator node)
+            {
+                if (shareable.TryGetValue(node.id, out bool pure)) return pure;
+                Type type = node.GetType();
+                if (node.disabled) return false;
+                if (type == typeof(ContinentalShapeMaskNode) || type == typeof(HybridMultifractalNode))
+                    return shareable[node.id] = true;
+
+                int inputs;
+                if (type == typeof(BlendNode)) inputs = 3;
+                else if (type == typeof(DropletErosionNode) || type == typeof(ThermalErosionNode)) inputs = 1;
+                else return shareable[node.id] = false;
+
+                shareable[node.id] = false; // Guard against invalid cycles while checking the branch.
+                for (int i = 0; i < inputs; i++)
+                {
+                    Connection edge = graph.GetInputConnection(node.id, i);
+                    if (string.IsNullOrEmpty(edge.sourceNodeId)) continue;
+                    Generator upstream = graph.GetNodeById(edge.sourceNodeId);
+                    if (upstream == null || edge.sourcePortIndex != 0 || !IsPureTerrainBranch(graph, upstream))
+                        return false;
+                }
+                return shareable[node.id] = true;
+            }
+
+            public void Dispose()
+            {
+                foreach (var entry in entries.Values) budget.ForgetTransient(entry);
+                entries.Clear();
+            }
         }
 
         /// <summary>

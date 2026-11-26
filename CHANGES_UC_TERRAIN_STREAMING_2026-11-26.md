@@ -1,0 +1,92 @@
+# UC Task 37 — Progressive terrain generation
+
+## Acceptance checklist
+
+- [x] Establish the 36-cell Green Coast baseline with 513 terrain height samples, 512 hydrology cells, one worker and a 1,536 MiB generated-payload limit. Record first visible ground, total elapsed time, peak admitted payload and teardown. Rerun after the performance repair under the matching settings below.
+- [x] Diagnose the 1,000+ second Green Coast rebuild and compare the repair under matching 513/512 settings with one worker and a 1,536 MiB ceiling. Verified four matching native height hashes, accepted surface weights and colliders, progressive reveal and settlement ordering. The host Scene check for actual water objects and seams remains below.
+- [ ] Measure end-to-end 20 km (400-cell) and 30 km (900-cell) world generation at 513 height samples and 512 hydrology cells. The storage fixture covers every cell at the requested sample count. The production rebuild selects 257 samples at these grid sizes and holds the accepted Editor terrain, so the 36-cell timing can only give a planning estimate for a full-detail rebuild.
+- [ ] Verify Editor progress from a cold world and from an existing sculpted world. Inspect the blue wireframe, ground arriving per chunk, seam continuity, and final ocean, river and lake objects in the host Scene view.
+- [x] Run the full suite against the frozen publication code with local sample assets and verify the unchanged source. The GitHub-only result is also recorded below.
+- [x] Render, inspect and deliver the terrain updates in the Green Coast V5.5 and Rift Highlands V6.5 PDFs before the GitHub commit.
+- [x] Measure 11, 20 and 30 km terrain windows using the current desktop resolution policy, 1 km cells and eight terrain layers at 512-square alphamaps. Requested 513 samples. The production settings allocated 513, 257 and 257 respectively. The separate Green Coast graph fixture uses 512 hydrology cells.
+- [x] Measure 20 and 30 km terrain windows at exactly 512 intervals per axis (513 native height samples). The existing production policy still chooses 257 samples for these grid sizes.
+- [x] Measure 16-bit height and 8-bit surface-weight storage, raw and independently compressed, for every 1 km cell in the synthetic 20 × 20 km and 30 × 30 km grids.
+- [x] Provide planning estimates for Android download size and frame rate. The owner clarified that the assembled build and device playtest are outside Task 37. Keep the under-1 GB goal, 1.6 GB upper limit and 800 MB target for the 30 km world separate from live RAM and FPS.
+
+## Archive findings and implementation
+
+The development archive had wireframe previews and progressive terrain commits. It also called `EnsureFlatDataAsync` before generation. The repair-branch archive retained that eager setup, with native placeholder memory charged to the newer common payload ledger. It also withheld drawing while dependent presentation was pending. The Claude terrain patch refreshed the Inspector limit on an existing ledger, added optional Auto-fit, permitted up to two finished cells to await commit outside the worker count and added ownership details to admission errors. Its graph rebuild still called `EnsureFlatDataAsync`. A build could therefore reserve terrain for the full grid before the first worker reached a hydrology node.
+
+The reported 1,024 MiB limit despite a 1,536 MiB Inspector value agrees with the old ledger's creation-time setting. The repeated 1,070,544,542-byte resident figure left 3,197,282 bytes under the old limit. The placeholder contribution to that figure is an estimate from the report. The exact ownership of those bytes requires the live-set log. A rejected lake scratch allocation identifies the first reservation that failed.
+
+Task 37 removes eager flat terrain from graph rebuilds and keeps graphless flats for sculpting. Each graph cell reserves native height and texture storage at staged commit and links accepted neighbours. The Editor shows a blue preview for active first builds and reveals accepted ground while dependent presentation is parked. Existing staged rollback, collision and sculpt preservation still apply. Water placement remains a settlement callback after terrain and seams finish. The Inspector describes the budget estimate as accepted terrain plus working headroom. Graph resolutions, nodes and authored values are retained.
+
+## Verification
+
+The GitHub-only `UniverseCreator.Editor.Diagnostics.UCSelfTest.RunBatch` compiled and ran 19,936 checks with two failures and exit 1. The pre-existing GitHub ignore rules exclude `UniverseCreator/Content`, so `UCTextureBudget` found no textures and `UCPrefabIntegrity` opened no prefabs or models. There are no Task 37 changes in that content folder or those audits. Unity also logged Shader Graph import path errors in the deeply nested scratch project. Launch RAM was 6.04 GiB, with zero other Unity processes. Post-run `-VerifyOnly` confirmed all 2,528 source files, package/version pins, six Unity-generated metadata entries and no foreign code. Digest `FBC6809E60625917F0725244EA8D0966C59B847F437429CA7AECA2F132277EAD`. Log `Logs/UC_ISOLATED_TERRAIN37_PUBLICATION_FULL_20261126_01.log`.
+
+The shorter local validation copy combines the same 2,528 publication files with 763 sample-content files from the frozen Green Coast snapshot. All 3,291 file hashes and 11 project/package pins matched the input inventories. The first guarded attempt stopped before launch at 2.13 GiB free while another Unity process was active. After that process exited, the same gate launched at 6.29 GiB free with zero other Unity processes. Digest `8B3F193633DADDC7E3EB7B0E3B975985DA6AE8240CC2E6559E81A6552CE9DEFE`. Log `Logs/UC_ISOLATED_TERRAIN37_PUBLICATION_FULL_20261126_02.log`.
+
+```powershell
+& 'C:/tmp/run_UC_T06_clean_gate_20261117.ps1' -Snapshot 'C:/Users/Admin/Desktop/Universe Builder/.work/T37/.work/UC_T06_clean_snapshot_20261126_135751628.json' -ExecuteMethod 'UniverseCreator.Editor.Diagnostics.UCSelfTest.RunBatch' -LogPrefix 'UC_ISOLATED_TERRAIN37_PUBLICATION_FULL_20261126_02' -MinimumFreeGiB 4
+```
+
+The content-complete suite passed **19,936 checks with zero failures**, OS exit 0, and Unity reported no leaked weak pointers. Running the same helper with the same snapshot and `-VerifyOnly` after Unity exited confirmed all 3,291 source files, pinned package/version files, six Unity-generated metadata hashes and no foreign code. The sample content is part of local validation only. The publication checkout keeps the repository's existing exclusion.
+
+The first readiness run compiled and reported 285 checks, one failure and exit 1. The failing check was `UC biome cancelled preview restores drawing and preserves accepted heights, holes and collision.` The cancellation path now restores the legacy draw flag while respecting the existing dependency hold.
+
+The corrected live Unity snapshot contains 3,137 files, with SHA-256 inventory digest `CEB9F8FAD87F459A4C4EFFFFB784B027CB329DE8CE036FE3E32CF4047BAB82C8`. `UniverseCreator.Editor.Diagnostics.UCSelfTest.RunStreamingReadinessBatch` passed 285 checks with zero failures and exit 0 at 5.76 GiB free, with zero other Unity processes. Log `Logs/UC_ISOLATED_TERRAIN37_READINESS_20261126_02.log`.
+
+The first 36-chunk `RunGuideNativeMemoryBatch` reported 225 checks and two failures at 5.64 GiB free. All 36 cells accepted after 1,375,911 ms. Cold native allocation was 0 bytes. Final managed ledger was 847,021,880 bytes and native ledger was 701,008,416 bytes. Peak admitted payload was 1,610,608,123 bytes under the 1,610,612,736-byte ceiling. The final ledger reported zero retained entries. Early ground and the after-settle hook checks failed. `Logs/UC_ISOLATED_TERRAIN37_NATIVE_20261126_01.log` shows that the startup Scene recovery reinitialized the temporary fixture and queued 36 recovery bakes. The revised fixture uses `DontSave` to keep the temporary world out of that scan and verifies acceptance on the same rebuild revision. A small Green Coast gate checks that lifecycle before rerunning the 36-cell case.
+
+The historical comparable native workload completed 36/36 chunks in 1,307,251 ms with peak admitted payload of 1,610,610,620 bytes. Timing from a new run includes Editor scheduling and host load. Payload admission measures tracked generated data alongside estimated native storage. Process RAM, GPU memory, host Scene appearance and phone behaviour have their own acceptance checks.
+
+The corrected 36-cell baseline in snapshot `.work/UC_T06_clean_snapshot_20261126_121053954.json` reported 225 checks and zero failures at 4.93 GiB free. The first accepted terrain drew at 46,814 ms. All 36 became ready and the single settlement callback ran by 1,462,668 ms. There was no cold native allocation. Peak admitted payload was 1,610,608,123 bytes and teardown left zero entries. The launcher stopped waiting after 13 minutes while the Editor continued to completion. No OS exit code was captured. Log `Logs/UC_ISOLATED_TERRAIN37_NATIVE_20261126_02.log`.
+
+`UniverseCreator.Editor.Diagnostics.UCSelfTest.RunGuideNativeTimingBatch` passed six checks with zero failures and exit 0. The timing snapshot contained 3,137 files and had inventory digest `16E038E7DE5EA43155DBF3F65573EA23D62B5B252541D53F4B99E1B51431722E`. Launch RAM was 4.71 GiB. First ground drew at 97.446 seconds. Four cells accepted in 223.591 seconds, with five worker samples. Median worker execution was 38.934 seconds, the longest was 95.317 seconds, and the slowest timed commit stage was 136.517 milliseconds. Continental Shape Mask and Hybrid Multifractal each computed 129 times, Droplet Erosion 129 times and Thermal Erosion 128 times. Their combined exclusive time was 177.875 seconds. The replay ran during Editor asset import. Compare both work counts and elapsed time in the post-repair run. Log `Logs/UC_ISOLATED_TERRAIN37_TIMING_BEFORE_20261126_02.log`.
+
+Reference native height hashes for the timing replay are `B2DDF90D6F8FE72D` (0,0), `B4D3911661687774` (1,1), `0B2D0A8BE9E2D3E1` (2,1) and `79A930DF909CA490` (3,1).
+
+The timing counters put the largest measured cost in repeated CPU work across graph branches. The repair reuses audited terrain fields within a single worker evaluation when the node, sample rectangle, world position and extent match exactly. The existing payload ledger can evict the temporary entries. The matched post-repair replay passed six checks with zero failures and exit 0 at 6.09 GiB free on snapshot `.work/UC_T06_clean_snapshot_20261126_132617490.json`, digest `DEBE8FD231C14FE2456541290D3664AE874257444BF91338E232E1515F0803E8`. Four cells accepted in 100.726 seconds, a 55% reduction, and first ground drew at 30.806 seconds. Median worker generation was 23.279 seconds and the slowest commit stage was 77.112 ms. The four leading node counts fell to 65, 65, 65 and 64, with 65.886 seconds of combined exclusive work. All four native height hashes matched the baseline. Log `Logs/UC_ISOLATED_TERRAIN37_TIMING_AFTER_20261126_01.log`.
+
+The matching 36-cell `RunGuideNativeMemoryBatch` on the same digest reported **225 checks and zero failures** at 6.12 GiB free. First ground appeared at **30.453 s**, a 35% reduction from 46.814 s. Final settlement took **1,162.128 s** (19m 22s), down from 1,462.668 s (24m 23s), a **20.5% reduction**. All 36 chunks accepted and the settlement callback ran once. Native allocation before the first commit was zero. The ledger peaked at 1,610,611,478 bytes under the 1,610,612,736-byte limit and returned to zero entries. The log reports no leaked weak pointers. The launcher stopped waiting at 13 minutes, so the OS exit code was unavailable. Log `Logs/UC_ISOLATED_TERRAIN37_NATIVE_AFTER_20261126_01.log`.
+
+Across the 36-cell rerun, the four noise and erosion nodes still used 864.264 seconds of exclusive CPU time in total. Median worker execution was 34.437 seconds, with six shared drainage solves for the run. Native terrain allocation took at most 14.235 ms per timed stage call, individual height and texture uploads took at most 7.080 ms and 8.953 ms, and the slowest settlement call took 1.030 seconds. The single worker's average completed-ground throughput was about 32.3 seconds per chunk over the whole rebuild. At that same throughput, 400 chunks would take about **3h 35m** and 900 about **8h 04m**. This is a linear planning calculation. A real full-detail large-world bake would have different drainage, cache, memory and scheduling costs, and the current production resolution policy prevents a like-for-like run.
+
+The corrected fixture in `.work/UC_T06_clean_snapshot_20261126_121053954.json` passed `UniverseCreator.Editor.Diagnostics.UCSelfTest.RunGuideNativeProgressBatch` with 33 checks, zero failures and exit 0. The 3,137-file inventory digest was `350C5151FC70BD5D5AC52DA00682CC7403554766B7D3FC8192F7AB3F9423E361`. Launch RAM was 5.07 GiB with zero other Unity processes. The four-cell Green Coast fixture used 65 height samples. Cold native admission was zero. First ground drew at 19,744 ms and the callback ran once with all four surfaces accepted. Total time was 46,079 ms, peak admitted payload was 434,782,455 bytes and teardown left zero entries. The callback exercises placement ordering. Actual water objects and the blue wireframe's appearance need a host Scene check. Log `Logs/UC_ISOLATED_TERRAIN37_PROGRESS_20261126_01.log`.
+
+`UniverseCreator.Editor.Diagnostics.UCSelfTest.RunLargeWorldTerrainMemoryBatch` passed nine checks, zero failures and exit 0 on the same snapshot, with graphics enabled, 4.49 GiB free at launch and zero other Unity processes. The test allocated synthetic native heightfields and 512-square alphamaps with eight shared layers. It did not generate the full world or profile a game frame. The sums below combine Unity's reported TerrainData and alphamap object sizes. The separate Editor allocation delta uses a different profiler counter and must not be added to those sizes. MB is decimal.
+
+| World | Native height samples | Per cell | 25 cells | 49 cells with buffer | Editor allocator delta, 49 cells |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 11 × 11 km | 513 | 6.489 MB | 162.233 MB | 317.984 MB | 219.060 MB |
+| 20 × 20 km | 257 | 6.083 MB | 152.077 MB | 298.076 MB | 158.454 MB |
+| 30 × 30 km | 257 | 6.084 MB | 152.101 MB | 298.127 MB | 158.472 MB |
+
+At 20 km the grid-size policy changes the terrain build to 257 samples while the validated setting remains 513. At 30 km the desktop whole-grid heightfield guard reduces the validated setting to 257 as well. The test covers the 25-cell interior and its one-cell buffer. It excludes runtime demand, dormant and far terrain caches, render resources, graph state and game content. The fully resident Editor budget planner reports 3,464, 8,953 and 19,504 MiB for these synthetic settings. Those numbers serve Editor admission planning and do not predict Android RAM or storage. The owner requested direct 513-sample allocations at both larger sizes. The added diagnostic allocates those dimensions independently of the production cap. Log for the production-policy run `Logs/UC_ISOLATED_TERRAIN37_LARGE_MEMORY_20261126_01.log`.
+
+`UniverseCreator.Editor.Diagnostics.UCSelfTest.RunLargeWorldFullDetailTerrainMemoryBatch` passed eight checks with zero failures and exit 0. Launch RAM was 6.33 GiB. Snapshot `.work/UC_T06_clean_snapshot_20261126_132149628.json` has inventory digest `16E038E7DE5EA43155DBF3F65573EA23D62B5B252541D53F4B99E1B51431722E`. Unity reported 162,235,158 and 162,248,448 bytes for the 25-cell native terrain windows at 20 and 30 km, respectively. The 49-cell windows used 317,990,612 and 318,004,838 bytes. These sums include TerrainData and alphamap objects at 513 height samples. Log `Logs/UC_ISOLATED_TERRAIN37_FULL_DETAIL_STORAGE_20261126_01.log`.
+
+The storage test encoded a continuous two-scale UC Perlin heightfield. Each cell stores 513 × 513 little-endian 16-bit heights, covering 512 intervals per axis, and 512 × 512 × 8 surface-blend bytes. Gzip compresses each cell and field independently. Values are bytes.
+
+| World and cells | Raw heights | Raw weights | Gzip heights | Gzip weights | Gzip total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 20 × 20 km, 400 | 210,535,200 | 838,860,800 | 175,816,483 | 77,665,972 | 253,482,455 |
+| 30 × 30 km, 900 | 473,704,200 | 1,887,436,800 | 395,731,330 | 174,867,721 | 570,599,051 |
+
+The 30 km synthetic terrain leaves about 229.4 MB under the 800 MB target in this layout. The fixture excludes the actual graph's terrain distribution and surface weights, the Unity serializer, textures, mipmaps, holes, bundle headers, water, vegetation and other game content. Android download, installed size and running memory remain open.
+
+## Android planning estimates
+
+If the final terrain compresses like the fixture and all other compressed content takes 300–600 MB, the estimated total download is 553–853 MB at 20 km and 871–1,171 MB at 30 km. If 800 MB is the budget for the entire 30 km game, the storage estimate leaves about 229.4 MB for all other compressed content. The same estimate leaves 429.4 MB under the 1 GB goal and 1,029.4 MB under the 1.6 GB ceiling. These figures use decimal units. Installation and live memory use different layouts.
+
+For the Redmi Note 14 planning target, 30 FPS allows 33.3 ms for an entire frame. A 40–50 ms frame would yield 20–25 FPS. These figures model frame-time scenarios. The desktop native window above excludes most of the game and gives no phone frame-time measurement.
+
+## Guide delivery
+
+The release guides contain the Task 37 terrain changes and the existing published lighting guidance. Page 6 covers progressive generation and payload budgets. The final page covers the measured storage and memory figures. Both candidates passed 1,915 recipe checks. PDF inspection passed 663 checks across 76 pages for [Green Coast V5.5](docs/WorldGuides/UniverseCreator_World_Build_V5.5.pdf) and 699 across 80 pages for [Rift Highlands V6.5](docs/WorldGuides/UniverseCreator_World_Build_V6.5.pdf). The two revised pages in each file were visually inspected. The candidates and delivered copies have matching SHA-256 hashes. Inspection log `Logs/UC_ISOLATED_GUIDE_PDF_INSPECTION_20261126104245221462.log`.
+
+| Guide | SHA-256 |
+| --- | --- |
+| V5.5 | `1A1B4CE66EE332F0B6A41C09163E43E75A3623714015454E0ED89510AF0A08DD` |
+| V6.5 | `DD10BE3809EB996F43594029521ED98250D3E5C8A27701D5193AC47ADA3A5DAA` |

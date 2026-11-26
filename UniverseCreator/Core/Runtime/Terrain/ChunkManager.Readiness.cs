@@ -114,7 +114,9 @@ namespace UniverseCreator.TerrainSystem
                 bool nativeLive = chunk.resident && IsLiveCell(world, chunk) && HasAcceptedTerrain(world, chunk);
                 UpdateChunkCollision(world, chunk, nativeLive); // UC-T09-04: repaired collision can release presentation in this same sweep.
                 bool present = CanPresentChunk(world, chunk, nativeLive); // UC-T09-04: dependent settlement uses the same independent presentation policy.
-                if (chunk.go != null && (chunk.go.activeSelf != nativeLive || chunk.presentationParked == present))
+                bool refreshGround = chunk.presentationParked && chunk.terrain != null &&
+                    chunk.terrain.drawHeightmap != (chunk.savedDrawHeightmap && CanPresentGround(world, chunk, nativeLive));
+                if (chunk.go != null && (chunk.go.activeSelf != nativeLive || chunk.presentationParked == present || refreshGround))
                 {
                     SetChunkLive(chunk, nativeLive); changed = true;
                     if (present) HideWireframe(chunk); // UC-T09-03: retire the preview on transition, not on every idle pump.
@@ -155,6 +157,12 @@ namespace UniverseCreator.TerrainSystem
             chunk.terrain.terrainData == chunk.data && chunk.appliedHeights != null &&
             !chunk.publicationInProgress && (chunk.bakedThisSession || world.graph == null || chunk.restoredAcceptedData == chunk.data);
 
+        // UC repair 37: an explicit editor rebuild can draw its accepted ground while companion content remains parked.
+        private bool CanPresentGround(UniverseCreatorObject world, Chunk chunk, bool live) =>
+            !Application.isPlaying && world != null && world.progressiveChunkReveal && generationCompletionPending &&
+            chunk.generationFailure == null && chunk.publicationRun.Equals(bakeRun) && HasAcceptedTerrain(world, chunk) &&
+            CanPresentChunk(world, chunk, live, groundOnly: true);
+
         private static bool HasAcceptedCollision(UniverseCreatorObject world, Chunk chunk, bool requireActive = true)
         {
             if (!world.generateCollider) return true; // No collision is an explicit authored contract; landing requests reject it.
@@ -176,7 +184,7 @@ namespace UniverseCreator.TerrainSystem
             bool dependents = accepted && !chunk.presentationPending && !chunk.inFlight && chunk.pendingScatterCommit == null && chunk.pendingGraphScatter == null && DependenciesSettled(world);
             state = new ChunkReadinessState(chunk.publicationRun, chunk.resident, accepted,
                 accepted && HasAcceptedCollision(world, chunk), dependents,
-                chunk.terrain != null && chunk.go != null && chunk.go.activeInHierarchy && !chunk.presentationParked && chunk.terrain.drawHeightmap);
+                chunk.terrain != null && chunk.go != null && chunk.go.activeInHierarchy && chunk.terrain.drawHeightmap);
             return true;
         }
 
@@ -206,7 +214,7 @@ namespace UniverseCreator.TerrainSystem
             if (!reveal) return;
             StitchAround(chunk); // UC-T09-03: native neighbours must be linked before dependent water samples active terrain.
             SetChunkLive(chunk, true); // Stitching can invalidate accepted dependent content; park it before this pump returns.
-            if (!chunk.presentationParked) HideWireframe(chunk);
+            HideWireframe(chunk);
         }
 
         /// <summary>Requests a bounded landing footprint through UC's existing worker/commit budget. Does not move actors, bake synchronously or change the camera. Replaces this owner's previous landing request.</summary>

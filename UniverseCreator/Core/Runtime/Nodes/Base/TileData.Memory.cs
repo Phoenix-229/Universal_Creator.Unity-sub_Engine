@@ -182,6 +182,14 @@ namespace UniverseCreator.Nodes
             return pin;
         }
 
+        // UC repair 37: the publishing tile still pins the entry while its window cache takes an evictable reference.
+        internal ProductMemoryBudget.Entry RetainWindowProduct(Matrix product)
+        {
+            var entry = memoryPins[product].Entry;
+            memoryBudget.RetainTransient(entry);
+            return entry;
+        }
+
         /// <summary>UC-T02-06: retires graph payload pins after workers and all output consumers have finished.</summary>
         /// <remarks>Idempotent, owner-thread only. Releases lazy inputs and cache references; never destroys borrowed native assets.
         /// Output references remain readable, but the caller must no longer keep them as active budgeted consumers.</remarks>

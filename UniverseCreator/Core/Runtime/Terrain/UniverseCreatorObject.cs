@@ -584,22 +584,58 @@ namespace UniverseCreator.TerrainSystem
         private readonly WorldGenerationScheduler generationScheduler = new WorldGenerationScheduler();
 
         // UC-T02-06: a world shares admission across its workers, retained fields and generated terrain reservations.
-        [SerializeField, Min(16), Tooltip("Generated payload budget in MiB, fixed when this world's first job starts. Active consumers are protected; over-budget new work reports an error. Excludes imported assets and engine/driver overhead.")]
+        [SerializeField, Min(16), Tooltip("Generated payload budget in MiB. Applied live. Active consumers are protected. See the planning estimate for accepted terrain and working headroom. Excludes imported content and driver overhead.")]
         private int productMemoryBudgetMiB = 1024;
+        // UC repair 37: the optional automatic floor covers retained terrain and graph work.
+        [SerializeField, Tooltip("Use the planning estimate as an automatic minimum, capped at half of known system RAM. The entered MiB value still applies as a lower bound.")]
+        private bool productMemoryAuto = false;
         private ProductMemoryBudget productMemory;
-        /// <summary>World's generated-payload budget, initialized once from its authored MiB limit (minimum 16 MiB).</summary>
-        /// <remarks>UC repair 30: honors saved limits, including 256 and 512 MiB. Defaults to 1024 MiB for new components.
-        /// Estimates exclude imported assets, GC heap and graphics-driver overhead; reload the world to change an initialized limit.
+        private long productMemoryAutoFloorBytes; // written on the main thread, read by workers through Interlocked
+
+        /// <summary>World's generated-payload budget. UC fix: the authored MiB value is now applied LIVE; before this a budget raised after the first job started was silently ignored until the world reloaded.</summary>
+        /// <remarks>Safe from any thread: reads plain fields only. Estimates exclude imported assets, GC heap and graphics-driver overhead.
         /// Admission fails promptly when active consumers cannot fit; it never blocks the main thread waiting for memory.</remarks>
         public ProductMemoryBudget ProductMemory
         {
             get
             {
-                if (productMemory == null) System.Threading.Interlocked.CompareExchange(ref productMemory,
-                    new ProductMemoryBudget(System.Math.Max(16L, productMemoryBudgetMiB) * 1024 * 1024), null);
-                return productMemory;
+                long wanted = System.Math.Max(16L, productMemoryBudgetMiB) * 1024 * 1024;
+                if (productMemoryAuto) wanted = System.Math.Max(wanted, System.Threading.Interlocked.Read(ref productMemoryAutoFloorBytes));
+                if (productMemory == null) System.Threading.Interlocked.CompareExchange(ref productMemory, new ProductMemoryBudget(wanted), null);
+                ProductMemoryBudget budget = productMemory;
+                if (budget.LimitBytes != wanted) budget.Resize(wanted);
+                return budget;
             }
         }
+
+        /// <summary>Estimates a payload budget in MiB for accepted terrain and working headroom across the authored grid. Main thread only.</summary>
+        public int RecommendedProductMemoryMiB()
+        {
+            long cells = (long)chunkCountPerSide * chunkCountPerSide;
+            long res = GetChunkResolution();
+            long layers = terrainLayers != null ? System.Math.Max(1, terrainLayers.Length) : 1;
+            long perCell = res * res * 8 + (res - 1) * (res - 1) * 2 + 512L * 512L * layers * 8 + res * res * 4 + 64;
+            long bytes = cells * perCell * 5 / 4 + 512L * 1024 * 1024;
+            return (int)System.Math.Min(int.MaxValue, bytes / (1024 * 1024) + 1);
+        }
+
+        /// <summary>UC fix: re-evaluates the budget from the authored settings. Main thread only; called before every full rebuild and on inspector edits.</summary>
+        public void RefreshProductMemoryLimit()
+        {
+            long floor = 0;
+            if (productMemoryAuto)
+            {
+                long ram = (long)SystemInfo.systemMemorySize * 1024L * 1024L;
+                floor = (long)RecommendedProductMemoryMiB() * 1024L * 1024L;
+                if (ram > 0) floor = System.Math.Min(floor, ram / 2);
+            }
+            System.Threading.Interlocked.Exchange(ref productMemoryAutoFloorBytes, floor);
+            if (productMemory != null) { ProductMemoryBudget applied = ProductMemory; } // applies the new limit to a live budget
+        }
+
+        /// <summary>Shows each accepted ground chunk during an explicit editor rebuild. Water and dependent work still wait for settlement.</summary>
+        [Tooltip("Show each accepted ground chunk during an editor rebuild. Water and dependent content still wait for settlement.")]
+        public bool progressiveChunkReveal = true;
 
         /// <summary>Publication authority shared by terrain, material, vegetation and environment work for this world.</summary>
         public WorldGenerationScheduler GenerationScheduler => generationScheduler;
@@ -1437,6 +1473,7 @@ namespace UniverseCreator.TerrainSystem
             drawDistance = Mathf.Clamp(drawDistance, 50f, 20000f);
             lodBias = Mathf.Clamp(lodBias, 0.5f, 2f);
             maxConcurrentChunks = Mathf.Clamp(maxConcurrentChunks, 1, 16);
+            RefreshProductMemoryLimit(); // UC fix: inspector edits to the payload budget take effect immediately.
 
             // Resource guard, last so it sees the clamped grid. A 56 km world at a large
             // cell count multiplies into an allocation Unity will attempt and the machine

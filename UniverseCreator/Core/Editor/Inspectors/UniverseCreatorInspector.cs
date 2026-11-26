@@ -1319,7 +1319,12 @@ namespace UniverseCreator.Editor.Inspectors
             EditorGUILayout.PropertyField(serializedObject.FindProperty("chunkCommitBudgetMs"),
                 new GUIContent("Chunk Commit Budget (ms)", "Main-thread commit budget, 0.1 to 16 ms; a single native Unity upload can exceed this soft budget."));
             EditorGUILayout.PropertyField(serializedObject.FindProperty("productMemoryBudgetMiB"),
-                new GUIContent("Generated Payload Budget (MiB)", "Minimum 16 MiB. Fixed when this world's memory owner initializes; reload the world after changing an initialized limit. Excludes imported content and driver overhead."));
+                new GUIContent("Generated Payload Budget (MiB)", "Minimum 16 MiB. Applied live. Excludes imported content and driver overhead."));
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("productMemoryAuto"),
+                new GUIContent("Auto-fit Budget", "Raise the budget to the recommended minimum for this grid/resolution (never above half of system RAM)."));
+            EditorGUILayout.HelpBox("Planning estimate for this world: " + uc.RecommendedProductMemoryMiB() + " MiB (accepted terrain plus working headroom).", MessageType.None);
+            EditorGUILayout.PropertyField(serializedObject.FindProperty("progressiveChunkReveal"),
+                new GUIContent("Progressive Chunk Reveal", "Show each accepted ground chunk during an editor rebuild. Water and dependent content still wait for settlement."));
             if (EditorGUI.EndChangeCheck())
             {
                 var budget = serializedObject.FindProperty("chunkCommitBudgetMs");

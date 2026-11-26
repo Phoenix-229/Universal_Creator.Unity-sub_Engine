@@ -30,6 +30,9 @@ namespace UniverseCreator.Nodes
 
         internal object PullFunctionResult(Generator endpoint, StopToken stop) => evaluator.PullNode(endpoint, 0, this, stop);
 
+        // UC repair 37: only geometry windows share the evaluator's scoped terrain fields.
+        internal GraphEvaluator CreateWindowEvaluator() => evaluator.CreateWindowEvaluator();
+
         internal object PullFunctionArgument(string endpointId, StopToken stop)
         {
             if (functionCaller == null || functionParent == null) return null;

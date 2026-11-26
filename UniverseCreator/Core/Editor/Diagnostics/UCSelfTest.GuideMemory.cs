@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -196,7 +197,17 @@ namespace UniverseCreator.Editor.Diagnostics
         /// Reports managed/native admission separately, verifies native height/layer/collider acceptance and bounds execution to 30 minutes.
         /// Texture and vegetation graph application and real-camera appearance require their separate acceptance checks.</remarks>
         /// <exception cref="InvalidOperationException">Called outside isolated batch mode.</exception>
-        public static async void RunGuideNativeMemoryBatch()
+        public static void RunGuideNativeMemoryBatch() => RunGuideNativeMemory(6, 513);
+
+        /// <summary>Checks cold preview, progressive native acceptance and settlement on a small Green Coast grid in isolated batch mode.</summary>
+        /// <exception cref="InvalidOperationException">Called outside isolated batch mode.</exception>
+        public static void RunGuideNativeProgressBatch() => RunGuideNativeMemory(2, 65);
+
+        /// <summary>Times the first four 513-sample commits of a cold 6 km Green Coast rebuild, then cancels and retires the remaining work.</summary>
+        /// <exception cref="InvalidOperationException">Called outside isolated batch mode.</exception>
+        public static void RunGuideNativeTimingBatch() => RunGuideNativeMemory(6, 513, 4);
+
+        private static async void RunGuideNativeMemory(int side, int samples, int timingCells = 0)
         {
             if (!Application.isBatchMode) throw new InvalidOperationException("Native guide acceptance requires isolated batch mode.");
             checks = 0; failures.Clear();
@@ -210,16 +221,20 @@ namespace UniverseCreator.Editor.Diagnostics
                 string path = Path.Combine(Application.dataPath, "UniverseCreator/Core/Editor/Diagnostics/Fixtures/guide_worlds.json");
                 var recipe = JsonUtility.FromJson<GuideRecipes>(File.ReadAllText(path)).worlds.Single(w => w.version == "V5.5");
                 foreach (var definition in recipe.graphs) graphs.Add(BuildGuideGraph(definition));
-                root = new GameObject("UC full native Green Coast memory"); root.SetActive(false);
+                // UC repair 37: the fixture owns its pump. Editor startup recovery must not discover
+                // and reinitialize this temporary world between an explicit rebuild and settlement.
+                root = new GameObject("UC native Green Coast memory") { hideFlags = HideFlags.DontSave };
+                root.SetActive(false);
                 var world = root.AddComponent<UniverseCreatorObject>(); world.enabled = false; world.autoRegenerate = false;
                 world.graph = graphs.Single(g => g.Domain == UCGraphDomain.TerrainWater);
-                world.worldSizeKm = 6; world.chunkCountPerSide = 6; world.resolution = 513; world.maxHeightMeters = 900;
+                world.worldSizeKm = side; world.chunkCountPerSide = side; world.resolution = samples; world.maxHeightMeters = 900;
+                world.progressiveChunkReveal = true; world.showWireframePreview = true;
                 world.maxConcurrentChunks = 1; world.generateCollider = true;
                 // UC repair 30: an explicit test setting, never a hidden expansion of saved 256/512 limits.
                 typeof(UniverseCreatorObject).GetField("productMemoryBudgetMiB", BindingFlags.Instance | BindingFlags.NonPublic).SetValue(world, 1536);
                 memory = world.ProductMemory;
-                Check(memory.LimitBytes == 1536L * 1024 * 1024 && world.GetEffectiveResolution() == 513,
-                    "UC guide native: explicit budget and authored 513 height samples are honored.");
+                Check(memory.LimitBytes == 1536L * 1024 * 1024 && world.GetEffectiveResolution() == samples,
+                    "UC guide native: explicit budget and authored " + samples + " height samples are honored.");
                 var weather = root.AddComponent<UCWeatherSystemManager>(); weather.enabled = false;
                 var bindings = root.AddComponent<UCWorldGraphBindings>();
                 bindings.LightingGraph = graphs.Single(g => g.Domain == UCGraphDomain.LightingClimateWeather);
@@ -229,38 +244,103 @@ namespace UniverseCreator.Editor.Diagnostics
                 // Keep automatic drivers disabled, but exercise the production owner's actual destruction lifecycle.
                 bindings.enabled = false;
                 root.SetActive(true);
+                // UC repair 37: use the existing counters on the production scheduler and commit path.
+                UCGenerationMetrics metrics = world.GenerationScheduler.Metrics;
+                metrics.Enabled = true;
+                metrics.Scenario = "Green Coast cold rebuild";
                 manager.RebuildAll();
+                int cellCount = side * side, accepted, settleCalls = 0, acceptedAtSettle = 0;
+                GenerationRunId run = world.GenerationScheduler.CurrentRun;
+                int ObserveAcceptance(out int visible, out int visibleWhilePending)
+                {
+                    int count = 0;
+                    visible = 0; visibleWhilePending = 0;
+                    for (int z = 0; z < side; z++) for (int x = 0; x < side; x++)
+                        if (manager.TryGetChunkReadiness(new Coord(x, z), out var state) && state.TerrainAccepted && state.AcceptedRun.Equals(run))
+                        {
+                            count++;
+                            if (!state.Visible) continue;
+                            visible++;
+                            if (!state.DependentsReady) visibleWhilePending++;
+                        }
+                    return count;
+                }
+                manager.RunAfterSettle(() => { settleCalls++; acceptedAtSettle = ObserveAcceptance(out _, out _); });
+                bool sawColdPreview = false, sawEarlyGround = false;
+                long coldNativeBytes = -1, firstGroundMs = -1;
                 int reported = -1;
                 do
                 {
                     manager.PumpCompleted();
-                    int accepted = 0;
-                    for (int z = 0; z < 6; z++) for (int x = 0; x < 6; x++)
-                        if (manager.TryGetChunkReadiness(new Coord(x, z), out var state) && state.TerrainAccepted) accepted++;
+                    accepted = ObserveAcceptance(out int visible, out int visibleWhilePending);
+                    if (!sawColdPreview && accepted == 0 &&
+                        manager.GetComponentsInChildren<MeshRenderer>().Any(renderer => renderer.enabled && renderer.name == "WireframePreview"))
+                    {
+                        sawColdPreview = true;
+                        coldNativeBytes = memory.NativeBytes;
+                        var coldCells = root.GetComponentsInChildren<Terrain>(true);
+                        Check(coldCells.Length == cellCount && coldCells.All(ground => ground.terrainData == null),
+                            "UC guide native: active blue preview appears before any native placeholder is attached.");
+                    }
+                    if (!sawEarlyGround && accepted > 0 && accepted < cellCount && visibleWhilePending > 0 && settleCalls == 0)
+                    {
+                        sawEarlyGround = true;
+                        firstGroundMs = timer.ElapsedMilliseconds;
+                    }
                     if (accepted != reported)
                     {
                         reported = accepted;
-                        Console.WriteLine("UC guide native progress: " + accepted + "/36 elapsedMs=" + timer.ElapsedMilliseconds +
+                        Console.WriteLine("UC guide native progress: " + accepted + "/" + cellCount + " elapsedMs=" + timer.ElapsedMilliseconds +
+                            " visible=" + visible + " visibleWhilePending=" + visibleWhilePending +
                             " managed=" + memory.ManagedBytes + " native=" + memory.NativeBytes + " peak=" + memory.PeakBytes);
                         Console.WriteLine("UC guide native ownership: " + memory.DescribeLiveSet());
                     }
                     if (!string.IsNullOrEmpty(manager.ReadinessDiagnostic)) throw new InvalidOperationException(manager.ReadinessDiagnostic);
+                    if (timingCells > 0 && accepted >= timingCells) break;
                     if (timer.Elapsed.TotalMinutes >= 30) throw new TimeoutException("Native Green Coast build exceeded its 30-minute diagnostic limit.");
                     await Task.Delay(10); // Leave Unity's synchronization context free to retire workers and process commits.
                 }
                 while (manager.IsRebuildingAll || manager.HasWork);
+                Check(sawColdPreview, "UC guide native: cold work has a visible wireframe outside the inactive terrain holder.");
+                Check(sawEarlyGround, "UC guide native: accepted ground draws before the final terrain and before dependent readiness.");
+                Console.WriteLine($"UC guide native timing: accepted={accepted} firstGroundMs={firstGroundMs} elapsedMs={timer.ElapsedMilliseconds} " +
+                    $"metrics={JsonUtility.ToJson(metrics.Snapshot().Last(record => record.run == run.ToString()))}");
+                foreach (var stage in (ChunkCommitStage[])Enum.GetValues(typeof(ChunkCommitStage)))
+                    Console.WriteLine($"UC guide native stage: {stage} count={manager.CommitMetrics.Count(stage)} maxMs={manager.CommitMetrics.MaximumMilliseconds(stage):F3}");
+                foreach (Generator node in world.graph.nodes)
+                    if (metrics.TryGetNode(run, node.id, out var timing))
+                        Console.WriteLine($"UC guide native node: {node.id} ({node.NodeName}) computes={timing.computes} localHits={timing.localHits} " +
+                            $"retainedHits={timing.retainedHits} inclusiveMs={timing.inclusiveMilliseconds:F3} exclusiveMs={timing.exclusiveMilliseconds:F3}");
+                if (timingCells > 0)
+                {
+                    Check(accepted >= timingCells && settleCalls == 0 && coldNativeBytes == 0,
+                        "UC guide native timing: captures cold accepted ground before dependent settlement.");
+                    foreach (Terrain ground in root.GetComponentsInChildren<Terrain>())
+                    {
+                        TerrainData data = ground.terrainData;
+                        if (data == null || !ground.drawHeightmap) continue;
+                        Console.WriteLine($"UC guide native height: {ground.name} hash={GuideHeightFingerprint(data.GetHeights(0, 0, samples, samples)):X16}");
+                    }
+                    return;
+                }
+                Check(settleCalls == 1 && acceptedAtSettle == cellCount,
+                    "UC guide native: hydrology settlement hook runs once after all " + cellCount + " surfaces accept.");
+                Check(!manager.GetComponentsInChildren<MeshRenderer>(true).Any(renderer => renderer.name == "WireframePreview"),
+                    "UC guide native: committed previews are retired.");
+                Console.WriteLine("UC guide native progressive: coldNativeBytes=" + coldNativeBytes +
+                    " firstVisibleGroundMs=" + firstGroundMs + " settleCalls=" + settleCalls + " acceptedAtSettle=" + acceptedAtSettle);
                 Terrain[] terrain = root.GetComponentsInChildren<Terrain>(true);
-                Check(terrain.Length == 36, "UC guide native: all 36 native chunks remain present.");
-                for (int z = 0; z < 6; z++) for (int x = 0; x < 6; x++)
-                    Check(manager.TryGetChunkReadiness(new Coord(x, z), out var state) && state.TerrainAccepted,
+                Check(terrain.Length == cellCount, "UC guide native: all " + cellCount + " native chunks remain present.");
+                for (int z = 0; z < side; z++) for (int x = 0; x < side; x++)
+                    Check(manager.TryGetChunkReadiness(new Coord(x, z), out var state) && state.TerrainAccepted && state.AcceptedRun.Equals(run),
                         "UC guide native: accepted height and splat publication for cell " + x + "," + z);
                 int layers = ((UniverseCreator.Nodes.Outputs.BiomeSplatOutputNode)world.graph.GetNodeById("splatOut")).layerCount;
                 foreach (Terrain ground in terrain)
                 {
                     TerrainData data = ground.terrainData;
                     TerrainCollider collider = ground.GetComponent<TerrainCollider>();
-                    Check(data != null && data.heightmapResolution == 513,
-                        "UC guide native: retained 513 height samples: " + ground.name);
+                    Check(data != null && data.heightmapResolution == samples,
+                        "UC guide native: retained " + samples + " height samples: " + ground.name);
                     Check(data != null && data.alphamapLayers == layers,
                         "UC guide native: retained all authored splat layers: " + ground.name);
                     Check(ground.gameObject.activeInHierarchy && ground.drawHeightmap,
@@ -309,6 +389,151 @@ namespace UniverseCreator.Editor.Diagnostics
                     "UC guide native: final worker/cache/native ownership retires completely.");
                 Console.WriteLine(Report(failures.Count == 0)); EditorApplication.Exit(failures.Count == 0 ? 0 : 1);
             }
+        }
+
+        /// <summary>Measures native terrain-only allocations for 11, 20 and 30 km world settings with 1 km cells.</summary>
+        /// <remarks>Isolated Windows Editor batch entry. Builds one central buffered window per size with the effective height resolution,
+        /// 512-square alphamaps and eight shared terrain layers. It does not generate a world, render frames or measure Android costs.</remarks>
+        /// <exception cref="InvalidOperationException">Called outside batch mode.</exception>
+        public static void RunLargeWorldTerrainMemoryBatch() => RunLargeWorldTerrainMemory(new[] { 11, 20, 30 }, false);
+
+        /// <summary>Measures 512 terrain intervals (513 height samples) per 1 km cell for 20 km and 30 km worlds.</summary>
+        /// <remarks>Measures native window allocations and encodes all cells of a synthetic terrain for storage comparison.
+        /// The production resolution policy is logged separately. The encoded payload is a diagnostic format.</remarks>
+        /// <exception cref="InvalidOperationException">Called outside batch mode.</exception>
+        public static void RunLargeWorldFullDetailTerrainMemoryBatch() => RunLargeWorldTerrainMemory(new[] { 20, 30 }, true);
+
+        private static void RunLargeWorldTerrainMemory(int[] worldSizesKm, bool measureRequestedHeightSamples)
+        {
+            if (!Application.isBatchMode) throw new InvalidOperationException("Terrain memory measurement requires isolated batch mode.");
+            checks = 0; failures.Clear();
+            var root = new GameObject("UC large world terrain memory"); root.SetActive(false);
+            const int requestedHeightSamples = 513, alphaResolution = 512, layerCount = 8;
+            var layers = new TerrainLayer[layerCount];
+            try
+            {
+                for (int i = 0; i < layers.Length; i++) layers[i] = new TerrainLayer();
+                var world = root.AddComponent<UniverseCreatorObject>(); world.enabled = false; world.autoRegenerate = false;
+                world.chunkSizeMeters = 1000; world.terrainLayers = layers;
+                world.residentWindowPerSide = 5; world.bufferRingWidth = 1;
+                var weights = new float[alphaResolution, alphaResolution, layerCount];
+                for (int z = 0; z < alphaResolution; z++) for (int x = 0; x < alphaResolution; x++)
+                    weights[z, x, (z / 64 + x / 64) % layerCount] = 1;
+
+                foreach (int worldKm in worldSizesKm)
+                {
+                    world.worldSizeKm = worldKm;
+                    world.resolution = requestedHeightSamples;
+                    world.ValidateSettings();
+                    int effective = world.GetChunkResolution();
+                    int measured = measureRequestedHeightSamples ? requestedHeightSamples : effective;
+                    int interior = world.residentWindowPerSide * world.residentWindowPerSide;
+                    int windowSide = 2 * world.GetStreamRadius() + 1;
+                    var terrain = new TerrainData[windowSide * windowSide];
+                    var heights = new float[measured, measured];
+                    for (int z = 0; z < measured; z++) for (int x = 0; x < measured; x++)
+                        heights[z, x] = 0.2f + 0.1f * x / (measured - 1);
+                    Check(world.chunkCountPerSide == worldKm && world.GetChunkSize() == 1000f && interior == 25 && terrain.Length == 49,
+                        "UC terrain memory: " + worldKm + " km computes a 25-cell window plus buffer.");
+                    Check(effective == (worldKm == 11 ? 513 : 257),
+                        "UC terrain memory: " + worldKm + " km uses the current desktop terrain resolution policy.");
+                    try
+                    {
+                        long objectBytes = 0, alphaTextureBytes = 0, interiorObjectBytes = 0, interiorAlphaTextureBytes = 0;
+                        long before = UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong();
+                        float cellSize = world.GetChunkSize();
+                        var size = new Vector3(cellSize, world.maxHeightMeters, cellSize);
+                        for (int i = 0; i < terrain.Length; i++)
+                        {
+                            TerrainData data = terrain[i] = TerrainBuilder.GetOrCreateTerrainData(null, measured, size);
+                            data.alphamapResolution = alphaResolution;
+                            TerrainBuilder.ApplyLayers(data, world);
+                            data.SetHeights(0, 0, heights);
+                            data.SetAlphamaps(0, 0, weights);
+                            long bytes = UnityEngine.Profiling.Profiler.GetRuntimeMemorySizeLong(data);
+                            long alphaBytes = 0;
+                            foreach (Texture2D texture in data.alphamapTextures)
+                                alphaBytes += UnityEngine.Profiling.Profiler.GetRuntimeMemorySizeLong(texture);
+                            objectBytes += bytes; alphaTextureBytes += alphaBytes;
+                            if (i < interior) { interiorObjectBytes += bytes; interiorAlphaTextureBytes += alphaBytes; }
+                        }
+                        long allocatedDelta = UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong() - before;
+                        Check(terrain.All(data => data.heightmapResolution == measured && data.alphamapLayers == layerCount &&
+                            data.alphamapResolution == alphaResolution) && objectBytes > 0 && alphaTextureBytes > 0,
+                            $"UC terrain memory: {worldKm} km allocates {measured} native height samples and returns profiler sizes.");
+                        Console.WriteLine($"UC terrain memory: worldKm={worldKm} gridSide={world.chunkCountPerSide} requested={requestedHeightSamples} " +
+                            $"validated={world.resolution} effective={effective} measured={measured} heightIntervals={measured - 1} " +
+                            $"interior={interior} buffered={terrain.Length} terrainDataBytes25={interiorObjectBytes} " +
+                            $"alphaTextureBytes25={interiorAlphaTextureBytes} terrainDataBytes49={objectBytes} " +
+                            $"alphaTextureBytes49={alphaTextureBytes} editorAllocatedDeltaBytes49={allocatedDelta} " +
+                            $"terrainDataBytesPerCell={objectBytes / terrain.Length} alphaTextureBytesPerCell={alphaTextureBytes / terrain.Length} " +
+                            $"editorFullGridPlanningMiB={world.RecommendedProductMemoryMiB()}");
+                    }
+                    finally { foreach (TerrainData data in terrain) if (data != null) UnityEngine.Object.DestroyImmediate(data); }
+                    if (measureRequestedHeightSamples)
+                        MeasureLargeWorldTerrainStorage(world.chunkCountPerSide, measured, alphaResolution, layerCount);
+                }
+            }
+            catch (Exception error) { Check(false, "UC terrain memory diagnostic exception: " + error); }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(root);
+                foreach (TerrainLayer layer in layers) if (layer != null) UnityEngine.Object.DestroyImmediate(layer);
+            }
+            Console.WriteLine(Report(failures.Count == 0)); EditorApplication.Exit(failures.Count == 0 ? 0 : 1);
+        }
+
+        // UC repair 37: measure independent cell blocks so the disk comparison includes every cell and permits random access.
+        private static void MeasureLargeWorldTerrainStorage(int gridSide, int heightSamples, int alphaResolution, int layerCount)
+        {
+            var noise = new Noise(37);
+            var heights = new byte[heightSamples * heightSamples * sizeof(ushort)];
+            var weights = new byte[alphaResolution * alphaResolution * layerCount];
+            using var compressed = new MemoryStream();
+            long heightBytes = 0, weightBytes = 0;
+            int intervals = heightSamples - 1, encodedCells = 0;
+
+            for (int cellZ = 0; cellZ < gridSide; cellZ++) for (int cellX = 0; cellX < gridSide; cellX++)
+            {
+                Array.Clear(weights, 0, weights.Length);
+                for (int z = 0; z < heightSamples; z++) for (int x = 0; x < heightSamples; x++)
+                {
+                    int worldX = cellX * intervals + x, worldZ = cellZ * intervals + z;
+                    float elevation = 0.8f * noise.Perlin(worldX / 4096f, worldZ / 4096f) +
+                        0.2f * noise.Perlin(worldX / 97f, worldZ / 97f);
+                    int height = Mathf.RoundToInt(Mathf.Clamp01(elevation) * ushort.MaxValue);
+                    int sample = (z * heightSamples + x) * sizeof(ushort);
+                    heights[sample] = (byte)(height & byte.MaxValue);
+                    heights[sample + 1] = (byte)(height >> 8);
+
+                    if (x >= alphaResolution || z >= alphaResolution) continue;
+                    float band = Mathf.Clamp01((elevation - 0.25f) * 2f) * (layerCount - 1);
+                    int lower = Mathf.Min((int)band, layerCount - 2);
+                    int upperWeight = Mathf.RoundToInt((band - lower) * byte.MaxValue);
+                    int pixel = (z * alphaResolution + x) * layerCount + lower;
+                    weights[pixel] = (byte)(byte.MaxValue - upperWeight);
+                    weights[pixel + 1] = (byte)upperWeight;
+                }
+
+                heightBytes += MeasureCompressedTerrainBlock(compressed, heights);
+                weightBytes += MeasureCompressedTerrainBlock(compressed, weights);
+                encodedCells++;
+            }
+
+            Check(encodedCells == gridSide * gridSide && heightBytes > 0 && weightBytes > 0,
+                $"UC terrain storage: encoded all {gridSide * gridSide} cells with {heightSamples} height samples.");
+            Console.WriteLine($"UC terrain storage: sideKm={gridSide} encodedCells={encodedCells} heightSamples={heightSamples} " +
+                $"alphaResolution={alphaResolution} layers={layerCount} rawHeightBytes={(long)heights.Length * encodedCells} " +
+                $"rawWeightBytes={(long)weights.Length * encodedCells} gzipHeightBytes={heightBytes} gzipWeightBytes={weightBytes} " +
+                $"gzipTotalBytes={heightBytes + weightBytes}");
+        }
+
+        private static long MeasureCompressedTerrainBlock(MemoryStream output, byte[] bytes)
+        {
+            output.SetLength(0);
+            using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+                gzip.Write(bytes, 0, bytes.Length);
+            return output.Length;
         }
 
         private static Graph BuildGuideGraph(GuideGraph definition)

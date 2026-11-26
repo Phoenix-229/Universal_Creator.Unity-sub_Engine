@@ -538,8 +538,8 @@ namespace UniverseCreator.TerrainSystem
         /// before it has queued anything.
         /// </summary>
         /// <remarks>
-        /// RebuildAll and RebuildLayout both await EnsureFlatDataAsync, which yields every
-        /// few cells. The editor pump runs inside those yields, and until this existed it
+        /// RebuildAll can yield during climate preparation, and RebuildLayout yields
+        /// between flat terrain uploads. The editor pump runs inside those yields, and until this existed it
         /// saw an empty queue with no active workers, concluded the world had settled, and
         /// cleared IsRebuildingAll - retiring the progress item before the first chunk was
         /// even queued. That is why committing a field showed no background task: the only
@@ -895,6 +895,15 @@ namespace UniverseCreator.TerrainSystem
             if (o == null || o.graph == null) return;
             // UC-T01-09: direct callers must pass the same gate before EnsurePool/EnsureFlatDataAsync can write terrain.
             if (!o.ValidateGenerationGraph()) return;
+            o.RefreshProductMemoryLimit(); // UC fix: a budget edited after the first job must apply to this rebuild.
+            {
+                int recommendedMiB = o.RecommendedProductMemoryMiB();
+                long limitMiB = o.ProductMemory.LimitBytes / (1024 * 1024);
+                if (limitMiB < recommendedMiB)
+                    Debug.LogWarning("[Universe Creator] Generated Payload Budget is " + limitMiB + " MiB but this world (" + o.chunkCountPerSide + "x" + o.chunkCountPerSide +
+                        " cells at " + o.GetChunkResolution() + " samples) has a planning estimate of " + recommendedMiB + " MiB for accepted terrain plus working headroom. " +
+                        "Raise it or enable Auto-fit Budget on the Universe Creator World, otherwise chunk generation can fail with UC-T02-06.", o);
+            }
             CancelAll();
             bakeScheduler = o.GenerationScheduler;
             GenerationRunId run = requestedRun.IsAssigned ? requestedRun : bakeScheduler.BeginRun();
@@ -949,15 +958,8 @@ namespace UniverseCreator.TerrainSystem
                 if (rebuildVeg != null) rebuildVeg.ClearRegistry(); // UC climate restore: prerequisite rejection retains accepted scatter too.
                 EnsurePool(o);
 
-                // Give every cell a real TerrainData, layers and material BEFORE any worker
-                // is dispatched. A Terrain whose terrainData is still null draws nothing and
-                // offers no sculpt tools, so until this ran the graph path left the world
-                // invisible for the whole time the queue took to drain - the inspector showed
-                // a full terrain block over ground that was not there yet. The heights are
-                // flat for that window and get overwritten per cell as each bake lands.
-                await EnsureFlatDataAsync(o, run);
-                if (!o.GenerationScheduler.IsCurrent(run)) return; // UC-T02-01: a newer rebuild may have run while setup yielded.
-
+                // UC repair 37: graph cells get native data at staged commit. Existing
+                // accepted/sculptable surfaces stay attached until their replacement accepts.
                 centreCell = FocusCell(o);
 
                 // Edit mode holds the entire world; play mode holds a window around the
@@ -982,12 +984,7 @@ namespace UniverseCreator.TerrainSystem
 
                 built = true;
 
-                // Seam the flat baseline together now so the world reads as one surface from
-                // the first frame; PumpCompleted re-stitches as each bake changes resolution.
-                StitchGrid();
-
-                // Map the new layout immediately. It redraws flat here and is refreshed
-                // against the real surface once the generation queue drains.
+                // Each commit links its neighbours; settlement refreshes the final slice.
                 RefreshSliceMap();
             }
             finally
@@ -1002,8 +999,8 @@ namespace UniverseCreator.TerrainSystem
         /// UC-T02-01: actions from a replaced or cancelled world revision are discarded.
         /// </summary>
         /// <remarks>
-        /// RebuildAll is async: the terrains still hold the flat/stale baseline while
-        /// its bake is in flight, so anything that must read the final surface (the
+        /// RebuildAll is async: cells may still hold previous ground or have no native
+        /// surface while its bake is in flight, so anything that must read the final surface (the
         /// hydrology spawn) cannot run inline before RebuildAll. Arming it here defers
         /// it to the drain point in PumpCompleted, which is the moment every cell holds
         /// its final heights. A second arming before the first fires replaces it, so a
@@ -2645,7 +2642,19 @@ namespace UniverseCreator.TerrainSystem
                 SortPendingNearestFirst(o);
             }
 
-            while (pending.Count > 0 && activeWorkers < limit)
+            // UC fix: a finished worker used to keep its slot until its (frame-budgeted) native commit
+            // finished, so with Max Concurrent Chunks = 1 the CPU sat idle during every commit. Up to two
+            // cells waiting for commit no longer count against the worker limit; memory stays bounded
+            // because each finished tile is already budget-pinned.
+            int awaitingCommit = 0;
+            for (int w = 0; w < pool.Count; w++)
+            {
+                Chunk done = pool[w];
+                if (done.inFlight && done.workerDone && !done.applied) awaitingCommit++;
+            }
+            int commitOverlap = Mathf.Min(awaitingCommit, 2);
+
+            while (pending.Count > 0 && activeWorkers - commitOverlap < limit)
             {
                 Chunk c = pending[0];
                 pending.RemoveAt(0);
@@ -3008,7 +3017,9 @@ namespace UniverseCreator.TerrainSystem
                 catch (System.Exception ex)
                 {
                     lock (c) if (c.runId == myRun && !stop.StopRequested) c.generationFailure = "Chunk " + cell + " generation failed: " + ex.Message; // UC-T09-03: obsolete workers cannot poison a replacement's readiness.
-                    Debug.LogError("Universe Creator: chunk " + cell + " generation failed - " + ex);
+                    // UC fix: when the memory budget refuses work, say WHO holds the bytes so the cause is visible, not guessed.
+                    string liveSet = ex.Message.Contains("UC-T02-06") ? "\n[UC memory live set] " + o.ProductMemory.DescribeLiveSet() : string.Empty;
+                    Debug.LogError("Universe Creator: chunk " + cell + " generation failed - " + ex + liveSet);
                 }
                 finally
                 {
@@ -3223,17 +3234,7 @@ namespace UniverseCreator.TerrainSystem
                 c.applied = true;
                 freed = true;
 
-                // A superseded run left stale/partial data; skip applying it. It still
-                // cost a worker slot, so it does not count against the apply budget.
-                //
-                // The stand-in has to come down here even though nothing is being
-                // written. Dispatch put it up AND set terrain.drawHeightmap = false to
-                // hide the stale surface underneath it, and ApplyChunk is the only other
-                // place that undoes either - so a run that retires through this line
-                // used to leave the cell showing a preview that would never resolve,
-                // over ground that was switched off. drawHeightmap is a serialised
-                // Terrain field, so that state went into the scene file and came back
-                // after a restart as a world that had vanished.
+                // Failed or superseded work must retire its preview with the tile.
                 if (!willWrite)
                 {
                     DisposeCommit(c);
@@ -3519,6 +3520,7 @@ namespace UniverseCreator.TerrainSystem
             if (c.terrain == null) return;
             if (c.tile == null || !o.GenerationScheduler.IsCurrent(c.tile.RunId)) return; // UC-T02-01: final publication boundary.
 
+            bool firstSurface = c.data == null;
             c.data = prepared;
             c.restoredAcceptedData = null; // UC Scene/Play repair: publication supersedes the saved native identity; rollback restores it.
 
@@ -3556,7 +3558,13 @@ namespace UniverseCreator.TerrainSystem
             // Only the visibility invariants. Pushing the full settings block here
             // would revert a hand edit every time the cell regenerated, which for a
             // streaming LOD cell is constantly.
-            TerrainBuilder.EnsureRenderable(c.terrain, o);
+            if (firstSurface)
+            {
+                // UC repair 37: the first graph commit now owns initial settings, including native grass wind.
+                TerrainBuilder.ConfigureTerrain(c.terrain, o);
+                if (c.presentationParked) c.savedDrawFoliage = o.drawTreesAndFoliage;
+            }
+            else TerrainBuilder.EnsureRenderable(c.terrain, o);
 
             // Fidelity for this cell. The LOD mechanism is now the acuity pixel-error
             // budget (L-49/L-50), not resolution: every cell keeps the same
@@ -3867,7 +3875,11 @@ namespace UniverseCreator.TerrainSystem
                 if (c.terrain != null) { c.terrain.drawHeightmap = c.savedDrawHeightmap; c.terrain.drawTreesAndFoliage = c.savedDrawFoliage; }
                 c.presentationParked = false;
             }
-            if (c.presentationParked && c.terrain != null) { c.terrain.drawHeightmap = false; c.terrain.drawTreesAndFoliage = false; }
+            if (c.presentationParked && c.terrain != null)
+            {
+                c.terrain.drawHeightmap = c.savedDrawHeightmap && CanPresentGround(world, c, live);
+                c.terrain.drawTreesAndFoliage = false;
+            }
 
             // UC-T06-12: hierarchy parenting cannot exempt owned resources; preserve intentional inactive prefab states.
             foreach (var instance in c.scatterObjects)
@@ -4212,13 +4224,12 @@ namespace UniverseCreator.TerrainSystem
         //  WIREFRAME PREVIEW
         // =====================================================================
 
-        // Shows the low-poly stand-in over a chunk that is about to generate. The mesh
-        // holder is created once per chunk and then reused - the same pooling rule the
-        // terrains follow, for the same reason.
+        // Only active cold builds need a stand-in. Retire its mesh with the work so
+        // preview resources scale with the in-flight chunks rather than the full grid.
         private void ShowWireframe(UniverseCreatorObject o, Chunk c)
         {
-            if (!o.showWireframePreview || c.go == null) return;
-            if (c.appliedHeights != null) return; // UC-T02-04: keep the last accepted terrain visible while its replacement is staged.
+            if (!o.showWireframePreview || c.go == null || HasAcceptedTerrain(o, c) ||
+                !WantsChunkVisible(o, c, o.ShouldRenderWholeWorld())) return;
 
             if (wireframeMaterial == null)
                 wireframeMaterial = ChunkWireframePreview.CreateFallbackMaterial(wireframePreviewColour);
@@ -4230,7 +4241,8 @@ namespace UniverseCreator.TerrainSystem
             if (c.wireframeFilter == null)
             {
                 GameObject holder = new GameObject("WireframePreview");
-                holder.transform.SetParent(c.go.transform, false);
+                // UC repair 37: unbuilt native cells are inactive. The working preview must draw independently.
+                holder.transform.SetParent(transform, false);
                 holder.hideFlags = HideFlags.DontSave;
 
                 c.wireframeFilter = holder.AddComponent<MeshFilter>();
@@ -4258,19 +4270,21 @@ namespace UniverseCreator.TerrainSystem
 #endif
             }
 
-            ChunkWireframePreview.Build(c.wireframeFilter.sharedMesh, c.appliedHeights,
-                                        o.GetChunkSize(), o.maxHeightMeters);
-
+            c.wireframeFilter.transform.SetPositionAndRotation(c.go.transform.position, c.go.transform.rotation);
+            ChunkWireframePreview.Build(c.wireframeFilter.sharedMesh, null, o.GetChunkSize(), o.maxHeightMeters);
             c.wireframeRenderer.enabled = true;
-
-            // Hide the stale surface underneath, or the preview is invisible inside it.
-            if (c.terrain != null) c.terrain.drawHeightmap = false;
         }
 
         private void HideWireframe(Chunk c)
         {
-            if (c.wireframeRenderer != null) c.wireframeRenderer.enabled = false;
-            if (c.terrain != null && !c.presentationParked) c.terrain.drawHeightmap = true; // UC-T09-03: preview retirement cannot bypass a dependent-presentation hold.
+            if (c.wireframeFilter == null) return;
+            GameObject holder = c.wireframeFilter.gameObject;
+            Mesh mesh = c.wireframeFilter.sharedMesh;
+            c.wireframeFilter = null;
+            c.wireframeRenderer = null;
+            holder.SetActive(false);
+            if (Application.isPlaying) { Destroy(mesh); Destroy(holder); }
+            else { DestroyImmediate(mesh); DestroyImmediate(holder); }
         }
 
         // =====================================================================
@@ -5091,9 +5105,12 @@ namespace UniverseCreator.TerrainSystem
                     pool[i].tile = null;
                 }
 
-                // A cancelled chunk never reaches ApplyChunk, so drop the stand-in here
-                // or the terrain stays hidden behind a preview that will never resolve.
-                HideWireframe(pool[i]);
+                Chunk chunk = pool[i];
+                HideWireframe(chunk);
+                // UC repair 37: recover the draw flag left by a retired preview while
+                // respecting the independent dependency hold.
+                if (chunk.terrain != null && !chunk.presentationParked)
+                    chunk.terrain.drawHeightmap = true;
             }
             pending.Clear();
             ClearPendingScatter(); // UC-T06-12: cancel only pending replacements; accepted outputs/resources and user edits survive.

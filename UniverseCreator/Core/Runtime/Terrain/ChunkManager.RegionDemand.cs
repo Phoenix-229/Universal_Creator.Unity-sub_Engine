@@ -215,9 +215,9 @@ namespace UniverseCreator.TerrainSystem
             if (chunk.readinessCollider != null && chunk.readinessCollider.enabled != enabled) chunk.readinessCollider.enabled = enabled;
         }
 
-        private bool CanPresentChunk(UniverseCreatorObject world, Chunk chunk, bool live) => live &&
+        private bool CanPresentChunk(UniverseCreatorObject world, Chunk chunk, bool live, bool groundOnly = false) => live &&
             WantsChunkVisible(world, chunk, world != null && world.ShouldRenderWholeWorld()) &&
             (!WantsChunkCollision(world, chunk, world != null && world.ShouldRenderWholeWorld()) || HasAcceptedCollision(world, chunk, false)) &&
-            !chunk.presentationPending;
+            (groundOnly || !chunk.presentationPending);
     }
 }

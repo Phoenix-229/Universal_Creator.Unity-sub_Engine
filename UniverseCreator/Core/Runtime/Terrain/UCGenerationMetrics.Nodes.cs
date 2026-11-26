@@ -6,8 +6,7 @@ namespace UniverseCreator.TerrainSystem
 {
     public sealed partial class UCGenerationMetrics
     {
-        /// <summary>Detached counts and inclusive compute time for one node across tiles in a recorded world run.</summary>
-        /// <remarks>Compute milliseconds include upstream pulls and must not be summed as exclusive node cost.</remarks>
+        /// <summary>Detached counts and compute timings for one node across tiles in a recorded world run.</summary>
         [Serializable]
         public struct NodeTiming
         {
@@ -15,6 +14,8 @@ namespace UniverseCreator.TerrainSystem
             public long computes, localHits, retainedHits;
             /// <summary>Total inclusive compute time in milliseconds, including failed/cancelled attempts.</summary>
             public double inclusiveMilliseconds;
+            /// <summary>Total compute time in milliseconds after subtracting measured child node execution.</summary>
+            public double exclusiveMilliseconds;
         }
 
         /// <summary>Reads a measured node without allocating or beginning a world run.</summary>
@@ -34,12 +35,17 @@ namespace UniverseCreator.TerrainSystem
         internal sealed partial class RunRecord
         {
             private readonly Dictionary<string, NodeTiming> nodes = new Dictionary<string, NodeTiming>();
-            internal void RecordNode(string id, int kind, double milliseconds = 0)
+            internal void RecordNode(string id, int kind, double inclusiveMilliseconds = 0, double exclusiveMilliseconds = 0)
             {
                 lock (sync)
                 {
                     if (!nodes.TryGetValue(id, out var timing) && nodes.Count >= 256) return;
-                    if (kind == 0) { timing.computes++; timing.inclusiveMilliseconds += milliseconds; }
+                    if (kind == 0)
+                    {
+                        timing.computes++;
+                        timing.inclusiveMilliseconds += inclusiveMilliseconds;
+                        timing.exclusiveMilliseconds += exclusiveMilliseconds;
+                    }
                     else if (kind == 1) timing.localHits++;
                     else timing.retainedHits++;
                     nodes[id] = timing;

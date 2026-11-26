@@ -34,7 +34,10 @@ namespace UniverseCreator.TerrainSystem
             long samples = (long)chunk.resolution * chunk.resolution;
             long bytes = samples * 8 + (long)(chunk.resolution - 1) * (chunk.resolution - 1) * 2;
             TerrainData existing = chunk.data;
-            long oldAlphas = existing != null ? (long)existing.alphamapWidth * existing.alphamapHeight * Math.Max(minimumLayers, existing.alphamapLayers) : 0;
+            // A cold commit still assigns layers, even when the graph publishes no splat map.
+            long oldAlphas = existing != null
+                ? (long)existing.alphamapWidth * existing.alphamapHeight * Math.Max(minimumLayers, existing.alphamapLayers)
+                : 512L * 512L * Math.Max(1, minimumLayers);
             bytes += Math.Max(oldAlphas, outputs?.splatmap?.LongLength ?? 0) * 8;
             long details = 0;
             if (outputs != null) foreach (int[,] layer in outputs.detailLayers.Values) if (layer != null) details += layer.LongLength;
@@ -100,6 +103,11 @@ namespace UniverseCreator.TerrainSystem
         {
             // UC-T02-06: only native data allocated by this manager belongs to its teardown; imported/adopted assets survive.
             CancelAll();
+            if (wireframeMaterial != null)
+            {
+                if (Application.isPlaying) Destroy(wireframeMaterial);
+                else DestroyImmediate(wireframeMaterial);
+            }
             foreach (Chunk chunk in pool) { DropRetainedProducts(chunk); ReleaseAcceptedMemory(chunk); }
             ReapTerrainMemory();
             if (retiringTerrainMemory.Count > 0)

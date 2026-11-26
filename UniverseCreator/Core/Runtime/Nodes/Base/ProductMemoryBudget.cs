@@ -14,7 +14,7 @@ namespace UniverseCreator.Nodes
         {
             internal volatile object Product;
             internal long Managed, Native, Used;
-            internal int Pins;
+            internal int Pins, TransientRetainers;
             internal bool Retained;
             internal string Key;
         }
@@ -58,8 +58,17 @@ namespace UniverseCreator.Nodes
         private readonly object gate = new object();
         private readonly Dictionary<object, Entry> entries = new Dictionary<object, Entry>(Identity.Instance);
         private long managed, native, peak, clock, evictions;
-        /// <summary>Maximum admitted managed plus native payload bytes; fixed for this world's budget lifetime.</summary>
-        public long LimitBytes { get; }
+        private long limit;
+        /// <summary>Maximum admitted managed plus native payload bytes. UC fix: follows the world's authored MiB setting live (see <see cref="Resize"/>).</summary>
+        public long LimitBytes { get { return Interlocked.Read(ref limit); } }
+
+        /// <summary>UC fix: applies a new limit to a live budget. Pinned consumers are never evicted; a limit below the resident set only refuses new admissions until space frees.</summary>
+        /// <param name="newLimitBytes">Positive byte limit.</param>
+        public void Resize(long newLimitBytes)
+        {
+            if (newLimitBytes <= 0) throw new ArgumentOutOfRangeException(nameof(newLimitBytes));
+            lock (gate) Interlocked.Exchange(ref limit, newLimitBytes);
+        }
         /// <summary>Currently admitted managed payload estimate, including retained and pinned products.</summary>
         public long ManagedBytes { get { lock (gate) return managed; } }
         /// <summary>Explicit native reservations; excludes imported assets and untracked engine/driver overhead.</summary>
@@ -107,7 +116,7 @@ namespace UniverseCreator.Nodes
         public ProductMemoryBudget(long limitBytes)
         {
             if (limitBytes <= 0) throw new ArgumentOutOfRangeException(nameof(limitBytes));
-            LimitBytes = limitBytes;
+            limit = limitBytes;
         }
 
         /// <summary>Reserves bytes before an indivisible allocation; no product or native object is created or destroyed here.</summary>
@@ -145,7 +154,7 @@ namespace UniverseCreator.Nodes
             lock (gate)
             {
                 Entry entry = lease.Entry;
-                if (entry.Product == null || entry.Pins != 1 || entry.Retained ||
+                if (entry.Product == null || entry.Pins != 1 || entry.Retained || entry.TransientRetainers != 0 ||
                     !entries.TryGetValue(entry.Product, out Entry registered) || !ReferenceEquals(entry, registered) ||
                     entries.ContainsKey(product))
                     throw new InvalidOperationException("UC-T07-02: allocation reservation is not exclusively owned by this budget.");
@@ -170,13 +179,28 @@ namespace UniverseCreator.Nodes
             lock (gate) if (entry != null && entry.Product != null) entry.Retained = true;
         }
 
+        // UC repair 37: temporary window reuse is independently owned and remains evictable between consumers.
+        internal void RetainTransient(Entry entry)
+        {
+            lock (gate) entry.TransientRetainers++;
+        }
+
+        internal void ForgetTransient(Entry entry)
+        {
+            lock (gate)
+            {
+                if (entry.Product != null && --entry.TransientRetainers == 0 && entry.Pins == 0 && !entry.Retained)
+                    Remove(entry);
+            }
+        }
+
         internal void Forget(Entry entry)
         {
             lock (gate)
             {
                 if (entry == null || entry.Product == null) return;
                 entry.Retained = false;
-                if (entry.Pins == 0) Remove(entry);
+                if (entry.Pins == 0 && entry.TransientRetainers == 0) Remove(entry);
             }
         }
 
@@ -186,7 +210,11 @@ namespace UniverseCreator.Nodes
             lock (gate)
             {
                 var remove = new List<Entry>();
-                foreach (Entry entry in entries.Values) { entry.Retained = false; if (entry.Pins == 0) remove.Add(entry); }
+                foreach (Entry entry in entries.Values)
+                {
+                    entry.Retained = false;
+                    if (entry.Pins == 0 && entry.TransientRetainers == 0) remove.Add(entry);
+                }
                 foreach (Entry entry in remove) Remove(entry);
             }
         }
@@ -195,7 +223,7 @@ namespace UniverseCreator.Nodes
         {
             lock (gate)
             {
-                if (--entry.Pins == 0 && !entry.Retained) Remove(entry);
+                if (--entry.Pins == 0 && !entry.Retained && entry.TransientRetainers == 0) Remove(entry);
             }
         }
 
@@ -203,13 +231,15 @@ namespace UniverseCreator.Nodes
         {
             if (bytes > LimitBytes)
                 throw new InvalidOperationException("UC-T02-06: one payload requests " + bytes + " bytes above the " + LimitBytes + " byte budget.");
-            // Eviction order is LRU, then ordinal producer key; dictionary enumeration never decides a victim.
+            // Evict temporary window results before cross-bake results. Within each group use LRU, then ordinal key.
             while (bytes > LimitBytes - managed - native)
             {
                 Entry oldest = null;
                 foreach (Entry entry in entries.Values)
-                    if (entry.Pins == 0 && (oldest == null || entry.Used < oldest.Used ||
-                        (entry.Used == oldest.Used && string.CompareOrdinal(entry.Key, oldest.Key) < 0))) oldest = entry;
+                    if (entry.Pins == 0 && (oldest == null || (entry.Retained != oldest.Retained
+                        ? !entry.Retained
+                        : entry.Used < oldest.Used ||
+                            (entry.Used == oldest.Used && string.CompareOrdinal(entry.Key, oldest.Key) < 0)))) oldest = entry;
                 if (oldest == null)
                 {
                     // UC repair 30: admission never sleeps; queue work through the existing scheduler instead.

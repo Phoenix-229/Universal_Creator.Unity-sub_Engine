@@ -26,10 +26,14 @@ namespace UniverseCreator.Nodes
     public class GraphEvaluator
     {
         private readonly Graph graph;
+        private TileWindows.ProductCache windowProducts;
 
         // Nodes currently on the recursion stack. Guards against cycles that
         // slipped past Graph.WouldCreateCycle (e.g. hand-edited asset files).
         private readonly HashSet<string> visiting = new HashSet<string>();
+
+        // UC repair 37: nested pulls can cross evaluators when a node opens a wider tile view.
+        [ThreadStatic] private static long childComputeTicks;
 
         public GraphEvaluator(Graph graph)
         {
@@ -42,6 +46,8 @@ namespace UniverseCreator.Nodes
         }
 
         public Graph Graph { get { return graph; } }
+
+        internal GraphEvaluator CreateWindowEvaluator() => new GraphEvaluator(graph) { windowProducts = windowProducts };
 
         /// <summary>
         /// Runs the graph for one chunk. Pulls every output node in turn; each pull
@@ -64,7 +70,16 @@ namespace UniverseCreator.Nodes
 
             tile.Bind(this);
             visiting.Clear();
+            // UC repair 37: retired windows can share pure terrain without pinning it past this worker evaluation.
+            using var products = graph.compiledPlan != null && tile.MemoryBudget != null
+                ? new TileWindows.ProductCache(tile.MemoryBudget) : null;
+            windowProducts = products;
+            try { EvaluateOutputs(tile, stop, outputFilter); }
+            finally { windowProducts = null; }
+        }
 
+        private void EvaluateOutputs(TileData tile, StopToken stop, Func<Generator, bool> outputFilter)
+        {
             // UC-T01-08: compiled roots avoid graph scans and port-array construction for every tile.
             CompiledGraphPlan plan = graph.compiledPlan;
             int roots = plan != null ? plan.Outputs.Count : graph.nodes.Count;
@@ -248,8 +263,23 @@ namespace UniverseCreator.Nodes
                 return null;
             }
 
+            if (outputIndex == 0 && windowProducts != null && windowProducts.TryGet(tile, node, out object windowProduct))
+            {
+                tile.RecordLocalHit();
+                tile.metrics?.RecordNode(node.id, 1);
+                tile.SetCached(node.id, outputIndex, windowProduct);
+                return windowProduct; // Known pure terrain branches have no publications to replay.
+            }
+
             visiting.Add(node.id);
-            long nodeStarted = tile.metrics != null ? System.Diagnostics.Stopwatch.GetTimestamp() : 0; // UC-T05-08: no clock work when disabled.
+            var metrics = tile.metrics;
+            long nodeStarted = 0, previousChildTicks = 0;
+            if (metrics != null)
+            {
+                nodeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+                previousChildTicks = childComputeTicks;
+                childComputeTicks = 0;
+            }
             object product;
             try
             {
@@ -258,8 +288,14 @@ namespace UniverseCreator.Nodes
             }
             finally
             {
-                if (tile.metrics != null) tile.metrics.RecordNode(node.id, 0,
-                    (System.Diagnostics.Stopwatch.GetTimestamp() - nodeStarted) * 1000.0 / System.Diagnostics.Stopwatch.Frequency); // UC-T05-08: inclusive time also records failures.
+                if (metrics != null)
+                {
+                    long elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - nodeStarted;
+                    long ownTicks = elapsedTicks - childComputeTicks;
+                    childComputeTicks = previousChildTicks + elapsedTicks;
+                    double millisecondsPerTick = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    metrics.RecordNode(node.id, 0, elapsedTicks * millisecondsPerTick, ownTicks * millisecondsPerTick);
+                }
                 visiting.Remove(node.id);
             }
 
@@ -269,6 +305,8 @@ namespace UniverseCreator.Nodes
             if (product != null)
             {
                 tile.SetCached(node.id, outputIndex, product);
+                if (outputIndex == 0 && product is Matrix matrix)
+                    windowProducts?.Remember(graph, tile, node, matrix);
 
                 // T1: retain under the current hash so the next bake can forward it.
                 if (tile.retained != null && node.contentHash != 0UL)
